@@ -1,4 +1,5 @@
 use crate::chord::{Chord, Quality};
+use crate::conductor::Section;
 
 /// Number of `u32` words in an encoded event.
 pub const WORDS_PER_EVENT: usize = 4;
@@ -21,6 +22,28 @@ pub enum EngineEvent {
     ChordChanged(Option<Chord>),
     Beat { bar: u32, beat: u8 },
     Transport { playing: bool },
+    /// Style, section and energy changed; sent at the beat where it is heard.
+    Band(BandState),
+}
+
+/// What the band is doing, for the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BandState {
+    pub style: u8,
+    /// A style change queued for the next bar line.
+    pub next_style: Option<u8>,
+    pub playing: bool,
+    pub section: Section,
+    pub variation: u8,
+    /// The variation after the current intro, fill or rest.
+    pub next_variation: u8,
+    /// Queued for the next beat (fill) or bar line (intro, ending).
+    pub fill_pending: bool,
+    pub intro_pending: bool,
+    pub ending_pending: bool,
+    pub follow: bool,
+    /// 0..=255.
+    pub energy: u8,
 }
 
 mod op {
@@ -30,6 +53,7 @@ mod op {
     pub const CHORD_CHANGED: u32 = 4;
     pub const BEAT: u32 = 5;
     pub const TRANSPORT: u32 = 6;
+    pub const BAND: u32 = 7;
 }
 
 const NO_CHORD: u32 = 0xff;
@@ -55,6 +79,20 @@ impl EngineEvent {
             ],
             EngineEvent::Beat { bar, beat } => [op::BEAT, bar, beat as u32, frame],
             EngineEvent::Transport { playing } => [op::TRANSPORT, playing as u32, 0, frame],
+            EngineEvent::Band(s) => {
+                let section = Section::ALL.iter().position(|x| *x == s.section).unwrap_or(0) as u32;
+                let flags = s.playing as u32
+                    | (s.fill_pending as u32) << 1
+                    | (s.ending_pending as u32) << 2
+                    | (s.follow as u32) << 3
+                    | (s.intro_pending as u32) << 4;
+                [
+                    op::BAND,
+                    s.style as u32 | (s.next_style.unwrap_or(0xff) as u32) << 8 | section << 16 | (s.variation as u32) << 24,
+                    s.next_variation as u32 | flags << 8 | (s.energy as u32) << 16,
+                    frame,
+                ]
+            }
         }
     }
 
@@ -152,7 +190,28 @@ mod tests {
     fn encodes_chords() {
         let chord = Chord { root: 9, quality: Quality::Minor7, bass: 0 };
         let words = EngineEvent::ChordChanged(Some(chord)).encode(7);
-        assert_eq!(words, [op::CHORD_CHANGED, 9, 0 << 8 | 11, 7]);
+        assert_eq!(words, [op::CHORD_CHANGED, 9, 11, 7]);
         assert_eq!(EngineEvent::ChordChanged(None).encode(0)[1], NO_CHORD);
+    }
+
+    #[test]
+    fn encodes_band_state() {
+        let state = BandState {
+            style: 2,
+            next_style: None,
+            playing: true,
+            section: Section::Fill,
+            variation: 1,
+            next_variation: 2,
+            fill_pending: false,
+            intro_pending: true,
+            ending_pending: true,
+            follow: true,
+            energy: 200,
+        };
+        let [opcode, a, b, frame] = EngineEvent::Band(state).encode(5);
+        assert_eq!((opcode, frame), (op::BAND, 5));
+        assert_eq!(a, 2 | 0xff << 8 | 2 << 16 | 1 << 24);
+        assert_eq!(b, 2 | 0b11101 << 8 | 200 << 16);
     }
 }

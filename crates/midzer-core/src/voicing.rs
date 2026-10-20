@@ -16,6 +16,12 @@ impl Voicing {
         &self.notes[..self.len]
     }
 
+    /// Whether this voices exactly the chord's pitch classes.
+    pub fn contains_chord(&self, chord: &Chord) -> bool {
+        let pcs = chord.pitch_classes().take(MAX_VOICING_NOTES).fold(0u16, |m, pc| m | 1 << pc);
+        self.len > 0 && self.notes().iter().fold(0u16, |m, n| m | 1 << (n % 12)) == pcs
+    }
+
     pub fn center(&self) -> Option<f32> {
         (self.len > 0).then(|| self.notes().iter().map(|&n| n as f32).sum::<f32>() / self.len as f32)
     }
@@ -71,6 +77,8 @@ pub fn bass_note(chord: &Chord, tone: Tone) -> u8 {
         Tone::Root => 0,
         Tone::Third => find(&[4, 3, 5, 2], 7),
         Tone::Fifth => find(&[7, 6, 8], 7),
+        Tone::Sixth => 9,
+        Tone::Seventh => find(&[10, 11, 9], 10),
         Tone::Octave => 12,
     }
 }

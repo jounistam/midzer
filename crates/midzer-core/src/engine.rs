@@ -2,7 +2,6 @@ use crate::band::Band;
 use crate::chord::recognize;
 use crate::command::Command;
 use crate::event::{EngineEvent, EventBuffer, Timed};
-use crate::style::POP;
 
 /// MIDI channel for the player's own notes.
 pub const PLAYER_CHANNEL: u8 = 0;
@@ -22,7 +21,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(sample_rate: f32) -> Self {
-        Self { band: Band::new(&POP, sample_rate), held: [false; 128], split: 0, events: EventBuffer::default() }
+        Self { band: Band::new(sample_rate), held: [false; 128], split: 0, events: EventBuffer::default() }
     }
 
     pub fn handle(&mut self, cmd: Command) {
@@ -30,10 +29,13 @@ impl Engine {
             Command::NoteOn { note, velocity: 0 } | Command::NoteOff { note } => {
                 self.held[note as usize] = false;
                 self.events.push(0, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key: note });
+                self.band.set_keys_held(self.held.contains(&true));
             }
             Command::NoteOn { note, velocity } => {
                 self.held[note as usize] = true;
                 self.events.push(0, EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key: note, velocity });
+                self.band.note_played(velocity);
+                self.band.set_keys_held(true);
                 self.detect_chord();
             }
             Command::AllNotesOff => {
@@ -42,12 +44,20 @@ impl Engine {
                         self.events.push(0, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key: note });
                     }
                 }
+                self.band.set_keys_held(false);
             }
             Command::Play => self.band.play(&mut self.events),
             Command::Stop => self.band.stop(&mut self.events),
             Command::SetTempo { bpm } => self.band.set_tempo(bpm),
             Command::SetSplit { note } => self.split = note,
             Command::SetMute { channel, muted } => self.band.set_muted(channel, muted, &mut self.events),
+            Command::SetStyle { index } => self.band.set_style(index, &mut self.events),
+            Command::Section { request } => self.band.request(request, &mut self.events),
+            Command::SetFollow { on } => self.band.set_follow(on, &mut self.events),
+            Command::SetEnergy { energy } => self.band.set_energy(energy, &mut self.events),
+            Command::SetIdleMode { mode } => self.band.set_idle_mode(mode),
+            Command::SetLatency { ms } => self.band.set_latency(ms),
+            Command::SetClick { on } => self.band.set_click(on, &mut self.events),
             // Mixing is the synth's job; the host routes this one.
             Command::SetGain { .. } => {}
         }

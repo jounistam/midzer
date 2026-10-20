@@ -78,7 +78,7 @@ fn apply(synth: &mut Synthesizer, event: &EngineEvent) {
             synth.process_midi_message(channel as i32, 0xC0, program as i32, 0);
         }
         EngineEvent::Transport { playing: false } => synth.note_off_all(false),
-        EngineEvent::ChordChanged(_) | EngineEvent::Beat { .. } | EngineEvent::Transport { .. } => {}
+        EngineEvent::ChordChanged(_) | EngineEvent::Beat { .. } | EngineEvent::Transport { .. } | EngineEvent::Band(_) => {}
     }
 }
 

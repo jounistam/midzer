@@ -15,7 +15,17 @@
   - Onboarding, Home and Jam screens, and a PixiJS keyboard.
   - Part mutes and tap tempo.
   - Tests: Rust unit tests, a no-allocation test and Playwright e2e.
-- **Next: M2** (a reactive band): sections/fills/ending, energy from velocity and density, stop detection, more styles, latency calibration.
+- **M2 a reactive band:** done (2026-10-21).
+  - Conductor state machine (`conductor.rs`): Intro, variations A/B/C, Fill, Ending and Rest. Fills start on the next beat; other changes land on the bar line.
+  - "Follow me": energy comes from velocity and note density. It scales every part's velocity and picks the variation, with hysteresis, a two-bar minimum and a fill into each change. A manual energy slider turns following off.
+  - Stop detection: after two quiet bars the band fills and rests on the pad until the player comes back, or plays the ending, or keeps going (a setting). Held keys count as playing; silence before the first note doesn't.
+  - Six styles (Pop, Rock, Funk, Bossa, Ballad, Blues), written in a step-grid notation in `style.rs` and built once at startup. They include shuffle (12-step) grids, two-bar patterns, arpeggios and per-style drum kits. Style changes wait for the bar line.
+  - Latency calibration: tap along with a click. Chords played just after a beat (within the latency plus 60 ms) count for that beat instead of the next.
+  - UI: section pads, an energy meter/slider, a style picker, a status line, the onboarding vibe picker and settings for idle mode and calibration.
+- **Next: M3** (songs).
+- Open from M2:
+  - The styles need a listening pass on real speakers. Nobody has auditioned them yet; only levels and clipping were checked, with `pnpm demo`.
+  - The onboarding vibe cards have no audio preview.
 
 ## Deviations from the original plan
 - No wasm-pack or wasm-bindgen. `midzer-wasm` exposes raw `extern "C"` functions, because the generated glue needs browser features that the AudioWorklet scope lacks.

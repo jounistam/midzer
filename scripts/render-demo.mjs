@@ -1,6 +1,6 @@
 // Renders the band offline through the release wasm build to a WAV file, for
 // listening checks without a browser:
-//   node scripts/render-demo.mjs [out.wav] [bpm]
+//   node scripts/render-demo.mjs [out.wav] [bpm] [style index]
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const out = process.argv[2] ?? join(root, 'demo.wav');
 const bpm = Number(process.argv[3] ?? 100);
+const style = Number(process.argv[4] ?? 0);
 const SR = 48_000;
 const BLOCK = 128;
 
@@ -35,11 +36,12 @@ const progression = [
   [41, 45, 48],
 ];
 const framesPerBar = Math.round(((SR * 60) / bpm) * 4);
-const bars = 9;
+const bars = 10;
 const totalBlocks = Math.ceil((framesPerBar * bars) / BLOCK);
 
+cmd(10, style); // set style
 cmd(7, f32bits(bpm));
-cmd(5); // play
+cmd(11, 0); // intro, which starts the band
 
 const left = new Float32Array(totalBlocks * BLOCK);
 const right = new Float32Array(totalBlocks * BLOCK);
@@ -49,17 +51,20 @@ const chords = [];
 for (let b = 0; b < totalBlocks; b++) {
   const frame = b * BLOCK;
   const bar = Math.floor((frame + framesPerBar / 16) / framesPerBar);
-  const chord = bar < bars - 1 ? progression[bar % progression.length] : null;
+  const chord = bar >= 1 && bar < bars - 2 ? progression[(bar - 1) % progression.length] : null;
+  // Variation B halfway through, then the ending instead of a hard stop.
+  const reaches = (bar) => frame <= framesPerBar * bar && framesPerBar * bar < frame + BLOCK;
+  if (reaches(4)) cmd(11, 2);
+  if (reaches(7)) cmd(11, 5);
   if (chord && chord !== held.chord) {
     held.forEach(noteOff);
     chord.forEach(noteOn);
     held = [...chord];
     held.chord = chord;
   }
-  if (bar === bars - 1 && held.length) {
+  if (!chord && held.length) {
     held.forEach(noteOff);
     held = [];
-    cmd(6); // stop on the last bar
   }
   const count = x.mz_process(host, BLOCK);
   events += count;

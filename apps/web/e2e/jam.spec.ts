@@ -46,12 +46,39 @@ test('first run: onboarding to a band that follows a chord', async ({ page }) =>
   await expect(page.locator('.tempo-value')).toContainText('101');
   for (const key of ['s', 'f', 'h']) await page.keyboard.down(key); // D F A
   await expect(page.locator('.chord-name')).toHaveText('Dm', { timeout: 5_000 });
-  await page.waitForTimeout(700);
+
+  // Variation C: a fill first, then C from the next bar line.
+  const sectionLine = page.locator('.section-line');
+  await page.getByRole('button', { name: 'Variation C' }).click();
+  await expect(sectionLine).toHaveText(/→ C|Fill/, { timeout: 3_000 });
+  await expect(sectionLine).toHaveText('Pop · C', { timeout: 6_000 });
+  await expect(page.getByRole('button', { name: 'Follow me' })).toHaveAttribute('aria-pressed', 'false');
+  await page.waitForTimeout(400);
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/4-jam.png` });
+
+  // Styles change on the bar line too.
+  await page.getByLabel('Style').selectOption({ label: 'Funk · Tight 16ths, slap bass, clav' });
+  await expect(sectionLine).toHaveText(/^Funk · /, { timeout: 6_000 });
   for (const key of ['s', 'f', 'h']) await page.keyboard.up(key);
 
-  await page.keyboard.press('Space');
-  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
+  // The ending plays one bar, then the band stops by itself.
+  await page.getByRole('button', { name: 'Ending' }).click();
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible({ timeout: 10_000 });
+
+  // Timing calibration: tap with the click.
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Calibrate' }).click();
+  await page.getByRole('button', { name: 'Start' }).click();
+  const beatMs = 60_000 / 101;
+  for (let i = 0; i < 8; i++) {
+    await page.waitForTimeout(beatMs);
+    await page.keyboard.press('k');
+  }
+  await expect(page.getByText(/Your taps land|too uneven/)).toBeVisible();
+  if (await page.getByRole('button', { name: 'Save' }).isVisible()) {
+    await page.getByRole('button', { name: 'Save' }).click();
+    await expect(page.getByText(/Calibrated: /)).toBeVisible();
+  }
 
   expect(errors).toEqual([]);
 });

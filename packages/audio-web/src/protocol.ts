@@ -15,7 +15,32 @@ const Cmd = {
   SetTempo: 7,
   SetSplit: 8,
   SetMute: 9,
+  SetStyle: 10,
+  Section: 11,
+  SetFollow: 12,
+  SetEnergy: 13,
+  SetIdleMode: 14,
+  SetLatency: 15,
+  SetClick: 16,
 } as const;
+
+/** Built-in styles in engine order; mirrors `styles()` in crates/midzer-core/src/style.rs. */
+export const STYLES = [
+  { name: 'Pop', bpm: 100, blurb: 'Straight 8ths, warm piano' },
+  { name: 'Rock', bpm: 120, blurb: 'Driving drums, crunchy guitar' },
+  { name: 'Funk', bpm: 104, blurb: 'Tight 16ths, slap bass, clav' },
+  { name: 'Bossa', bpm: 140, blurb: 'Brushes, nylon guitar, clave' },
+  { name: 'Ballad', bpm: 72, blurb: 'Piano arpeggios, soft strings' },
+  { name: 'Blues', bpm: 96, blurb: 'Shuffle, boogie bass, organ' },
+] as const;
+
+/** Section requests; mirrors `request_code` in command.rs. */
+export type SectionRequest = 'intro' | 'A' | 'B' | 'C' | 'fill' | 'ending';
+const SECTION_REQUESTS: readonly SectionRequest[] = ['intro', 'A', 'B', 'C', 'fill', 'ending'];
+
+/** What the band does when the player stops; mirrors `IDLE_MODES` in command.rs. */
+export type IdleMode = 'keepPlaying' | 'rest' | 'end';
+const IDLE_MODES: readonly IdleMode[] = ['keepPlaying', 'rest', 'end'];
 
 export type EngineCommand =
   | { type: 'noteOn'; note: number; velocity: number }
@@ -27,7 +52,19 @@ export type EngineCommand =
   | { type: 'setTempo'; bpm: number }
   /** Notes below `note` form chords; 0 uses the whole keyboard. */
   | { type: 'setSplit'; note: number }
-  | { type: 'setMute'; channel: number; muted: boolean };
+  | { type: 'setMute'; channel: number; muted: boolean }
+  /** While playing, the style changes on the next bar line. */
+  | { type: 'setStyle'; index: number }
+  | { type: 'section'; request: SectionRequest }
+  /** Whether energy and variation follow the player's touch. */
+  | { type: 'setFollow'; on: boolean }
+  /** Energy 0..1, used while not following. */
+  | { type: 'setEnergy'; energy: number }
+  | { type: 'setIdleMode'; mode: IdleMode }
+  /** How late (ms) the player's notes arrive after the beat they meant. */
+  | { type: 'setLatency'; ms: number }
+  /** A click on every beat instead of the band, for calibration. */
+  | { type: 'setClick'; on: boolean };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -56,6 +93,20 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.SetSplit, cmd.note, 0, 0];
     case 'setMute':
       return [Cmd.SetMute, cmd.channel, cmd.muted ? 1 : 0, 0];
+    case 'setStyle':
+      return [Cmd.SetStyle, cmd.index, 0, 0];
+    case 'section':
+      return [Cmd.Section, SECTION_REQUESTS.indexOf(cmd.request), 0, 0];
+    case 'setFollow':
+      return [Cmd.SetFollow, cmd.on ? 1 : 0, 0, 0];
+    case 'setEnergy':
+      return [Cmd.SetEnergy, floatBits(cmd.energy), 0, 0];
+    case 'setIdleMode':
+      return [Cmd.SetIdleMode, IDLE_MODES.indexOf(cmd.mode), 0, 0];
+    case 'setLatency':
+      return [Cmd.SetLatency, floatBits(cmd.ms), 0, 0];
+    case 'setClick':
+      return [Cmd.SetClick, cmd.on ? 1 : 0, 0, 0];
   }
 }
 
@@ -81,13 +132,38 @@ export interface ChordInfo {
   name: string;
 }
 
+/** Mirrors `Section::ALL` in crates/midzer-core/src/conductor.rs. */
+export type Section = 'intro' | 'main' | 'fill' | 'ending' | 'rest';
+const SECTIONS: readonly Section[] = ['intro', 'main', 'fill', 'ending', 'rest'];
+export const VARIATION_NAMES = ['A', 'B', 'C'] as const;
+
+/** Mirrors `BandState` in crates/midzer-core/src/event.rs. */
+export interface BandState {
+  style: number;
+  /** A style change queued for the next bar line. */
+  nextStyle: number | null;
+  playing: boolean;
+  section: Section;
+  variation: number;
+  /** The variation after the current intro, fill or rest. */
+  nextVariation: number;
+  /** Queued for the next beat (fill) or bar line (intro, ending). */
+  fillPending: boolean;
+  introPending: boolean;
+  endingPending: boolean;
+  follow: boolean;
+  /** 0..1 */
+  energy: number;
+}
+
 export type EngineEvent =
   | { type: 'noteOn'; channel: number; key: number; velocity: number }
   | { type: 'noteOff'; channel: number; key: number }
   | { type: 'programChange'; channel: number; program: number }
   | { type: 'chord'; chord: ChordInfo | null }
   | { type: 'beat'; bar: number; beat: number }
-  | { type: 'transport'; playing: boolean };
+  | { type: 'transport'; playing: boolean }
+  | { type: 'band'; state: BandState };
 
 /** An event plus the AudioContext frame at which it sounds. */
 export type TimedEvent = EngineEvent & { frame: number };
@@ -120,6 +196,24 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
       return { type: 'beat', bar: a, beat: b, frame };
     case 6:
       return { type: 'transport', playing: a !== 0, frame };
+    case 7: {
+      const nextStyle = (a >> 8) & 0xff;
+      const flags = (b >> 8) & 0xff;
+      const state: BandState = {
+        style: a & 0xff,
+        nextStyle: nextStyle === 0xff ? null : nextStyle,
+        section: SECTIONS[(a >> 16) & 0xff] ?? 'main',
+        variation: a >>> 24,
+        nextVariation: b & 0xff,
+        playing: (flags & 1) !== 0,
+        fillPending: (flags & 2) !== 0,
+        endingPending: (flags & 4) !== 0,
+        follow: (flags & 8) !== 0,
+        introPending: (flags & 16) !== 0,
+        energy: ((b >> 16) & 0xff) / 255,
+      };
+      return { type: 'band', state, frame };
+    }
     default:
       return null;
   }

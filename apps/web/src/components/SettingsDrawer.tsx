@@ -1,16 +1,21 @@
-import { useEffect, useRef } from 'react';
-import { setMidiOutput, setSplit, setVolume, SPLIT_OPTIONS, useSession } from '../session';
+import { useEffect, useRef, useState } from 'react';
+import { IDLE_OPTIONS, playerLatencyMs, setIdleMode, setMidiOutput, setSplit, setVolume, SPLIT_OPTIONS, useSession } from '../session';
+import { Calibration } from './Calibration';
 
 export function SettingsDrawer({ onClose }: { onClose: () => void }) {
   const s = useSession();
   const ref = useRef<HTMLDivElement>(null);
+  const [calibrating, setCalibrating] = useState(false);
 
   useEffect(() => {
     ref.current?.focus();
+    if (calibrating) return;
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, calibrating]);
+
+  if (calibrating) return <Calibration onClose={() => setCalibrating(false)} />;
 
   return (
     <div className="drawer-backdrop" onClick={onClose}>
@@ -40,6 +45,33 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
             onChange={(e) => setVolume(Number(e.target.value))}
           />
         </label>
+
+        <label className="setting">
+          <span>
+            When you stop playing
+            <small>After two quiet bars.</small>
+          </span>
+          <select value={s.idleMode} onChange={(e) => setIdleMode(e.target.value as (typeof IDLE_OPTIONS)[number]['mode'])}>
+            {IDLE_OPTIONS.map((o) => (
+              <option key={o.mode} value={o.mode}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="setting">
+          <span>
+            Timing
+            <small>
+              {s.tapOffsetMs === null ? 'Not calibrated' : `Calibrated: ${s.tapOffsetMs > 0 ? '+' : ''}${s.tapOffsetMs} ms`}
+              {s.audio === 'ready' && ` · ${playerLatencyMs()} ms total`}
+            </small>
+          </span>
+          <button className="btn btn-secondary" onClick={() => setCalibrating(true)} disabled={s.audio !== 'ready'}>
+            Calibrate
+          </button>
+        </div>
 
         <h3 className="label">Advanced</h3>
 

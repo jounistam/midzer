@@ -1,3 +1,5 @@
+use crate::conductor::{IdleMode, Request};
+
 /// Number of `u32` words in an encoded command.
 pub const WORDS_PER_COMMAND: usize = 4;
 
@@ -19,6 +21,19 @@ pub enum Command {
     SetSplit { note: u8 },
     /// Silences or restores the band part on `channel`.
     SetMute { channel: u8, muted: bool },
+    /// Selects a built-in style by index; while playing it changes on the next bar.
+    SetStyle { index: u8 },
+    /// Intro, a variation, a fill or the ending. Intro while stopped starts the band.
+    Section { request: Request },
+    /// Whether energy and variation follow the player's touch.
+    SetFollow { on: bool },
+    /// Energy 0..=1 used while not following.
+    SetEnergy { energy: f32 },
+    SetIdleMode { mode: IdleMode },
+    /// How late, in ms, the player's notes arrive after the beat they meant.
+    SetLatency { ms: f32 },
+    /// A click on every beat instead of the band, for latency calibration.
+    SetClick { on: bool },
 }
 
 mod op {
@@ -31,7 +46,35 @@ mod op {
     pub const SET_TEMPO: u32 = 7;
     pub const SET_SPLIT: u32 = 8;
     pub const SET_MUTE: u32 = 9;
+    pub const SET_STYLE: u32 = 10;
+    pub const SECTION: u32 = 11;
+    pub const SET_FOLLOW: u32 = 12;
+    pub const SET_ENERGY: u32 = 13;
+    pub const SET_IDLE_MODE: u32 = 14;
+    pub const SET_LATENCY: u32 = 15;
+    pub const SET_CLICK: u32 = 16;
 }
+
+fn request_code(request: Request) -> u32 {
+    match request {
+        Request::Intro => 0,
+        Request::Variation(v) => 1 + v as u32,
+        Request::Fill => 4,
+        Request::Ending => 5,
+    }
+}
+
+fn request_from(code: u32) -> Option<Request> {
+    match code {
+        0 => Some(Request::Intro),
+        1..=3 => Some(Request::Variation(code as u8 - 1)),
+        4 => Some(Request::Fill),
+        5 => Some(Request::Ending),
+        _ => None,
+    }
+}
+
+const IDLE_MODES: [IdleMode; 3] = [IdleMode::KeepPlaying, IdleMode::Rest, IdleMode::End];
 
 impl Command {
     pub fn encode(self) -> [u32; WORDS_PER_COMMAND] {
@@ -45,6 +88,13 @@ impl Command {
             Command::SetTempo { bpm } => [op::SET_TEMPO, bpm.to_bits(), 0, 0],
             Command::SetSplit { note } => [op::SET_SPLIT, note as u32, 0, 0],
             Command::SetMute { channel, muted } => [op::SET_MUTE, channel as u32, muted as u32, 0],
+            Command::SetStyle { index } => [op::SET_STYLE, index as u32, 0, 0],
+            Command::Section { request } => [op::SECTION, request_code(request), 0, 0],
+            Command::SetFollow { on } => [op::SET_FOLLOW, on as u32, 0, 0],
+            Command::SetEnergy { energy } => [op::SET_ENERGY, energy.to_bits(), 0, 0],
+            Command::SetIdleMode { mode } => [op::SET_IDLE_MODE, IDLE_MODES.iter().position(|m| *m == mode).unwrap_or(0) as u32, 0, 0],
+            Command::SetLatency { ms } => [op::SET_LATENCY, ms.to_bits(), 0, 0],
+            Command::SetClick { on } => [op::SET_CLICK, on as u32, 0, 0],
         }
     }
 
@@ -63,6 +113,13 @@ impl Command {
             op::SET_TEMPO => Some(Command::SetTempo { bpm: float(a)? }),
             op::SET_SPLIT => Some(Command::SetSplit { note: midi(a)? }),
             op::SET_MUTE => Some(Command::SetMute { channel: u8::try_from(a).ok().filter(|c| *c < 16)?, muted: b != 0 }),
+            op::SET_STYLE => Some(Command::SetStyle { index: u8::try_from(a).ok()? }),
+            op::SECTION => Some(Command::Section { request: request_from(a)? }),
+            op::SET_FOLLOW => Some(Command::SetFollow { on: a != 0 }),
+            op::SET_ENERGY => Some(Command::SetEnergy { energy: float(a)? }),
+            op::SET_IDLE_MODE => Some(Command::SetIdleMode { mode: *IDLE_MODES.get(a as usize)? }),
+            op::SET_LATENCY => Some(Command::SetLatency { ms: float(a)? }),
+            op::SET_CLICK => Some(Command::SetClick { on: a != 0 }),
             _ => None,
         }
     }
@@ -84,6 +141,16 @@ mod tests {
             Command::SetTempo { bpm: 96.5 },
             Command::SetSplit { note: 54 },
             Command::SetMute { channel: 9, muted: true },
+            Command::SetStyle { index: 3 },
+            Command::Section { request: Request::Intro },
+            Command::Section { request: Request::Variation(2) },
+            Command::Section { request: Request::Fill },
+            Command::Section { request: Request::Ending },
+            Command::SetFollow { on: true },
+            Command::SetEnergy { energy: 0.75 },
+            Command::SetIdleMode { mode: IdleMode::End },
+            Command::SetLatency { ms: 42.5 },
+            Command::SetClick { on: true },
         ] {
             assert_eq!(Command::decode(cmd.encode()), Some(cmd));
         }
@@ -95,5 +162,7 @@ mod tests {
         assert_eq!(Command::decode([op::NOTE_ON, 128, 100, 0]), None);
         assert_eq!(Command::decode([op::SET_GAIN, f32::NAN.to_bits(), 0, 0]), None);
         assert_eq!(Command::decode([op::SET_TEMPO, f32::INFINITY.to_bits(), 0, 0]), None);
+        assert_eq!(Command::decode([op::SECTION, 6, 0, 0]), None);
+        assert_eq!(Command::decode([op::SET_IDLE_MODE, 3, 0, 0]), None);
     }
 }

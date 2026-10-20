@@ -1,5 +1,7 @@
-import type { BandPart } from '@midzer/audio-web';
-import { setTempo, tapTempo, toggleMute, togglePlay, useSession } from '../session';
+import type { BandPart, SectionRequest } from '@midzer/audio-web';
+import type { CSSProperties } from 'react';
+import { padState } from './bandStatus';
+import { requestSection, setEnergy, setFollow, setTempo, tapTempo, toggleMute, togglePlay, useSession } from '../session';
 
 const PARTS: { part: BandPart; label: string }[] = [
   { part: 'drums', label: 'Drums' },
@@ -66,13 +68,92 @@ export function BandMutes() {
   );
 }
 
+const PADS: { request: SectionRequest; label: string }[] = [
+  { request: 'intro', label: 'Intro' },
+  { request: 'A', label: 'A' },
+  { request: 'B', label: 'B' },
+  { request: 'C', label: 'C' },
+  { request: 'fill', label: 'Fill' },
+  { request: 'ending', label: 'Ending' },
+];
+
+export function SectionPads() {
+  const band = useSession((s) => s.band);
+  const ready = useSession((s) => s.audio === 'ready');
+  return (
+    <div className="control-group">
+      <p className="label">Sections</p>
+      <div className="pad-grid">
+        {PADS.map(({ request, label }) => {
+          const state = padState(request, band);
+          return (
+            <button
+              key={request}
+              className={`section-pad ${state}`}
+              aria-pressed={state !== 'off'}
+              aria-label={request.length === 1 ? `Variation ${label}` : label}
+              title={state === 'queued' ? 'Starts on the next bar' : undefined}
+              disabled={!ready}
+              onClick={() => requestSection(request)}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+const energyFill = (energy: number): CSSProperties => {
+  const pct = `${Math.round(energy * 100)}%`;
+  return {
+    background: `linear-gradient(90deg, var(--color-accent-default), var(--color-primary-default) ${pct}, var(--color-surface-track) ${pct})`,
+  };
+};
+
+export function EnergyControl() {
+  const energy = useSession((s) => s.band.energy);
+  const follow = useSession((s) => s.band.follow);
+  return (
+    <div className="control-group">
+      <div className="control-head">
+        <p className="label" id="energy-label">
+          Energy
+        </p>
+        <button
+          className={`toggle ${follow ? 'on' : ''}`}
+          aria-pressed={follow}
+          onClick={() => setFollow(!follow)}
+          title="Energy and variation follow how hard and how much you play"
+        >
+          Follow me
+        </button>
+      </div>
+      <input
+        className={`energy ${follow ? 'following' : ''}`}
+        type="range"
+        min={0}
+        max={1}
+        step={0.01}
+        value={energy}
+        aria-labelledby="energy-label"
+        aria-valuetext={`${Math.round(energy * 100)}%${follow ? ', following you' : ''}`}
+        style={energyFill(energy)}
+        onChange={(e) => setEnergy(Number(e.target.value))}
+      />
+    </div>
+  );
+}
+
 export function ControlPanel() {
   return (
     <aside className="panel control-panel">
       <PlayButton className="full" />
+      <SectionPads />
+      <EnergyControl />
       <TempoControl />
       <BandMutes />
-      <p className="panel-note">Sections, fills and energy come in the next update.</p>
     </aside>
   );
 }

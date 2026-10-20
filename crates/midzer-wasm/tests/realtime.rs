@@ -4,7 +4,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use midzer_core::Command;
+use midzer_core::{Command, IdleMode, Request};
 use midzer_wasm::{BLOCK_FRAMES, Host};
 
 struct CountingAlloc;
@@ -42,16 +42,26 @@ fn playing_band_renders_without_allocating() {
     }
 
     command(&mut host, Command::SetTempo { bpm: 140.0 });
+    command(&mut host, Command::SetIdleMode { mode: IdleMode::Rest });
     command(&mut host, Command::Play);
-    host.process(BLOCK_FRAMES); // warm-up
+    host.process(BLOCK_FRAMES); // warm-up; also builds the styles
 
     COUNTING.store(true, Ordering::Relaxed);
     let chords: [&[u8]; 4] = [&[48, 52, 55], &[45, 48, 52], &[41, 45, 48], &[43, 47, 50, 53]];
     let mut events = 0;
-    for bar in 0..32 {
+    for bar in 0..48 {
         let chord = chords[bar % chords.len()];
-        for &note in chord {
-            command(&mut host, Command::NoteOn { note, velocity: 90 });
+        // Every style, section and a silent stretch that rests the band.
+        match bar % 8 {
+            0 => command(&mut host, Command::SetStyle { index: (bar / 8 % 6) as u8 }),
+            2 => command(&mut host, Command::Section { request: Request::Variation(2) }),
+            4 => command(&mut host, Command::Section { request: Request::Fill }),
+            5 => command(&mut host, Command::SetFollow { on: true }),
+            _ => {}
+        }
+        let silent = bar % 8 == 6 || bar % 8 == 7;
+        for &note in chord.iter().filter(|_| !silent) {
+            command(&mut host, Command::NoteOn { note, velocity: 40 + (bar % 40) as u8 * 2 });
         }
         for _ in 0..(48_000 * 60 / 140 * 4 / BLOCK_FRAMES) {
             events += host.process(BLOCK_FRAMES);
@@ -60,6 +70,12 @@ fn playing_band_renders_without_allocating() {
             command(&mut host, Command::NoteOff { note });
         }
     }
+    command(&mut host, Command::Section { request: Request::Ending });
+    for _ in 0..(48_000 * 60 / 140 * 8 / BLOCK_FRAMES) {
+        host.process(BLOCK_FRAMES);
+    }
+    command(&mut host, Command::Section { request: Request::Intro });
+    host.process(BLOCK_FRAMES);
     command(&mut host, Command::Stop);
     host.process(BLOCK_FRAMES);
     COUNTING.store(false, Ordering::Relaxed);

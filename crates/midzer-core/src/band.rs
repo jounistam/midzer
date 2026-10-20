@@ -1,8 +1,10 @@
-//! The backing band: plays a style's patterns over the current chord.
+//! The backing band: plays a style's patterns over the current chord, in the
+//! section the conductor picks.
 
 use crate::chord::Chord;
-use crate::event::{EngineEvent, EventBuffer};
-use crate::style::{BEATS_PER_BAR, Hit, Part, PartKind, PPQ, Step, Style, TICKS_PER_BAR};
+use crate::conductor::{Conductor, IdleMode, Request, Section};
+use crate::event::{BandState, DRUM_CHANNEL, EngineEvent, EventBuffer};
+use crate::style::{BEATS_PER_BAR, CRASH, Hit, PPQ, Part, PartKind, Pattern, Step, Style, TICKS_PER_BAR, WOOD_BLOCK, styles};
 use crate::voicing::{Voicing, bass_note, voice_near};
 
 const MAX_SOUNDING: usize = 64;
@@ -10,17 +12,24 @@ const KEYS_RANGE: (u8, u8) = (55, 79);
 const PAD_RANGE: (u8, u8) = (48, 72);
 const KEYS_HOME: f32 = 64.0;
 const PAD_HOME: f32 = 60.0;
+/// Human slack on top of the measured latency when latching a late chord.
+const LATE_SLACK_MS: f32 = 60.0;
 
 #[derive(Clone, Copy, Default)]
 struct Sounding {
     active: bool,
     channel: u8,
     key: u8,
+    on_tick: f64,
     off_tick: f64,
 }
 
 pub struct Band {
     style: &'static Style,
+    style_index: u8,
+    /// A style change waiting for the next bar line.
+    pending_style: Option<u8>,
+    conductor: Conductor,
     sample_rate: f32,
     bpm: f32,
     playing: bool,
@@ -39,6 +48,14 @@ pub struct Band {
     sounding: [Sounding; MAX_SOUNDING],
     /// Bit per MIDI channel.
     muted: u16,
+    keys_held: bool,
+    /// How late the player's notes arrive after the beat they meant, from
+    /// output latency and reaction time.
+    latency_ms: f32,
+    /// Plays only a click on every beat, for latency calibration.
+    click: bool,
+    /// The state last reported to the UI.
+    published: Option<BandState>,
 }
 
 /// Converts song positions within the current block to frame offsets.
@@ -66,9 +83,13 @@ impl BlockClock {
 }
 
 impl Band {
-    pub fn new(style: &'static Style, sample_rate: f32) -> Self {
+    pub fn new(sample_rate: f32) -> Self {
+        let style = &styles()[0];
         Self {
             style,
+            style_index: 0,
+            pending_style: None,
+            conductor: Conductor::default(),
             sample_rate,
             bpm: style.default_bpm,
             playing: false,
@@ -81,6 +102,10 @@ impl Band {
             pad: Voicing::default(),
             sounding: [Sounding::default(); MAX_SOUNDING],
             muted: 0,
+            keys_held: false,
+            latency_ms: 30.0,
+            click: false,
+            published: None,
         }
     }
 
@@ -90,6 +115,11 @@ impl Band {
 
     pub fn chord(&self) -> Option<Chord> {
         self.chord
+    }
+
+    #[cfg(test)]
+    pub fn conductor(&self) -> &Conductor {
+        &self.conductor
     }
 
     pub fn set_tempo(&mut self, bpm: f32) {
@@ -103,9 +133,13 @@ impl Band {
             block_start: self.frame,
             anchor_frame: self.anchor_frame,
             anchor_tick: self.anchor_tick,
-            ticks_per_frame: self.bpm as f64 / 60.0 * PPQ as f64 / self.sample_rate as f64,
+            ticks_per_frame: self.ticks_per_second() / self.sample_rate as f64,
             frames,
         }
+    }
+
+    fn ticks_per_second(&self) -> f64 {
+        self.bpm as f64 / 60.0 * PPQ as f64
     }
 
     pub fn set_muted(&mut self, channel: u8, muted: bool, out: &mut EventBuffer) {
@@ -118,17 +152,88 @@ impl Band {
         }
     }
 
-    /// The player formed a new chord. While stopped it applies immediately;
-    /// while playing it is latched on the next beat so the band stays in time.
+    /// Switches style now while stopped, or on the next bar line while playing.
+    pub fn set_style(&mut self, index: u8, out: &mut EventBuffer) {
+        let Some(style) = styles().get(index as usize) else { return };
+        if self.playing {
+            self.pending_style = (index != self.style_index).then_some(index);
+        } else {
+            self.style = style;
+            self.style_index = index;
+            self.pending_style = None;
+        }
+        self.publish(0, out);
+    }
+
+    pub fn request(&mut self, request: Request, out: &mut EventBuffer) {
+        if request == Request::Intro && !self.playing {
+            self.start(true, out);
+        } else {
+            self.conductor.request(request, self.playing);
+        }
+        self.publish(0, out);
+    }
+
+    pub fn set_follow(&mut self, follow: bool, out: &mut EventBuffer) {
+        self.conductor.set_follow(follow);
+        self.publish(0, out);
+    }
+
+    pub fn set_energy(&mut self, energy: f32, out: &mut EventBuffer) {
+        self.conductor.set_energy(energy);
+        self.publish(0, out);
+    }
+
+    pub fn set_idle_mode(&mut self, mode: IdleMode) {
+        self.conductor.set_idle_mode(mode);
+    }
+
+    pub fn set_latency(&mut self, ms: f32) {
+        self.latency_ms = ms.clamp(0.0, 500.0);
+    }
+
+    pub fn set_click(&mut self, on: bool, out: &mut EventBuffer) {
+        self.click = on;
+        self.release_all(|_| true, 0, out);
+    }
+
+    /// The player pressed a key; `keys_held` tells whether any key is down.
+    pub fn note_played(&mut self, velocity: u8) {
+        self.conductor.note_played(velocity);
+    }
+
+    pub fn set_keys_held(&mut self, held: bool) {
+        self.keys_held = held;
+    }
+
+    /// The player formed a new chord. While stopped it applies immediately.
+    /// While playing it is latched on the next beat so the band stays in time,
+    /// unless it came just after a beat: then the player meant that beat, and
+    /// the harmony changes right away.
     pub fn set_chord(&mut self, chord: Chord, out: &mut EventBuffer) {
         self.pending = Some(chord);
-        if !self.playing && self.chord != self.pending {
+        if self.chord == self.pending {
+            return;
+        }
+        if !self.playing {
             self.chord = self.pending;
             out.push(0, EngineEvent::ChordChanged(self.chord));
+            return;
+        }
+        let clock = self.clock(1);
+        let now = clock.tick_at(self.frame);
+        let since_beat = now - (now / PPQ as f64).floor() * PPQ as f64;
+        let grace = ((self.latency_ms + LATE_SLACK_MS) / 1000.0) as f64 * self.ticks_per_second();
+        if since_beat > 1e-6 && since_beat <= grace.min(PPQ as f64 / 3.0) {
+            self.change_chord(now, &clock, out);
         }
     }
 
     pub fn play(&mut self, out: &mut EventBuffer) {
+        self.start(false, out);
+    }
+
+    fn start(&mut self, intro: bool, out: &mut EventBuffer) {
         if self.playing {
             return;
         }
@@ -136,21 +241,28 @@ impl Band {
         self.frame = 0;
         self.anchor_frame = 0;
         self.anchor_tick = 0.0;
-        for part in self.style.parts {
-            if part.kind != PartKind::Drums {
-                out.push(0, EngineEvent::ProgramChange { channel: part.channel, program: part.program });
-            }
-        }
+        self.conductor.start(intro);
+        self.program_changes(out);
         out.push(0, EngineEvent::Transport { playing: true });
+        self.publish(0, out);
     }
 
     pub fn stop(&mut self, out: &mut EventBuffer) {
+        self.stop_at(0, out);
+    }
+
+    fn stop_at(&mut self, frame: u32, out: &mut EventBuffer) {
         if !self.playing {
             return;
         }
         self.playing = false;
-        self.release_all(|_| true, 0, out);
-        out.push(0, EngineEvent::Transport { playing: false });
+        self.release_all(|_| true, frame, out);
+        out.push(frame, EngineEvent::Transport { playing: false });
+        if let Some(index) = self.pending_style.take() {
+            self.style = &styles()[index as usize];
+            self.style_index = index;
+        }
+        self.publish(frame, out);
     }
 
     /// Schedules everything that happens during the next `frames` frames.
@@ -162,8 +274,8 @@ impl Band {
         let start = clock.tick_at(self.frame);
         let end = clock.tick_at(self.frame + frames as u64);
 
-        // Walk the block beat by beat so a chord latched on a beat applies to
-        // everything scheduled from that beat on.
+        // Walk the block beat by beat: chords, sections and styles change on
+        // beats, and apply to everything scheduled from that beat on.
         let mut seg_start = start;
         let mut beat = (start / PPQ as f64 - 1e-9).ceil().max(0.0) as u64;
         loop {
@@ -174,6 +286,9 @@ impl Band {
                 break;
             }
             self.on_beat(beat, beat_tick, &clock, out);
+            if !self.playing {
+                return;
+            }
             seg_start = beat_tick;
             beat += 1;
         }
@@ -185,22 +300,59 @@ impl Band {
         let beat_in_bar = (beat % BEATS_PER_BAR as u64) as u8;
         out.push(frame, EngineEvent::Beat { bar: (beat / BEATS_PER_BAR as u64) as u32, beat: beat_in_bar });
 
-        if self.pending == self.chord {
+        if self.click {
+            let velocity = if beat_in_bar == 0 { 120 } else { 90 };
+            self.note_on(DRUM_CHANNEL, WOOD_BLOCK, velocity, tick, tick + PPQ as f64 / 4.0, frame, out);
             return;
         }
-        self.chord = self.pending;
-        out.push(frame, EngineEvent::ChordChanged(self.chord));
 
-        // Cut the harmony that no longer fits. Patterns on this beat retrigger
-        // naturally; the pad is re-struck for the rest of the bar.
-        let harmonic = self.harmonic_channels();
-        self.release_all(|ch| harmonic.contains(&ch), frame, out);
-        if beat_in_bar != 0 {
-            let bar_end = (tick / TICKS_PER_BAR as f64).ceil() * TICKS_PER_BAR as f64;
-            for part in self.style.parts.iter().filter(|p| p.kind == PartKind::Pad) {
-                for step in part.steps {
-                    let retrigger = Step { dur: (bar_end - tick) as u32, ..*step };
-                    self.trigger(part, &retrigger, tick, clock, out);
+        let before = self.conductor.section();
+        let cue = self.conductor.on_beat(beat_in_bar, self.keys_held);
+        if cue.stop {
+            self.stop_at(frame, out);
+            return;
+        }
+        if beat_in_bar == 0
+            && let Some(index) = self.pending_style.take()
+        {
+            self.release_all(|_| true, frame, out);
+            self.style = &styles()[index as usize];
+            self.style_index = index;
+            self.program_changes_at(frame, out);
+        }
+        if self.conductor.section() == Section::Rest && before != Section::Rest {
+            // Everyone but the pad stops; the rest pattern takes over.
+            self.release_all(|_| true, frame, out);
+        }
+        if cue.crash && self.muted & (1 << DRUM_CHANNEL) == 0 {
+            self.note_on(DRUM_CHANNEL, CRASH, self.scale(110), tick, tick + PPQ as f64, frame, out);
+        }
+
+        if self.pending != self.chord {
+            self.change_chord(tick, clock, out);
+        }
+        self.publish(frame, out);
+    }
+
+    /// Applies the pending chord at `tick`: cuts the harmony that no longer
+    /// fits and re-strikes notes the pattern still holds at that point.
+    /// Steps starting exactly at `tick` are left to the regular schedule.
+    fn change_chord(&mut self, tick: f64, clock: &BlockClock, out: &mut EventBuffer) {
+        self.chord = self.pending;
+        let frame = clock.frame(tick);
+        out.push(frame, EngineEvent::ChordChanged(self.chord));
+        let style = self.style;
+        let harmonic = |ch: u8| style.parts.iter().any(|p| p.kind != PartKind::Drums && p.channel == ch);
+        self.release_all(harmonic, frame, out);
+
+        let bar = (tick / TICKS_PER_BAR as f64).floor();
+        let bar_tick = bar * TICKS_PER_BAR as f64;
+        for part in style.parts.iter().filter(|p| p.kind != PartKind::Drums) {
+            let Some(pattern) = self.pattern(part) else { continue };
+            for step in pattern.bar(bar as u64) {
+                let (on, off) = (bar_tick + step.tick as f64, bar_tick + (step.tick + step.dur) as f64);
+                if on < tick && off > tick + 1.0 {
+                    self.trigger(part, &Step { dur: (off - tick) as u32, ..step }, tick, clock, out);
                 }
             }
         }
@@ -217,20 +369,41 @@ impl Band {
                 self.sounding[i].active = false;
             }
         }
+        if self.click {
+            return;
+        }
 
         let first_bar = (from / TICKS_PER_BAR as f64).floor() as u64;
         let last_bar = (to / TICKS_PER_BAR as f64).ceil() as u64;
+        let style = self.style;
         for bar in first_bar..last_bar {
             let bar_tick = (bar * TICKS_PER_BAR as u64) as f64;
-            for part in self.style.parts {
-                for step in part.steps {
+            for part in &style.parts {
+                let Some(pattern) = self.pattern(part) else { continue };
+                for step in pattern.bar(bar) {
                     let tick = bar_tick + step.tick as f64;
                     if tick >= from && tick < to {
-                        self.trigger(part, step, tick, clock, out);
+                        self.trigger(part, &step, tick, clock, out);
                     }
                 }
             }
         }
+    }
+
+    /// The pattern `part` plays in the current section, if any.
+    fn pattern<'a>(&self, part: &'a Part) -> Option<&'a Pattern> {
+        let main = &part.main[self.conductor.variation() as usize];
+        match self.conductor.section() {
+            Section::Intro => Some(&part.intro),
+            Section::Main => Some(main),
+            Section::Fill => Some(part.fill.as_ref().unwrap_or(main)),
+            Section::Ending => Some(&part.ending),
+            Section::Rest => part.rest.as_ref(),
+        }
+    }
+
+    fn scale(&self, velocity: u8) -> u8 {
+        (velocity as f32 * self.conductor.velocity_scale()).round().clamp(1.0, 127.0) as u8
     }
 
     fn trigger(&mut self, part: &Part, step: &Step, tick: f64, clock: &BlockClock, out: &mut EventBuffer) {
@@ -239,25 +412,28 @@ impl Band {
         }
         let off_tick = tick + step.dur as f64;
         let frame = clock.frame(tick);
+        let velocity = self.scale(step.velocity);
         match (step.hit, self.chord) {
-            (Hit::Drum(key), _) => self.note_on(part.channel, key, step.velocity, frame, off_tick, out),
+            (Hit::Drum(key), _) => self.note_on(part.channel, key, velocity, tick, off_tick, frame, out),
             (Hit::Bass(tone), Some(chord)) => {
                 let key = bass_note(&chord, tone);
-                self.note_on(part.channel, key, step.velocity, frame, off_tick, out);
+                self.note_on(part.channel, key, velocity, tick, off_tick, frame, out);
             }
             (Hit::Chord, Some(chord)) => {
-                let voicing = match part.kind {
-                    PartKind::Pad => {
-                        self.pad = voice_near(&chord, self.pad.center().unwrap_or(PAD_HOME) * 0.7 + PAD_HOME * 0.3, PAD_RANGE.0, PAD_RANGE.1);
-                        self.pad
-                    }
-                    _ => {
-                        self.keys = voice_near(&chord, self.keys.center().unwrap_or(KEYS_HOME) * 0.7 + KEYS_HOME * 0.3, KEYS_RANGE.0, KEYS_RANGE.1);
-                        self.keys
-                    }
-                };
+                let voicing = self.voicing(part.kind, &chord);
                 for &key in voicing.notes() {
-                    self.note_on(part.channel, key, step.velocity, frame, off_tick, out);
+                    self.note_on(part.channel, key, velocity, tick, off_tick, frame, out);
+                }
+            }
+            (Hit::ChordNote(index), Some(chord)) => {
+                // Arpeggios keep the voicing the part already has, so all
+                // notes of one pass come from the same inversion.
+                let current = if part.kind == PartKind::Pad { self.pad } else { self.keys };
+                let voicing = if index == 0 || !current.contains_chord(&chord) { self.voicing(part.kind, &chord) } else { current };
+                let notes = voicing.notes();
+                if let Some(&base) = notes.get(index as usize % notes.len().max(1)) {
+                    let key = base + 12 * (index as usize / notes.len()) as u8;
+                    self.note_on(part.channel, key.min(127), velocity, tick, off_tick, frame, out);
                 }
             }
             // Harmonic parts wait for the first chord.
@@ -265,16 +441,34 @@ impl Band {
         }
     }
 
-    fn note_on(&mut self, channel: u8, key: u8, velocity: u8, frame: u32, off_tick: f64, out: &mut EventBuffer) {
-        // Retriggering a sounding key: end the old note first.
+    /// Voices `chord` near the part's previous voicing, drifting back home.
+    fn voicing(&mut self, kind: PartKind, chord: &Chord) -> Voicing {
+        let (voicing, home, (low, high)) = match kind {
+            PartKind::Pad => (&mut self.pad, PAD_HOME, PAD_RANGE),
+            _ => (&mut self.keys, KEYS_HOME, KEYS_RANGE),
+        };
+        *voicing = voice_near(chord, voicing.center().unwrap_or(home) * 0.7 + home * 0.3, low, high);
+        *voicing
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn note_on(&mut self, channel: u8, key: u8, velocity: u8, tick: f64, off_tick: f64, frame: u32, out: &mut EventBuffer) {
         if let Some(i) = self.sounding.iter().position(|s| s.active && s.channel == channel && s.key == key) {
+            let s = &mut self.sounding[i];
+            if (s.on_tick - tick).abs() < 1.0 {
+                // Two hits on the same key at once (a crash cue and the
+                // pattern's own crash): play one, as long as the longer.
+                s.off_tick = s.off_tick.max(off_tick);
+                return;
+            }
+            // Retriggering a sounding key: end the old note first.
             out.push(frame, EngineEvent::NoteOff { channel, key });
-            self.sounding[i].active = false;
+            s.active = false;
         }
         let Some(slot) = self.sounding.iter_mut().find(|s| !s.active) else {
             return; // Polyphony budget exhausted; skip rather than hang a note.
         };
-        *slot = Sounding { active: true, channel, key, off_tick };
+        *slot = Sounding { active: true, channel, key, on_tick: tick, off_tick };
         out.push(frame, EngineEvent::NoteOn { channel, key, velocity });
     }
 
@@ -285,12 +479,40 @@ impl Band {
         }
     }
 
-    fn harmonic_channels(&self) -> [u8; 4] {
-        let mut channels = [u8::MAX; 4];
-        for (slot, part) in channels.iter_mut().zip(self.style.parts.iter().filter(|p| p.kind != PartKind::Drums)) {
-            *slot = part.channel;
+    fn program_changes(&self, out: &mut EventBuffer) {
+        self.program_changes_at(0, out);
+    }
+
+    fn program_changes_at(&self, frame: u32, out: &mut EventBuffer) {
+        for part in &self.style.parts {
+            out.push(frame, EngineEvent::ProgramChange { channel: part.channel, program: part.program });
         }
-        channels
+    }
+
+    fn state(&self) -> BandState {
+        let c = &self.conductor;
+        BandState {
+            style: self.style_index,
+            next_style: self.pending_style,
+            playing: self.playing,
+            section: c.section(),
+            variation: c.variation(),
+            next_variation: c.next_variation(),
+            fill_pending: c.fill_pending(),
+            intro_pending: c.intro_pending(),
+            ending_pending: c.ending_pending(),
+            follow: c.follows(),
+            energy: (c.energy() * 255.0).round() as u8,
+        }
+    }
+
+    /// Reports the band's state to the UI if it changed.
+    fn publish(&mut self, frame: u32, out: &mut EventBuffer) {
+        let state = self.state();
+        if self.published != Some(state) {
+            self.published = Some(state);
+            out.push(frame, EngineEvent::Band(state));
+        }
     }
 }
 
@@ -298,7 +520,6 @@ impl Band {
 mod tests {
     use super::*;
     use crate::chord::Quality;
-    use crate::style::POP;
 
     const SR: f32 = 48_000.0;
     const BLOCK: u32 = 128;
@@ -318,7 +539,7 @@ mod tests {
     }
 
     fn started_band() -> (Band, u64) {
-        let mut band = Band::new(&POP, SR);
+        let mut band = Band::new(SR);
         band.set_tempo(120.0); // one beat = 24000 frames
         let mut out = EventBuffer::default();
         band.play(&mut out);
@@ -333,6 +554,30 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn states(events: &[(u64, EngineEvent)]) -> Vec<(u64, BandState)> {
+        events
+            .iter()
+            .filter_map(|(f, e)| match e {
+                EngineEvent::Band(s) => Some((*f, *s)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_no_hanging_notes(events: &[(u64, EngineEvent)]) {
+        let mut open = std::collections::HashSet::new();
+        for (_f, e) in events {
+            match e {
+                EngineEvent::NoteOn { channel, key, .. } => assert!(open.insert((*channel, *key)), "double note-on {channel} {key} at {}", _f),
+                EngineEvent::NoteOff { channel, key } => {
+                    open.remove(&(*channel, *key));
+                }
+                _ => {}
+            }
+        }
+        assert!(open.is_empty(), "hanging notes: {open:?}");
     }
 
     #[test]
@@ -359,7 +604,7 @@ mod tests {
     #[test]
     fn chord_is_latched_on_the_next_beat() {
         let (mut band, mut frame) = started_band();
-        run(&mut band, 0.6, &mut frame); // just past beat 1 (frame 24000)
+        run(&mut band, 0.6, &mut frame); // well past beat 1 (frame 24000)
         let mut out = EventBuffer::default();
         band.set_chord(Chord::new(9, Quality::Minor), &mut out);
         assert!(out.as_slice().is_empty(), "must not change mid-beat while playing");
@@ -376,27 +621,36 @@ mod tests {
     }
 
     #[test]
-    fn every_note_on_gets_a_note_off() {
+    fn a_chord_just_after_the_beat_counts_for_that_beat() {
         let (mut band, mut frame) = started_band();
+        band.set_latency(20.0);
+        run(&mut band, 0.53, &mut frame); // 30 ms after beat 1
         let mut out = EventBuffer::default();
-        band.set_chord(Chord::new(0, Quality::Major), &mut out);
-        let mut events = run(&mut band, 3.3, &mut frame);
-        band.set_chord(Chord::new(7, Quality::Dominant7), &mut out);
-        events.extend(run(&mut band, 2.2, &mut frame));
-        band.stop(&mut out);
-        events.extend(out.as_slice().iter().map(|t| (frame, t.event)));
+        band.set_chord(Chord::new(9, Quality::Minor), &mut out);
+        assert!(out.as_slice().iter().any(|t| t.event == EngineEvent::ChordChanged(Some(Chord::new(9, Quality::Minor)))));
+        // The bass note of beat 1 is re-struck as A right away.
+        assert!(out.as_slice().iter().any(|t| matches!(t.event, EngineEvent::NoteOn { channel: 2, key, .. } if key % 12 == 9)));
+    }
 
-        let mut open = std::collections::HashSet::new();
-        for (_, e) in &events {
-            match e {
-                EngineEvent::NoteOn { channel, key, .. } => assert!(open.insert((*channel, *key)), "double note-on"),
-                EngineEvent::NoteOff { channel, key } => {
-                    open.remove(&(*channel, *key));
-                }
-                _ => {}
-            }
+    #[test]
+    fn every_note_on_gets_a_note_off() {
+        for index in 0..styles().len() as u8 {
+            let (mut band, mut frame) = started_band();
+            let mut out = EventBuffer::default();
+            band.set_style(index, &mut out);
+            band.stop(&mut out);
+            band.play(&mut out);
+            out.clear();
+            band.set_chord(Chord::new(0, Quality::Major), &mut out);
+            let mut events = run(&mut band, 3.3, &mut frame);
+            band.set_chord(Chord::new(7, Quality::Dominant7), &mut out);
+            band.request(Request::Variation(2), &mut out);
+            events.extend(run(&mut band, 4.2, &mut frame));
+            band.request(Request::Ending, &mut out);
+            events.extend(run(&mut band, 5.0, &mut frame));
+            assert!(!band.is_playing(), "{}: the ending stops the band", styles()[index as usize].name);
+            assert_no_hanging_notes(&events);
         }
-        assert!(open.is_empty(), "hanging notes: {open:?}");
     }
 
     #[test]
@@ -416,10 +670,86 @@ mod tests {
 
     #[test]
     fn chord_applies_immediately_while_stopped() {
-        let mut band = Band::new(&POP, SR);
+        let mut band = Band::new(SR);
         let mut out = EventBuffer::default();
         band.set_chord(Chord::new(2, Quality::Minor), &mut out);
         assert_eq!(band.chord(), Some(Chord::new(2, Quality::Minor)));
         assert_eq!(out.as_slice().len(), 1);
+    }
+
+    #[test]
+    fn style_changes_wait_for_the_bar_line() {
+        let (mut band, mut frame) = started_band();
+        run(&mut band, 0.6, &mut frame);
+        let mut out = EventBuffer::default();
+        band.set_style(1, &mut out);
+        assert_eq!(states(&out.as_slice().iter().map(|t| (0, t.event)).collect::<Vec<_>>())[0].1.next_style, Some(1));
+        let events = run(&mut band, 2.0, &mut frame);
+        let change = events.iter().find(|(_, e)| matches!(e, EngineEvent::ProgramChange { channel: 2, program: 34 })).unwrap();
+        assert_eq!(change.0, 96_000, "rock bass arrives on bar 2");
+        assert_eq!(states(&events).last().unwrap().1.style, 1);
+    }
+
+    #[test]
+    fn intro_runs_one_bar_and_reports_sections() {
+        let mut band = Band::new(SR);
+        band.set_tempo(120.0);
+        let mut out = EventBuffer::default();
+        band.request(Request::Intro, &mut out);
+        assert!(band.is_playing());
+        assert_eq!(band.conductor().section(), Section::Intro);
+        let mut frame = 0;
+        let events = run(&mut band, 2.2, &mut frame);
+        let main = states(&events).into_iter().find(|(_, s)| s.section == Section::Main).unwrap();
+        assert_eq!(main.0, 96_000);
+        assert!(note_ons(&events, 9).contains(&(96_000, CRASH)), "crash on the first bar after the intro");
+    }
+
+    #[test]
+    fn rest_keeps_only_the_pad() {
+        let (mut band, mut frame) = started_band();
+        let mut out = EventBuffer::default();
+        band.set_chord(Chord::new(0, Quality::Major), &mut out);
+        band.note_played(90);
+        run(&mut band, 2.0, &mut frame);
+        let events = run(&mut band, 6.0, &mut frame);
+        let rest_at = states(&events).into_iter().find(|(_, s)| s.section == Section::Rest).unwrap().0;
+        let after: Vec<_> = events.iter().filter(|(f, _)| *f > rest_at).cloned().collect();
+        assert!(note_ons(&after, 9).is_empty() && note_ons(&after, 2).is_empty());
+        assert!(!note_ons(&after, 3).is_empty(), "the pad holds the chord");
+
+        band.note_played(90);
+        let events = run(&mut band, 0.6, &mut frame);
+        assert!(!note_ons(&events, 9).is_empty(), "drums come back");
+    }
+
+    #[test]
+    fn click_mode_plays_one_click_per_beat() {
+        let (mut band, mut frame) = started_band();
+        let mut out = EventBuffer::default();
+        band.set_click(true, &mut out);
+        band.set_chord(Chord::new(0, Quality::Major), &mut out);
+        let events = run(&mut band, 2.1, &mut frame);
+        let ons: Vec<_> = events.iter().filter(|(_, e)| matches!(e, EngineEvent::NoteOn { .. })).collect();
+        assert_eq!(ons.len(), 5);
+        assert!(note_ons(&events, 9).iter().all(|(_, k)| *k == WOOD_BLOCK));
+    }
+
+    #[test]
+    fn energy_scales_velocity() {
+        let velocities = |energy: f32| {
+            let (mut band, mut frame) = started_band();
+            let mut out = EventBuffer::default();
+            band.set_follow(false, &mut out);
+            band.set_energy(energy, &mut out);
+            run(&mut band, 1.0, &mut frame)
+                .iter()
+                .filter_map(|(_, e)| match e {
+                    EngineEvent::NoteOn { velocity, .. } => Some(*velocity as u32),
+                    _ => None,
+                })
+                .sum::<u32>()
+        };
+        assert!(velocities(1.0) > velocities(0.0) * 13 / 10);
     }
 }

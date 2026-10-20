@@ -1,18 +1,10 @@
+import { STYLES } from '@midzer/audio-web';
 import { ChordDisplay } from '../components/ChordDisplay';
 import { PlayButton } from '../components/ControlPanel';
 import { Keyboard } from '../components/Keyboard';
 import { DeviceChip } from '../components/TopBar';
-import { finishOnboarding, setOnboardingStep, startAudio, useSession } from '../session';
+import { finishOnboarding, setOnboardingStep, setStyle, startAudio, useSession } from '../session';
 import { LoadingStatus } from './LoadingStatus';
-
-const VIBES = [
-  { name: 'Pop', blurb: 'Straight 8ths, warm piano', ready: true },
-  { name: 'Rock', blurb: 'Driving drums, power chords', ready: false },
-  { name: 'Funk', blurb: 'Tight 16ths, slap bass', ready: false },
-  { name: 'Bossa', blurb: 'Soft nylon and brushes', ready: false },
-  { name: 'Ballad', blurb: 'Slow, wide pads', ready: false },
-  { name: 'Blues', blurb: 'Shuffle and walking bass', ready: false },
-];
 
 export function Onboarding() {
   const step = useSession((s) => s.onboardingStep);
@@ -65,16 +57,23 @@ function ConnectStep() {
 }
 
 function VibeStep() {
+  const style = useSession((s) => s.style);
   return (
     <section className="step">
       <p className="eyebrow">Step 2 of 3</p>
       <h1>Pick a vibe</h1>
       <p className="lead">This sets how your band plays. You can change it any time.</p>
       <div className="vibe-grid">
-        {VIBES.map((v) => (
-          <button key={v.name} className={`vibe-card ${v.ready ? 'selected' : ''}`} disabled={!v.ready}>
+        {STYLES.map((v, i) => (
+          <button
+            key={v.name}
+            className={`vibe-card ${i === style ? 'selected' : ''}`}
+            aria-pressed={i === style}
+            onClick={() => setStyle(i)}
+          >
             <span className="vibe-name">{v.name}</span>
-            <span className="vibe-blurb">{v.ready ? v.blurb : 'Coming soon'}</span>
+            <span className="vibe-blurb">{v.blurb}</span>
+            <span className="vibe-tempo">{v.bpm} BPM</span>
           </button>
         ))}
       </div>

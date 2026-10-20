@@ -10,10 +10,14 @@ import {
   PAD_CHANNEL,
   requestMidi,
   startEngine,
+  STYLES,
   type BandPart,
+  type BandState,
   type ChordInfo,
   type EngineCommand,
   type EngineHandle,
+  type IdleMode,
+  type SectionRequest,
   type TimedEvent,
 } from '@midzer/audio-web';
 import { create } from 'zustand';
@@ -60,10 +64,24 @@ interface SessionState {
   muted: Record<BandPart, boolean>;
   split: number;
   volume: number;
+  /** The style the player picked; `band.style` is the one being heard. */
+  style: number;
+  band: BandState;
+  idleMode: IdleMode;
+  /** How far the player's taps land after the heard beat, from calibration. */
+  tapOffsetMs: number | null;
+  /** Output latency of the audio device, once audio has started. */
+  outputLatencyMs: number;
 }
 
+export const IDLE_OPTIONS: { mode: IdleMode; label: string }[] = [
+  { mode: 'rest', label: 'Band waits for you' },
+  { mode: 'end', label: 'Band plays the ending' },
+  { mode: 'keepPlaying', label: 'Band keeps playing' },
+];
+
 const ONBOARDED_KEY = 'midzer.onboarded';
-const DEFAULT_BPM = 100;
+const PREFS_KEY = 'midzer.prefs';
 
 function readOnboarded(): boolean {
   try {
@@ -72,6 +90,36 @@ function readOnboarded(): boolean {
     return false;
   }
 }
+
+interface Prefs {
+  style: number;
+  idleMode: IdleMode;
+  tapOffsetMs: number | null;
+}
+
+function readPrefs(): Prefs {
+  const defaults: Prefs = { style: 0, idleMode: 'rest', tapOffsetMs: null };
+  try {
+    const saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Partial<Prefs>;
+    const style = Number.isInteger(saved.style) && STYLES[saved.style!] ? saved.style! : defaults.style;
+    const idleMode = IDLE_OPTIONS.some((o) => o.mode === saved.idleMode) ? saved.idleMode! : defaults.idleMode;
+    const tapOffsetMs = typeof saved.tapOffsetMs === 'number' ? saved.tapOffsetMs : null;
+    return { style, idleMode, tapOffsetMs };
+  } catch {
+    return defaults;
+  }
+}
+
+function savePrefs(): void {
+  const { style, idleMode, tapOffsetMs } = get();
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ style, idleMode, tapOffsetMs } satisfies Prefs));
+  } catch {
+    // Not persisted; defaults next time.
+  }
+}
+
+const prefs = readPrefs();
 
 export const useSession = create<SessionState>(() => ({
   screen: readOnboarded() ? 'home' : 'onboarding',
@@ -84,13 +132,30 @@ export const useSession = create<SessionState>(() => ({
   midiOutputs: [],
   midiOutputId: null,
   playing: false,
-  bpm: DEFAULT_BPM,
+  bpm: STYLES[prefs.style]!.bpm,
   chord: null,
   bar: 0,
   beat: 0,
   muted: { drums: false, bass: false, keys: false, pad: false },
   split: 0,
   volume: 0.6,
+  style: prefs.style,
+  band: {
+    style: prefs.style,
+    nextStyle: null,
+    playing: false,
+    section: 'main',
+    variation: 0,
+    nextVariation: 0,
+    fillPending: false,
+    introPending: false,
+    endingPending: false,
+    follow: true,
+    energy: 0.4,
+  },
+  idleMode: prefs.idleMode,
+  tapOffsetMs: prefs.tapOffsetMs,
+  outputLatencyMs: 0,
 }));
 
 const set = useSession.setState;
@@ -131,7 +196,12 @@ export async function startAudio(): Promise<void> {
   try {
     engine = await startEngine('/wasm/midzer.wasm');
     engine.onEvent(onEngineEvent);
-    const { bpm, volume, split, muted } = get();
+    const { bpm, volume, split, muted, style, idleMode } = get();
+    const { outputLatency = 0, baseLatency = 0 } = engine.context;
+    set({ outputLatencyMs: Math.round((outputLatency || baseLatency) * 1000) });
+    engine.send({ type: 'setStyle', index: style });
+    engine.send({ type: 'setIdleMode', mode: idleMode });
+    sendLatency();
     engine.send({ type: 'setTempo', bpm });
     engine.send({ type: 'setGain', gain: volume });
     engine.send({ type: 'setSplit', note: split });
@@ -171,7 +241,20 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
     case 'transport':
       setTimeout(() => set({ playing: event.playing }), delay);
       break;
+    case 'band':
+      setTimeout(() => set({ band: event.state }), delay);
+      break;
   }
+  for (const listener of beatListeners) if (event.type === 'beat') listener(event.bar, event.beat, timeMs);
+}
+
+type BeatListener = (bar: number, beat: number, timeMs: number) => void;
+const beatListeners = new Set<BeatListener>();
+
+/** Calls `listener` with the time each beat is heard. Returns an unsubscribe function. */
+export function onBeat(listener: BeatListener): () => void {
+  beatListeners.add(listener);
+  return () => beatListeners.delete(listener);
 }
 
 async function download(url: string, onProgress: (fraction: number) => void): Promise<ArrayBuffer> {
@@ -223,6 +306,62 @@ export function setSplit(note: number): void {
 export function setVolume(volume: number): void {
   set({ volume });
   send({ type: 'setGain', gain: volume });
+}
+
+/** Picks a style. Stopped, it also takes the style's tempo; playing, it changes on the next bar. */
+export function setStyle(index: number): void {
+  const style = STYLES[index];
+  if (!style) return;
+  set({ style: index });
+  savePrefs();
+  send({ type: 'setStyle', index });
+  if (!get().playing) setTempo(style.bpm);
+}
+
+/** Intro, A/B/C, fill or ending. Choosing a variation stops following the player. */
+export function requestSection(request: SectionRequest): void {
+  send({ type: 'section', request });
+}
+
+export function setFollow(on: boolean): void {
+  send({ type: 'setFollow', on });
+}
+
+/** Sets the energy by hand, which stops following the player. */
+export function setEnergy(energy: number): void {
+  send({ type: 'setFollow', on: false });
+  send({ type: 'setEnergy', energy });
+  // Show the new value at once instead of after the audio latency.
+  set({ band: { ...get().band, follow: false, energy } });
+}
+
+export function setIdleMode(mode: IdleMode): void {
+  set({ idleMode: mode });
+  savePrefs();
+  send({ type: 'setIdleMode', mode });
+}
+
+/** How late, in ms, the player's notes reach the engine after the beat they meant. */
+export function playerLatencyMs(): number {
+  const { outputLatencyMs, tapOffsetMs } = get();
+  return Math.max(0, outputLatencyMs + (tapOffsetMs ?? 0));
+}
+
+function sendLatency(): void {
+  send({ type: 'setLatency', ms: playerLatencyMs() });
+}
+
+export function setTapOffset(ms: number | null): void {
+  set({ tapOffsetMs: ms === null ? null : Math.round(ms) });
+  savePrefs();
+  sendLatency();
+}
+
+/** Calibration: the band plays only a click on every beat while `on`. */
+export function setCalibrationClick(on: boolean): void {
+  send({ type: 'stop' });
+  send({ type: 'setClick', on });
+  if (on) send({ type: 'play' });
 }
 
 const taps: number[] = [];

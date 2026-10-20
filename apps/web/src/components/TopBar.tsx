@@ -1,5 +1,6 @@
+import { STYLES } from '@midzer/audio-web';
 import { useState } from 'react';
-import { goTo, useSession } from '../session';
+import { goTo, setStyle, useSession } from '../session';
 import { SettingsDrawer } from './SettingsDrawer';
 
 export function TopBar({ title, onBack }: { title: string; onBack?: () => void }) {
@@ -18,7 +19,7 @@ export function TopBar({ title, onBack }: { title: string; onBack?: () => void }
         <span className="crumb">/</span>
         <span className="title">{title}</span>
       </div>
-      <div className="style-chip">Style: Pop · Straight 8ths</div>
+      <StylePicker />
       <div className="top-right">
         <DeviceChip />
         <button className="btn btn-secondary btn-icon" onClick={() => setSettingsOpen(true)} aria-label="Settings">
@@ -27,6 +28,26 @@ export function TopBar({ title, onBack }: { title: string; onBack?: () => void }
       </div>
       {settingsOpen && <SettingsDrawer onClose={() => setSettingsOpen(false)} />}
     </header>
+  );
+}
+
+export function StylePicker() {
+  const style = useSession((s) => s.style);
+  const heard = useSession((s) => s.band.style);
+  const playing = useSession((s) => s.playing);
+  const queued = playing && style !== heard;
+  return (
+    <label className={`style-chip ${queued ? 'queued' : ''}`}>
+      <span className="label">Style</span>
+      <select value={style} onChange={(e) => setStyle(Number(e.target.value))} aria-label="Style">
+        {STYLES.map((s, i) => (
+          <option key={s.name} value={i}>
+            {s.name} · {s.blurb}
+          </option>
+        ))}
+      </select>
+      {queued && <span className="queued-note">next bar</span>}
+    </label>
   );
 }
 

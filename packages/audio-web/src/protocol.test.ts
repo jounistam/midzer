@@ -3,6 +3,13 @@ import { eventToMidi, midiToCommand } from './midi';
 import { chordName, chordTones, decodeEvent, encodeCommand } from './protocol';
 
 describe('encodeCommand', () => {
+  it('encodes sections and modes like command.rs', () => {
+    expect(encodeCommand({ type: 'section', request: 'C' })).toEqual([11, 3, 0, 0]);
+    expect(encodeCommand({ type: 'section', request: 'ending' })).toEqual([11, 5, 0, 0]);
+    expect(encodeCommand({ type: 'setIdleMode', mode: 'end' })).toEqual([14, 2, 0, 0]);
+    expect(encodeCommand({ type: 'setStyle', index: 4 })).toEqual([10, 4, 0, 0]);
+  });
+
   it('encodes floats as f32 bits', () => {
     const [op, bits] = encodeCommand({ type: 'setTempo', bpm: 96.5 });
     expect(op).toBe(7);
@@ -26,6 +33,29 @@ describe('decodeEvent', () => {
     const event = decodeEvent(4, 9, (0 << 8) | 11, 0);
     expect(event).toMatchObject({ type: 'chord', chord: { name: 'Am7/C' } });
     expect(decodeEvent(4, 0xff, 0, 0)).toMatchObject({ chord: null });
+  });
+
+  it('decodes band state', () => {
+    // Mirrors encodes_band_state in event.rs.
+    const a = 2 | (0xff << 8) | (2 << 16) | (1 << 24);
+    const b = 2 | (0b11101 << 8) | (200 << 16);
+    expect(decodeEvent(7, a, b, 5)).toEqual({
+      type: 'band',
+      frame: 5,
+      state: {
+        style: 2,
+        nextStyle: null,
+        playing: true,
+        section: 'fill',
+        variation: 1,
+        nextVariation: 2,
+        fillPending: false,
+        introPending: true,
+        endingPending: true,
+        follow: true,
+        energy: 200 / 255,
+      },
+    });
   });
 
   it('ignores unknown opcodes', () => {
