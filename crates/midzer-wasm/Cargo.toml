@@ -1,0 +1,13 @@
+[package]
+name = "midzer-wasm"
+description = "C-ABI WebAssembly exports of midzer-core for the AudioWorklet host."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+midzer-core = { path = "../midzer-core" }
+midzer-synth = { version = "0.1.0", path = "../midzer-synth" }

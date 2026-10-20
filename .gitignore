@@ -1,0 +1,9 @@
+/target
+node_modules
+dist
+apps/web/public/wasm/
+*.local
+.DS_Store
+apps/web/public/soundfonts/
+test-results
+playwright-report
