@@ -4,6 +4,7 @@
 use crate::chord::Chord;
 use crate::conductor::{Conductor, IdleMode, Request, Section};
 use crate::event::{BandState, DRUM_CHANNEL, EngineEvent, EventBuffer};
+use crate::song::{Slot, SongPlayer};
 use crate::style::{BEATS_PER_BAR, CRASH, Hit, PPQ, Part, PartKind, Pattern, Step, Style, TICKS_PER_BAR, WOOD_BLOCK, styles};
 use crate::voicing::{Voicing, bass_note, voice_near};
 
@@ -56,6 +57,8 @@ pub struct Band {
     click: bool,
     /// The state last reported to the UI.
     published: Option<BandState>,
+    /// A chord chart that replaces the player's chords while active.
+    song: SongPlayer,
 }
 
 /// Converts song positions within the current block to frame offsets.
@@ -106,6 +109,7 @@ impl Band {
             latency_ms: 30.0,
             click: false,
             published: None,
+            song: SongPlayer::default(),
         }
     }
 
@@ -197,6 +201,33 @@ impl Band {
         self.release_all(|_| true, 0, out);
     }
 
+    pub fn set_song(&mut self, on: bool) {
+        self.song.set_active(on);
+        self.conductor.set_song(self.song.active());
+    }
+
+    pub fn clear_song(&mut self, bars: u32) {
+        self.song.clear(bars);
+        self.conductor.set_song(self.song.active());
+    }
+
+    pub fn set_song_slot(&mut self, beat: u32, slot: Slot) {
+        self.song.set_slot(beat, slot);
+    }
+
+    pub fn set_song_mark(&mut self, bar: u32, mark: Option<Request>) {
+        self.song.set_mark(bar, mark);
+    }
+
+    pub fn set_song_loop(&mut self, start: u32, end: u32) {
+        self.song.set_loop(start, end);
+    }
+
+    /// Stopped: where the song starts. Playing: a jump on the next bar line.
+    pub fn seek_song(&mut self, bar: u32) {
+        self.song.seek(bar, self.playing);
+    }
+
     /// The player pressed a key; `keys_held` tells whether any key is down.
     pub fn note_played(&mut self, velocity: u8) {
         self.conductor.note_played(velocity);
@@ -210,7 +241,11 @@ impl Band {
     /// While playing it is latched on the next beat so the band stays in time,
     /// unless it came just after a beat: then the player meant that beat, and
     /// the harmony changes right away.
+    /// While a song plays, its chart has the harmony and this is ignored.
     pub fn set_chord(&mut self, chord: Chord, out: &mut EventBuffer) {
+        if self.playing && self.song.active() {
+            return;
+        }
         self.pending = Some(chord);
         if self.chord == self.pending {
             return;
@@ -241,6 +276,14 @@ impl Band {
         self.frame = 0;
         self.anchor_frame = 0;
         self.anchor_tick = 0.0;
+        let mut intro = intro;
+        if self.song.active() {
+            let (song_intro, variation) = self.song.start();
+            intro |= song_intro;
+            if let Some(v) = variation {
+                self.conductor.request(Request::Variation(v), false);
+            }
+        }
         self.conductor.start(intro);
         self.program_changes(out);
         out.push(0, EngineEvent::Transport { playing: true });
@@ -323,6 +366,18 @@ impl Band {
         if self.conductor.section() == Section::Rest && before != Section::Rest {
             // Everyone but the pad stops; the rest pattern takes over.
             self.release_all(|_| true, frame, out);
+        }
+        if self.song.active() {
+            let song = self.song.on_beat(beat_in_bar);
+            if let Some(bar) = song.bar {
+                out.push(frame, EngineEvent::SongPosition { bar });
+            }
+            if let Some(chord) = song.chord {
+                self.pending = chord;
+            }
+            if let Some(request) = song.request {
+                self.conductor.request(request, true);
+            }
         }
         if cue.crash && self.muted & (1 << DRUM_CHANNEL) == 0 {
             self.note_on(DRUM_CHANNEL, CRASH, self.scale(110), tick, tick + PPQ as f64, frame, out);
@@ -733,6 +788,62 @@ mod tests {
         let ons: Vec<_> = events.iter().filter(|(_, e)| matches!(e, EngineEvent::NoteOn { .. })).collect();
         assert_eq!(ons.len(), 5);
         assert!(note_ons(&events, 9).iter().all(|(_, k)| *k == WOOD_BLOCK));
+    }
+
+    /// Am for two beats then F, then G | C, in variation B from bar 1.
+    fn song_band() -> (Band, u64) {
+        let mut band = Band::new(SR);
+        band.set_tempo(120.0);
+        band.set_song(true);
+        band.clear_song(2);
+        band.set_song_slot(0, Slot::Chord(Chord::new(9, Quality::Minor)));
+        band.set_song_slot(2, Slot::Chord(Chord::new(5, Quality::Major)));
+        band.set_song_slot(4, Slot::Chord(Chord::new(7, Quality::Major)));
+        band.set_song_slot(6, Slot::Chord(Chord::new(0, Quality::Major)));
+        band.set_song_mark(1, Some(Request::Variation(1)));
+        let mut out = EventBuffer::default();
+        band.play(&mut out);
+        (band, 0)
+    }
+
+    #[test]
+    fn songs_play_their_chart_and_end() {
+        let (mut band, mut frame) = song_band();
+        let mut out = EventBuffer::default();
+        band.set_chord(Chord::new(2, Quality::Minor), &mut out); // ignored while the song plays
+        let events = run(&mut band, 6.5, &mut frame);
+        let chords: Vec<_> = events
+            .iter()
+            .filter_map(|(f, e)| match e {
+                EngineEvent::ChordChanged(Some(c)) => Some((*f, c.to_string())),
+                _ => None,
+            })
+            .collect();
+        let expected = [(0, "Am"), (48_000, "F"), (96_000, "G"), (144_000, "C")];
+        assert_eq!(chords, expected.map(|(f, n)| (f, n.to_string())));
+
+        let bars: Vec<_> = events
+            .iter()
+            .filter_map(|(f, e)| matches!(e, EngineEvent::SongPosition { .. }).then_some(*f))
+            .collect();
+        assert_eq!(bars, [0, 96_000, 192_000], "the ending bar follows the chart");
+
+        let sections: Vec<_> = states(&events).iter().map(|(f, s)| (*f, s.section, s.variation)).collect();
+        assert!(sections.contains(&(48_000, Section::Fill, 0)), "{sections:?}");
+        assert!(sections.contains(&(96_000, Section::Main, 1)), "{sections:?}");
+        assert!(sections.contains(&(192_000, Section::Ending, 1)), "{sections:?}");
+        assert!(!band.is_playing(), "the band stops after the ending");
+        assert_no_hanging_notes(&events);
+    }
+
+    #[test]
+    fn songs_play_through_silence() {
+        let (mut band, mut frame) = song_band();
+        band.set_song_loop(0, 2);
+        band.note_played(90);
+        let events = run(&mut band, 12.0, &mut frame);
+        assert!(states(&events).iter().all(|(_, s)| s.section != Section::Rest && s.section != Section::Ending));
+        assert!(band.is_playing());
     }
 
     #[test]

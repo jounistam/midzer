@@ -4,15 +4,15 @@ import { LoadingStatus } from './LoadingStatus';
 
 const MODES = [
   { id: 'jam', title: 'Jam', blurb: 'Hold chords, the band follows you.', ready: true },
-  { id: 'songs', title: 'Songs', blurb: 'Play along with chord charts and MIDI files.', ready: false },
+  { id: 'songs', title: 'Songs', blurb: 'Play along with chord charts and MIDI files.', ready: true },
   { id: 'learn', title: 'Learn', blurb: 'Falling notes, wait mode and lessons.', ready: false },
 ] as const;
 
 export function Home() {
   const audio = useSession((s) => s.audio);
-  const openJam = () => {
+  const open = (screen: 'jam' | 'songs') => {
     if (audio === 'idle' || audio === 'error') void startAudio();
-    goTo('jam');
+    goTo(screen);
   };
   return (
     <main className="home">
@@ -27,7 +27,7 @@ export function Home() {
             key={m.id}
             className={`mode-card ${m.ready ? '' : 'soon'}`}
             disabled={!m.ready}
-            onClick={m.id === 'jam' ? openJam : undefined}
+            onClick={m.id === 'learn' ? undefined : () => open(m.id)}
           >
             <span className="mode-title">{m.title}</span>
             <span className="mode-blurb">{m.blurb}</span>

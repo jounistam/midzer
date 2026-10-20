@@ -38,7 +38,8 @@ export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
   ]);
 
   const shared = globalThis.crossOriginIsolated;
-  const commands = shared ? RecordRing.create(1024) : null;
+  // Large enough for a whole song chart (see chartCommands) sent at once.
+  const commands = shared ? RecordRing.create(8192) : null;
   const events = shared ? RecordRing.create(4096) : null;
   const node = new AudioWorkletNode(context, PROCESSOR_NAME, {
     numberOfInputs: 0,

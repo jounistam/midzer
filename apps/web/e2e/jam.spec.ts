@@ -75,8 +75,8 @@ test('first run: onboarding to a band that follows a chord', async ({ page }) =>
     await page.keyboard.press('k');
   }
   await expect(page.getByText(/Your taps land|too uneven/)).toBeVisible();
-  if (await page.getByRole('button', { name: 'Save' }).isVisible()) {
-    await page.getByRole('button', { name: 'Save' }).click();
+  if (await page.getByRole('button', { name: 'Save', exact: true }).isVisible()) {
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByText(/Calibrated: /)).toBeVisible();
   }
 

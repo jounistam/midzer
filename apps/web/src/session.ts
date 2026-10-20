@@ -23,8 +23,17 @@ import {
 import { create } from 'zustand';
 import { enqueue, flushLive, resetLive } from './live';
 import { qwertyToNote } from './qwerty';
+import { isBuiltin, saveUserSong } from './songs/library';
+import { Recorder } from './songs/recorder';
+import { chartCommands, newSongId, type Song } from './songs/song';
 
-export type Screen = 'onboarding' | 'home' | 'jam';
+export type Screen = 'onboarding' | 'home' | 'jam' | 'songs' | 'song';
+
+/** Bars `start..end` of the open song repeat. */
+export interface LoopRange {
+  start: number;
+  end: number;
+}
 export type AudioStatus = 'idle' | 'starting' | 'loading' | 'ready' | 'error';
 
 export const BAND_CHANNELS: Record<BandPart, number> = {
@@ -72,6 +81,18 @@ interface SessionState {
   tapOffsetMs: number | null;
   /** Output latency of the audio device, once audio has started. */
   outputLatencyMs: number;
+  /** The song open in the song screen, with any unsaved edits. */
+  song: Song | null;
+  songDirty: boolean;
+  /** What the user should know about an imported song. */
+  songNotes: string[];
+  /** The song bar being heard; null when stopped. */
+  songBar: number | null;
+  /** Where the song starts on Play. */
+  songStartBar: number;
+  loop: LoopRange | null;
+  /** A recorded performance is ready to save as MIDI. */
+  hasTake: boolean;
 }
 
 export const IDLE_OPTIONS: { mode: IdleMode; label: string }[] = [
@@ -156,6 +177,13 @@ export const useSession = create<SessionState>(() => ({
   idleMode: prefs.idleMode,
   tapOffsetMs: prefs.tapOffsetMs,
   outputLatencyMs: 0,
+  song: null,
+  songDirty: false,
+  songNotes: [],
+  songBar: null,
+  songStartBar: 0,
+  loop: null,
+  hasTake: false,
 }));
 
 const set = useSession.setState;
@@ -163,11 +191,13 @@ const get = useSession.getState;
 
 let engine: EngineHandle | null = null;
 let midiAccess: MIDIAccess | null = null;
+let recorder: Recorder | null = null;
 
 // ---- Navigation -------------------------------------------------------------
 
 export function goTo(screen: Screen): void {
-  set({ screen });
+  if (get().screen === 'song' && screen !== 'song') closeSong(screen);
+  else set({ screen });
 }
 
 export function setOnboardingStep(step: 0 | 1 | 2): void {
@@ -205,6 +235,8 @@ export async function startAudio(): Promise<void> {
     engine.send({ type: 'setTempo', bpm });
     engine.send({ type: 'setGain', gain: volume });
     engine.send({ type: 'setSplit', note: split });
+    recorder = new Recorder(engine.context.sampleRate);
+    syncSong();
     for (const [part, isMuted] of Object.entries(muted)) {
       if (isMuted) engine.send({ type: 'setMute', channel: BAND_CHANNELS[part as BandPart], muted: true });
     }
@@ -228,6 +260,7 @@ function frameLoop(): void {
 function onEngineEvent(event: TimedEvent, timeMs: number): void {
   enqueue(event, timeMs);
   sendMidiOut(event, timeMs);
+  recorder?.record(event);
 
   // UI state changes when the change is heard, not when it is scheduled.
   const delay = Math.max(0, timeMs - performance.now());
@@ -239,7 +272,18 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
       setTimeout(() => set({ bar: event.bar, beat: event.beat }), delay);
       break;
     case 'transport':
-      setTimeout(() => set({ playing: event.playing }), delay);
+      setTimeout(
+        () =>
+          set({
+            playing: event.playing,
+            hasTake: recorder?.hasTake ?? false,
+            ...(event.playing ? {} : { songBar: null }),
+          }),
+        delay,
+      );
+      break;
+    case 'songPosition':
+      setTimeout(() => set({ songBar: event.bar }), delay);
       break;
     case 'band':
       setTimeout(() => set({ band: event.state }), delay);
@@ -308,14 +352,22 @@ export function setVolume(volume: number): void {
   send({ type: 'setGain', gain: volume });
 }
 
-/** Picks a style. Stopped, it also takes the style's tempo; playing, it changes on the next bar. */
+/**
+ * Picks a style. Stopped, it also takes the style's tempo; playing, it changes
+ * on the next bar. With a song open the style belongs to the song.
+ */
 export function setStyle(index: number): void {
   const style = STYLES[index];
   if (!style) return;
   set({ style: index });
-  savePrefs();
   send({ type: 'setStyle', index });
-  if (!get().playing) setTempo(style.bpm);
+  const { song, screen, playing } = get();
+  if (screen === 'song' && song) {
+    editSong({ ...song, style: index });
+    return;
+  }
+  savePrefs();
+  if (!playing) setTempo(style.bpm);
 }
 
 /** Intro, A/B/C, fill or ending. Choosing a variation stops following the player. */
@@ -375,6 +427,88 @@ export function tapTempo(now = performance.now()): void {
     const avg = (taps[taps.length - 1]! - taps[0]!) / (taps.length - 1);
     setTempo(60_000 / avg);
   }
+}
+
+// ---- Songs ------------------------------------------------------------------
+
+/** Loads the open song's chart, loop and start into the engine. */
+function syncSong(): void {
+  const { song, loop, songStartBar } = get();
+  if (!song) return;
+  for (const cmd of chartCommands(song)) send(cmd);
+  send({ type: 'songLoop', start: loop?.start ?? 0, end: loop?.end ?? 0 });
+  if (!get().playing) send({ type: 'songSeek', bar: songStartBar });
+  send({ type: 'setSong', on: true });
+}
+
+/** Opens a song: the band follows its chart, style and tempo. */
+export function openSong(song: Song, notes: string[] = []): void {
+  send({ type: 'stop' });
+  set({ song, songDirty: false, songNotes: notes, songBar: null, songStartBar: 0, loop: null, screen: 'song', style: song.style });
+  send({ type: 'setStyle', index: song.style });
+  setTempo(song.bpm);
+  syncSong();
+}
+
+/** Leaves the song: back to following the player, with the Jam style and tempo. */
+export function closeSong(screen: Screen = 'songs'): void {
+  send({ type: 'stop' });
+  send({ type: 'setSong', on: false });
+  const { style } = readPrefs();
+  set({ song: null, songDirty: false, songBar: null, loop: null, screen, style });
+  send({ type: 'setStyle', index: style });
+  setTempo(STYLES[style]!.bpm);
+}
+
+/** Changes the open song; the band hears the new chart from the next beat. */
+export function editSong(song: Song): void {
+  const loop = get().loop;
+  const bars = song.bars.length;
+  set({
+    song,
+    songDirty: true,
+    loop: loop && loop.start < bars ? { start: loop.start, end: Math.min(loop.end, bars) } : null,
+    songStartBar: Math.min(get().songStartBar, Math.max(0, bars - 1)),
+  });
+  syncSong();
+}
+
+/** Saves the open song to My songs; a built-in one is saved as a copy. Returns false on failure. */
+export function saveSong(): boolean {
+  const { song } = get();
+  if (!song) return false;
+  const saved = isBuiltin(song) ? { ...song, id: newSongId(), source: 'user' as const, title: `${song.title} (my version)` } : song;
+  if (!saveUserSong(saved)) return false;
+  set({ song: saved, songDirty: false });
+  return true;
+}
+
+/** Stopped: the song starts here. Playing: it jumps here at the next bar line. */
+export function seekSong(bar: number): void {
+  set({ songStartBar: bar });
+  send({ type: 'songSeek', bar });
+}
+
+export function setLoop(loop: LoopRange | null): void {
+  set({ loop });
+  send({ type: 'songLoop', start: loop?.start ?? 0, end: loop?.end ?? 0 });
+}
+
+// ---- Recording ----------------------------------------------------------------
+
+/** Downloads the last performance as a MIDI file. */
+export function saveTake(): void {
+  const { bpm, song } = get();
+  const bytes = recorder?.export(bpm);
+  if (!bytes) return;
+  const name = (song?.title ?? 'jam').replace(/[^\w\- ]+/g, '').trim() || 'midzer';
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+  const url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'audio/midi' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${name} ${stamp}.mid`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 // ---- Player input -----------------------------------------------------------

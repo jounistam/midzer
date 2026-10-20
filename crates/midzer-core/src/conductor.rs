@@ -82,6 +82,9 @@ pub struct Conductor {
     /// False until the first downbeat, which starts the first bar rather
     /// than ending one.
     started: bool,
+    /// A song is playing: the band never rests or ends because the player
+    /// went quiet.
+    song: bool,
 }
 
 impl Default for Conductor {
@@ -104,6 +107,7 @@ impl Default for Conductor {
             idle_beats: 0,
             bars_in_variation: 0,
             started: false,
+            song: false,
         }
     }
 }
@@ -205,6 +209,10 @@ impl Conductor {
         self.idle_mode = mode;
     }
 
+    pub fn set_song(&mut self, on: bool) {
+        self.song = on;
+    }
+
     pub fn note_played(&mut self, velocity: u8) {
         self.beat_notes += 1;
         self.beat_velocity += velocity as u32;
@@ -214,7 +222,7 @@ impl Conductor {
     /// Advances to `beat` (0 is the downbeat). `keys_held` tells whether the
     /// player is holding any key, which counts as playing.
     pub fn on_beat(&mut self, beat: u8, keys_held: bool) -> Cue {
-        let active = self.beat_notes > 0 || keys_held;
+        let active = self.beat_notes > 0 || keys_held || self.song;
         self.update_energy(keys_held);
         if active || !self.heard_player {
             self.idle_beats = 0;
@@ -470,6 +478,16 @@ mod tests {
         let beats = run(&mut c, 5, |_, _| {});
         assert_eq!(beats.last().unwrap().0, Section::Ending);
         assert!(c.on_beat(0, false).stop);
+    }
+
+    #[test]
+    fn songs_keep_playing_through_silence() {
+        let mut c = Conductor::default();
+        c.set_song(true);
+        c.start(false);
+        run(&mut c, 1, chord_each_bar(80));
+        let beats = run(&mut c, 6, |_, _| {});
+        assert!(beats.iter().all(|b| b.0 == Section::Main));
     }
 
     #[test]

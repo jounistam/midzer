@@ -22,6 +22,12 @@ const Cmd = {
   SetIdleMode: 14,
   SetLatency: 15,
   SetClick: 16,
+  SongClear: 17,
+  SongChord: 18,
+  SongMark: 19,
+  SongLoop: 20,
+  SetSong: 21,
+  SongSeek: 22,
 } as const;
 
 /** Built-in styles in engine order; mirrors `styles()` in crates/midzer-core/src/style.rs. */
@@ -41,6 +47,19 @@ const SECTION_REQUESTS: readonly SectionRequest[] = ['intro', 'A', 'B', 'C', 'fi
 /** What the band does when the player stops; mirrors `IDLE_MODES` in command.rs. */
 export type IdleMode = 'keepPlaying' | 'rest' | 'end';
 const IDLE_MODES: readonly IdleMode[] = ['keepPlaying', 'rest', 'end'];
+
+/** A chord as the engine names it: pitch classes and an index into the qualities. */
+export interface ChordSpec {
+  root: number;
+  quality: number;
+  bass: number;
+}
+
+/** A song chart beat: keep the chord, no chord, or a new chord. Mirrors `Slot` in song.rs. */
+export type ChartSlot = 'hold' | 'nc' | ChordSpec;
+
+/** A section a song asks for at a bar; mirrors the `SongMark` encoding in command.rs. */
+export type SongMark = SectionRequest | null;
 
 export type EngineCommand =
   | { type: 'noteOn'; note: number; velocity: number }
@@ -64,7 +83,17 @@ export type EngineCommand =
   /** How late (ms) the player's notes arrive after the beat they meant. */
   | { type: 'setLatency'; ms: number }
   /** A click on every beat instead of the band, for calibration. */
-  | { type: 'setClick'; on: boolean };
+  | { type: 'setClick'; on: boolean }
+  /** Empties the song chart and sets its length in bars. */
+  | { type: 'songClear'; bars: number }
+  | { type: 'songChord'; beat: number; slot: ChartSlot }
+  | { type: 'songMark'; bar: number; mark: SongMark }
+  /** Repeats bars `start..end`; an empty range turns the loop off. */
+  | { type: 'songLoop'; start: number; end: number }
+  /** Whether the song chart, rather than the player, sets the harmony. */
+  | { type: 'setSong'; on: boolean }
+  /** Stopped: where the song starts. Playing: a jump on the next bar line. */
+  | { type: 'songSeek'; bar: number };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -107,17 +136,33 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.SetLatency, floatBits(cmd.ms), 0, 0];
     case 'setClick':
       return [Cmd.SetClick, cmd.on ? 1 : 0, 0, 0];
+    case 'songClear':
+      return [Cmd.SongClear, cmd.bars, 0, 0];
+    case 'songChord': {
+      const { slot } = cmd;
+      if (slot === 'hold') return [Cmd.SongChord, cmd.beat, 0, 0];
+      if (slot === 'nc') return [Cmd.SongChord, cmd.beat, 1, 0];
+      return [Cmd.SongChord, cmd.beat, 2, slot.root | (slot.quality << 8) | (slot.bass << 16)];
+    }
+    case 'songMark':
+      return [Cmd.SongMark, cmd.bar, cmd.mark === null ? 0 : SECTION_REQUESTS.indexOf(cmd.mark) + 1, 0];
+    case 'songLoop':
+      return [Cmd.SongLoop, cmd.start, cmd.end, 0];
+    case 'setSong':
+      return [Cmd.SetSong, cmd.on ? 1 : 0, 0, 0];
+    case 'songSeek':
+      return [Cmd.SongSeek, cmd.bar, 0, 0];
   }
 }
 
 // ---- Events: engine → UI / MIDI out ----------------------------------------
 
 /** Order matches `Quality::ALL` in crates/midzer-core/src/chord.rs. */
-const QUALITY_SUFFIXES = [
+export const QUALITY_SUFFIXES = [
   '', 'm', 'dim', 'aug', 'sus2', 'sus4', '5', '6', 'm6', '7', 'maj7', 'm7', 'm7b5', 'dim7', 'add9',
 ] as const;
 /** Chord-tone intervals per quality; mirrors `Quality::intervals`. */
-const QUALITY_INTERVALS: readonly (readonly number[])[] = [
+export const QUALITY_INTERVALS: readonly (readonly number[])[] = [
   [0, 4, 7], [0, 3, 7], [0, 3, 6], [0, 4, 8], [0, 2, 7], [0, 5, 7], [0, 7], [0, 4, 7, 9],
   [0, 3, 7, 9], [0, 4, 7, 10], [0, 4, 7, 11], [0, 3, 7, 10], [0, 3, 6, 10], [0, 3, 6, 9], [0, 2, 4, 7],
 ];
@@ -163,7 +208,9 @@ export type EngineEvent =
   | { type: 'chord'; chord: ChordInfo | null }
   | { type: 'beat'; bar: number; beat: number }
   | { type: 'transport'; playing: boolean }
-  | { type: 'band'; state: BandState };
+  | { type: 'band'; state: BandState }
+  /** A song bar starts; sent on every downbeat while a song plays. */
+  | { type: 'songPosition'; bar: number };
 
 /** An event plus the AudioContext frame at which it sounds. */
 export type TimedEvent = EngineEvent & { frame: number };
@@ -214,6 +261,8 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
       };
       return { type: 'band', state, frame };
     }
+    case 8:
+      return { type: 'songPosition', bar: a, frame };
     default:
       return null;
   }

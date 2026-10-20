@@ -10,6 +10,23 @@ describe('encodeCommand', () => {
     expect(encodeCommand({ type: 'setStyle', index: 4 })).toEqual([10, 4, 0, 0]);
   });
 
+  it('encodes song charts like command.rs', () => {
+    expect(encodeCommand({ type: 'songClear', bars: 32 })).toEqual([17, 32, 0, 0]);
+    expect(encodeCommand({ type: 'songChord', beat: 7, slot: 'hold' })).toEqual([18, 7, 0, 0]);
+    expect(encodeCommand({ type: 'songChord', beat: 8, slot: 'nc' })).toEqual([18, 8, 1, 0]);
+    expect(encodeCommand({ type: 'songChord', beat: 9, slot: { root: 9, quality: 11, bass: 0 } })).toEqual([
+      18,
+      9,
+      2,
+      9 | (11 << 8),
+    ]);
+    expect(encodeCommand({ type: 'songMark', bar: 4, mark: 'B' })).toEqual([19, 4, 3, 0]);
+    expect(encodeCommand({ type: 'songMark', bar: 4, mark: null })).toEqual([19, 4, 0, 0]);
+    expect(encodeCommand({ type: 'songLoop', start: 2, end: 6 })).toEqual([20, 2, 6, 0]);
+    expect(encodeCommand({ type: 'setSong', on: true })).toEqual([21, 1, 0, 0]);
+    expect(encodeCommand({ type: 'songSeek', bar: 12 })).toEqual([22, 12, 0, 0]);
+  });
+
   it('encodes floats as f32 bits', () => {
     const [op, bits] = encodeCommand({ type: 'setTempo', bpm: 96.5 });
     expect(op).toBe(7);
@@ -56,6 +73,10 @@ describe('decodeEvent', () => {
         energy: 200 / 255,
       },
     });
+  });
+
+  it('decodes song positions', () => {
+    expect(decodeEvent(8, 17, 0, 3)).toEqual({ type: 'songPosition', bar: 17, frame: 3 });
   });
 
   it('ignores unknown opcodes', () => {

@@ -1,6 +1,6 @@
 # midzer — Plan: an interactive MIDI backing band
 
-## Status (2026-10-20)
+## Status (2026-10-21)
 - **D0 design:** Figma file https://www.figma.com/design/LNI6PLmXotvCZHeRPNukyC
   - Direction **A · Stage / club** was chosen.
   - Tokens, components and screens for A are done. They are sections on the Directions page, because the Starter plan allows only 3 pages.
@@ -22,7 +22,24 @@
   - Six styles (Pop, Rock, Funk, Bossa, Ballad, Blues), written in a step-grid notation in `style.rs` and built once at startup. They include shuffle (12-step) grids, two-bar patterns, arpeggios and per-style drum kits. Style changes wait for the bar line.
   - Latency calibration: tap along with a click. Chords played just after a beat (within the latency plus 60 ms) count for that beat instead of the next.
   - UI: section pads, an energy meter/slider, a style picker, a status line, the onboarding vibe picker and settings for idle mode and calibration.
-- **Next: M3** (songs).
+- **M3 songs:** done (2026-10-21).
+  - The engine plays song charts (`song.rs`). The UI loads a chart with commands: one chord slot per beat and one section mark per bar, in fixed arrays of up to 512 bars. Chord and section changes stay sample-accurate, and charts can be reloaded while playing.
+  - Section marks drive the conductor: intro bars, A/B/C (with a fill into each change), fills, and the ending in an ending section's last bar. A chart without an ending gets one after its last bar.
+  - While a song plays, the player's chords don't change the harmony and the band never rests for silence. Energy still follows the player.
+  - Loop a range of bars, start from any bar, or jump there at the next bar line while playing. The engine reports the song bar on every downbeat.
+  - The song model and a chart notation (`C | Am F | C . G7 .`, with `[Verse]`, `[Fill]` and `%` tags) live in `apps/web/src/songs`. Nine built-in songs: common progressions plus public-domain tunes.
+  - Imports:
+    - ChordPro, pasted or from a file. It has no rhythm, so each chord gets a bar unless the file has grid lines. Lyrics are kept per bar.
+    - MIDI files: harmony per half bar from duration-weighted pitch profiles matched against chord templates. Drums are skipped and the file is read as 4/4 with its first tempo; anything else gets a warning.
+  - Chart editor: edit per bar or as text; sections, fills, add/duplicate/delete bars; title, artist and tempo. Songs are saved to My songs in localStorage, and a built-in song is saved as a copy.
+  - Every performance from Play to Stop is recorded. "Save last take as MIDI" writes a format-1 file with one track per part, on the band's beat grid, including tempo changes.
+  - Tests: Rust song and band tests, song commands in the no-allocation test, Vitest for the parsers, SMF and recorder, and a Playwright songs flow.
+- **Next: M4** (learn).
+- Open from M3:
+  - Charts are 4/4 only. 3/4 songs (and so a waltz style) need meter support in the engine.
+  - My songs live in localStorage. Moving them to IndexedDB is planned for M4, together with progress.
+  - MIDI import reads only chords. Keeping the melody for Learn is M4 work.
+  - The song screens aren't in the Figma file yet. They were built straight in direction A.
 - Open from M2:
   - The styles need a listening pass on real speakers. Nobody has auditioned them yet; only levels and clipping were checked, with `pnpm demo`.
   - The onboarding vibe cards have no audio preview.

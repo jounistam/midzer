@@ -4,7 +4,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use midzer_core::{Command, IdleMode, Request};
+use midzer_core::{Chord, Command, IdleMode, Quality, Request, Slot};
 use midzer_wasm::{BLOCK_FRAMES, Host};
 
 struct CountingAlloc;
@@ -76,6 +76,30 @@ fn playing_band_renders_without_allocating() {
     }
     command(&mut host, Command::Section { request: Request::Intro });
     host.process(BLOCK_FRAMES);
+    command(&mut host, Command::Stop);
+    host.process(BLOCK_FRAMES);
+
+    // A looping song with marks, loaded and reloaded while playing.
+    let load = |host: &mut Host| {
+        command(host, Command::SongClear { bars: 4 });
+        for (beat, root) in [(0, 0), (4, 9), (8, 5), (12, 7)] {
+            let slot = Slot::Chord(Chord::new(root, Quality::Major));
+            command(host, Command::SongChord { beat, slot });
+        }
+        command(host, Command::SongMark { bar: 0, mark: Some(Request::Intro) });
+        command(host, Command::SongMark { bar: 2, mark: Some(Request::Variation(2)) });
+        command(host, Command::SongLoop { start: 1, end: 4 });
+    };
+    load(&mut host);
+    command(&mut host, Command::SetSong { on: true });
+    command(&mut host, Command::Play);
+    for block in 0..(48_000 * 60 / 140 * 4 * 10 / BLOCK_FRAMES) {
+        if block == 2000 {
+            load(&mut host);
+            command(&mut host, Command::SongSeek { bar: 2 });
+        }
+        events += host.process(BLOCK_FRAMES);
+    }
     command(&mut host, Command::Stop);
     host.process(BLOCK_FRAMES);
     COUNTING.store(false, Ordering::Relaxed);

@@ -58,6 +58,12 @@ impl Engine {
             Command::SetIdleMode { mode } => self.band.set_idle_mode(mode),
             Command::SetLatency { ms } => self.band.set_latency(ms),
             Command::SetClick { on } => self.band.set_click(on, &mut self.events),
+            Command::SongClear { bars } => self.band.clear_song(bars as u32),
+            Command::SongChord { beat, slot } => self.band.set_song_slot(beat as u32, slot),
+            Command::SongMark { bar, mark } => self.band.set_song_mark(bar as u32, mark),
+            Command::SongLoop { start, end } => self.band.set_song_loop(start as u32, end as u32),
+            Command::SetSong { on } => self.band.set_song(on),
+            Command::SongSeek { bar } => self.band.seek_song(bar as u32),
             // Mixing is the synth's job; the host routes this one.
             Command::SetGain { .. } => {}
         }

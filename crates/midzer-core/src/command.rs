@@ -1,4 +1,6 @@
+use crate::chord::{Chord, Quality};
 use crate::conductor::{IdleMode, Request};
+use crate::song::Slot;
 
 /// Number of `u32` words in an encoded command.
 pub const WORDS_PER_COMMAND: usize = 4;
@@ -34,6 +36,18 @@ pub enum Command {
     SetLatency { ms: f32 },
     /// A click on every beat instead of the band, for latency calibration.
     SetClick { on: bool },
+    /// Empties the song chart and sets its length in bars.
+    SongClear { bars: u16 },
+    /// The chart's harmony from song beat `beat` on.
+    SongChord { beat: u16, slot: Slot },
+    /// A section the song asks for at bar `bar`: intro, variation, fill or ending.
+    SongMark { bar: u16, mark: Option<Request> },
+    /// Repeats bars `start..end`; an empty range turns the loop off.
+    SongLoop { start: u16, end: u16 },
+    /// Whether the song chart, rather than the player, sets the harmony.
+    SetSong { on: bool },
+    /// Stopped: where the song starts. Playing: a jump on the next bar line.
+    SongSeek { bar: u16 },
 }
 
 mod op {
@@ -53,6 +67,12 @@ mod op {
     pub const SET_IDLE_MODE: u32 = 14;
     pub const SET_LATENCY: u32 = 15;
     pub const SET_CLICK: u32 = 16;
+    pub const SONG_CLEAR: u32 = 17;
+    pub const SONG_CHORD: u32 = 18;
+    pub const SONG_MARK: u32 = 19;
+    pub const SONG_LOOP: u32 = 20;
+    pub const SET_SONG: u32 = 21;
+    pub const SONG_SEEK: u32 = 22;
 }
 
 fn request_code(request: Request) -> u32 {
@@ -70,6 +90,35 @@ fn request_from(code: u32) -> Option<Request> {
         1..=3 => Some(Request::Variation(code as u8 - 1)),
         4 => Some(Request::Fill),
         5 => Some(Request::Ending),
+        _ => None,
+    }
+}
+
+/// Slots travel as `[kind, root | quality << 8 | bass << 16]` with kind
+/// 0 hold, 1 no chord, 2 chord.
+fn slot_words(slot: Slot) -> (u32, u32) {
+    match slot {
+        Slot::Hold => (0, 0),
+        Slot::NoChord => (1, 0),
+        Slot::Chord(c) => {
+            let quality = Quality::ALL.iter().position(|q| *q == c.quality).unwrap_or(0) as u32;
+            (2, c.root as u32 | quality << 8 | (c.bass as u32) << 16)
+        }
+    }
+}
+
+fn slot_from(kind: u32, packed: u32) -> Option<Slot> {
+    match kind {
+        0 => Some(Slot::Hold),
+        1 => Some(Slot::NoChord),
+        2 => {
+            let (root, quality, bass) = (packed & 0xff, packed >> 8 & 0xff, packed >> 16);
+            if root >= 12 || bass >= 12 {
+                return None;
+            }
+            let quality = *Quality::ALL.get(quality as usize)?;
+            Some(Slot::Chord(Chord { root: root as u8, quality, bass: bass as u8 }))
+        }
         _ => None,
     }
 }
@@ -95,12 +144,22 @@ impl Command {
             Command::SetIdleMode { mode } => [op::SET_IDLE_MODE, IDLE_MODES.iter().position(|m| *m == mode).unwrap_or(0) as u32, 0, 0],
             Command::SetLatency { ms } => [op::SET_LATENCY, ms.to_bits(), 0, 0],
             Command::SetClick { on } => [op::SET_CLICK, on as u32, 0, 0],
+            Command::SongClear { bars } => [op::SONG_CLEAR, bars as u32, 0, 0],
+            Command::SongChord { beat, slot } => {
+                let (kind, packed) = slot_words(slot);
+                [op::SONG_CHORD, beat as u32, kind, packed]
+            }
+            Command::SongMark { bar, mark } => [op::SONG_MARK, bar as u32, mark.map_or(0, |m| request_code(m) + 1), 0],
+            Command::SongLoop { start, end } => [op::SONG_LOOP, start as u32, end as u32, 0],
+            Command::SetSong { on } => [op::SET_SONG, on as u32, 0, 0],
+            Command::SongSeek { bar } => [op::SONG_SEEK, bar as u32, 0, 0],
         }
     }
 
     /// Decodes a record, returning `None` for unknown opcodes or out-of-range values.
     pub fn decode(words: [u32; WORDS_PER_COMMAND]) -> Option<Self> {
-        let [opcode, a, b, _] = words;
+        let [opcode, a, b, c] = words;
+        let short = |v: u32| u16::try_from(v).ok();
         let midi = |v: u32| u8::try_from(v).ok().filter(|v| *v < 128);
         let float = |v: u32| Some(f32::from_bits(v)).filter(|f| f.is_finite());
         match opcode {
@@ -120,6 +179,15 @@ impl Command {
             op::SET_IDLE_MODE => Some(Command::SetIdleMode { mode: *IDLE_MODES.get(a as usize)? }),
             op::SET_LATENCY => Some(Command::SetLatency { ms: float(a)? }),
             op::SET_CLICK => Some(Command::SetClick { on: a != 0 }),
+            op::SONG_CLEAR => Some(Command::SongClear { bars: short(a)? }),
+            op::SONG_CHORD => Some(Command::SongChord { beat: short(a)?, slot: slot_from(b, c)? }),
+            op::SONG_MARK => Some(Command::SongMark {
+                bar: short(a)?,
+                mark: if b == 0 { None } else { Some(request_from(b - 1)?) },
+            }),
+            op::SONG_LOOP => Some(Command::SongLoop { start: short(a)?, end: short(b)? }),
+            op::SET_SONG => Some(Command::SetSong { on: a != 0 }),
+            op::SONG_SEEK => Some(Command::SongSeek { bar: short(a)? }),
             _ => None,
         }
     }
@@ -151,6 +219,16 @@ mod tests {
             Command::SetIdleMode { mode: IdleMode::End },
             Command::SetLatency { ms: 42.5 },
             Command::SetClick { on: true },
+            Command::SongClear { bars: 32 },
+            Command::SongChord { beat: 7, slot: Slot::Hold },
+            Command::SongChord { beat: 8, slot: Slot::NoChord },
+            Command::SongChord { beat: 9, slot: Slot::Chord(Chord { root: 9, quality: Quality::Minor7, bass: 0 }) },
+            Command::SongMark { bar: 3, mark: None },
+            Command::SongMark { bar: 4, mark: Some(Request::Variation(1)) },
+            Command::SongMark { bar: 5, mark: Some(Request::Intro) },
+            Command::SongLoop { start: 2, end: 6 },
+            Command::SetSong { on: true },
+            Command::SongSeek { bar: 12 },
         ] {
             assert_eq!(Command::decode(cmd.encode()), Some(cmd));
         }
@@ -164,5 +242,10 @@ mod tests {
         assert_eq!(Command::decode([op::SET_TEMPO, f32::INFINITY.to_bits(), 0, 0]), None);
         assert_eq!(Command::decode([op::SECTION, 6, 0, 0]), None);
         assert_eq!(Command::decode([op::SET_IDLE_MODE, 3, 0, 0]), None);
+        assert_eq!(Command::decode([op::SONG_CHORD, 0, 2, 12]), None);
+        assert_eq!(Command::decode([op::SONG_CHORD, 0, 2, 15 << 8]), None);
+        assert_eq!(Command::decode([op::SONG_CHORD, 0, 3, 0]), None);
+        assert_eq!(Command::decode([op::SONG_MARK, 0, 7, 0]), None);
+        assert_eq!(Command::decode([op::SONG_CLEAR, 70_000, 0, 0]), None);
     }
 }

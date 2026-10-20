@@ -1,7 +1,17 @@
 import type { BandPart, SectionRequest } from '@midzer/audio-web';
 import type { CSSProperties } from 'react';
 import { padState } from './bandStatus';
-import { requestSection, setEnergy, setFollow, setTempo, tapTempo, toggleMute, togglePlay, useSession } from '../session';
+import {
+  requestSection,
+  saveTake,
+  setEnergy,
+  setFollow,
+  setTempo,
+  tapTempo,
+  toggleMute,
+  togglePlay,
+  useSession,
+} from '../session';
 
 const PARTS: { part: BandPart; label: string }[] = [
   { part: 'drums', label: 'Drums' },
@@ -146,6 +156,28 @@ export function EnergyControl() {
   );
 }
 
+/** Saves the last performance (Play to Stop) as a MIDI file. */
+export function TakeButton() {
+  const hasTake = useSession((s) => s.hasTake);
+  const playing = useSession((s) => s.playing);
+  return (
+    <div className="control-group">
+      <p className="label">Recording</p>
+      <button
+        className="btn btn-secondary"
+        onClick={saveTake}
+        disabled={!hasTake}
+        title={hasTake ? 'Your notes and the band, one track each' : undefined}
+      >
+        Save last take as MIDI
+      </button>
+      <p className="setting-note">
+        {playing ? 'Recording… stop to save.' : hasTake ? 'Your notes and every band part.' : 'Everything from Play to Stop is recorded.'}
+      </p>
+    </div>
+  );
+}
+
 export function ControlPanel() {
   return (
     <aside className="panel control-panel">
@@ -154,6 +186,7 @@ export function ControlPanel() {
       <EnergyControl />
       <TempoControl />
       <BandMutes />
+      <TakeButton />
     </aside>
   );
 }

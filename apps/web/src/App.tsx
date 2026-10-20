@@ -2,6 +2,8 @@ import { useEffect } from 'react';
 import { Home } from './screens/Home';
 import { Jam } from './screens/Jam';
 import { Onboarding } from './screens/Onboarding';
+import { Songs } from './screens/Songs';
+import { SongScreen } from './screens/SongScreen';
 import { attachQwerty, useSession } from './session';
 
 export function App() {
@@ -17,5 +19,9 @@ export function App() {
       return <Home />;
     case 'jam':
       return <Jam />;
+    case 'songs':
+      return <Songs />;
+    case 'song':
+      return <SongScreen />;
   }
 }
