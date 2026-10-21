@@ -9,7 +9,9 @@ An interactive backing band: play a MIDI keyboard (or your computer keyboard) an
 | `crates/midzer-core` | Platform-independent Rust engine: chord recognition, styles, conductor (sections, energy, stop detection), song charts with wait points for Learn, band scheduler. No I/O, no allocation on the audio path. |
 | `crates/midzer-synth` | SoundFont playback of engine events (rustysynth). |
 | `crates/midzer-wasm` | Raw C-ABI wasm exports for the AudioWorklet; includes the no-allocation test. |
-| `packages/audio-web` | AudioWorklet host, lock-free record rings (SharedArrayBuffer), protocol mirror, Web MIDI. |
+| `crates/midzer-native` | Native host for the desktop app: the engine in a cpal audio callback, MIDI through midir, the microphone. |
+| `apps/desktop` | Tauri 2 desktop app: the web UI with the native engine (`src-tauri`). |
+| `packages/audio-web` | AudioWorklet host, lock-free record rings (SharedArrayBuffer), protocol mirror, Web MIDI, and the desktop host's client (`native.ts`). |
 | `apps/web` | React + Vite UI (design direction A), PixiJS keyboard and falling notes, Playwright e2e. `src/songs` holds the song model, chart and melody notation, ChordPro/MIDI import and MIDI export; `src/learn` the targets, judge, lessons and progress; `src/storage` the IndexedDB stores. |
 
 ## Development
@@ -23,13 +25,31 @@ pnpm test    # cargo test + vitest
 pnpm e2e     # Playwright against the production build, using the system Chrome
 pnpm build   # production build in apps/web/dist
 pnpm demo    # renders the band offline to demo.wav (no browser needed)
+pnpm desktop        # the desktop app (Tauri) in development
+pnpm desktop:build  # a desktop installer in target/release/bundle
 ```
+
+The desktop app and `crates/midzer-native` need system libraries. On Debian/Ubuntu:
+
+```sh
+sudo apt install pkg-config build-essential libasound2-dev libwebkit2gtk-4.1-dev libgtk-3-dev \
+  libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libssl-dev libdbus-1-dev
+cargo install tauri-cli --version '^2'
+```
+
+They are left out of plain `cargo build`/`cargo test` (see `default-members`); build them with
+`cargo test -p midzer-native` or the scripts above. `MIDZER_SELFTEST=1 target/release/midzer-desktop`
+drives the app once, silently, and exits with the result.
 
 Computer-keyboard playing: `A W S E D F T G Y H U J K` is one octave from middle C, and Space starts or stops the band.
 
 In Jam, the band follows how hard and how much you play ("Follow me"), or you drive it with the Intro / A / B / C / Fill / Ending pads. When you stop playing for two bars it rests until you come back (Settings can change that to an ending or to keep playing). Settings → Timing → Calibrate measures your latency by tapping along with a click.
 
 In Songs, the band plays a chord chart while you play on top: built-in songs, your own, or ones imported from MIDI or ChordPro files (drop them on the Songs page or paste chords). Click a bar to start there, shift-click to select bars to loop, and use Edit chart to change chords, sections and fills. In both Jam and Songs, everything from Play to Stop is recorded, and "Save last take as MIDI" downloads it with one track per part.
+
+Settings → Microphone lets the band listen instead of (or as well as) a keyboard: "Single notes" for singing or a melody line, "Chords" for a strummed guitar, whose chords the band follows. Use headphones if you can; with speakers the mic also hears the band. "Follow my tempo" lets the band speed up and slow down with you, within 15 % of the set tempo.
+
+The desktop app runs the same UI with the engine on a native audio thread, and uses MIDI devices directly (desktop webviews have no Web MIDI).
 
 In Learn, notes and chords fall onto the keyboard. With "Wait for me" on, the band stops at each one until you play it; with it off, the band keeps time and each note is graded by how close to the beat it lands. Lessons go from a first chord to melodies and both hands together, and each one opens once the one before has a star. Any song can be practised too, as melody, chords or both, at a slower speed or in a loop. Your songs and Learn progress are kept in the browser's IndexedDB.
 

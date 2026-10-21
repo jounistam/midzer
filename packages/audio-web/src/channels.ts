@@ -5,6 +5,8 @@ export const KEYS_CHANNEL = 1;
 export const BASS_CHANNEL = 2;
 export const PAD_CHANNEL = 3;
 export const DRUM_CHANNEL = 9;
+/** What the microphone heard; reported, never played. Mirrors `MIC_CHANNEL` in event.rs. */
+export const MIC_CHANNEL = 15;
 
 export type BandPart = 'keys' | 'bass' | 'pad' | 'drums';
 

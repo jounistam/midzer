@@ -1,0 +1,18 @@
+[package]
+name = "midzer-desktop"
+description = "midzer desktop app: the web UI in Tauri, with the engine on a native audio thread."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "midzer_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+midzer-native = { path = "../../../crates/midzer-native" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }

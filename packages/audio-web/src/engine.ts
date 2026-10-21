@@ -7,7 +7,7 @@ import workletUrl from './worklet.ts?worker&url';
 const PROCESSOR_NAME = 'midzer-engine';
 const POLL_MS = 4;
 
-export type Transport = 'shared-memory' | 'message-port';
+export type Transport = 'shared-memory' | 'message-port' | 'native';
 
 /**
  * Receives each engine event with `timeMs`, the `performance.now()` time at
@@ -16,9 +16,16 @@ export type Transport = 'shared-memory' | 'message-port';
  */
 export type EventListener = (event: TimedEvent, timeMs: number) => void;
 
+export interface MicOptions {
+  /** Off with headphones: echo cancellation blurs pitch, but with speakers it keeps the band out. */
+  echoCancellation: boolean;
+}
+
+/** The engine running in an AudioWorklet (web) or a native audio thread (desktop). */
 export interface EngineHandle {
-  readonly context: AudioContext;
-  readonly node: AudioWorkletNode;
+  readonly sampleRate: number;
+  /** How long audio takes from the engine to the speakers, in ms. */
+  readonly outputLatencyMs: number;
   /** How commands reach the audio thread; shared memory needs cross-origin isolation. */
   readonly transport: Transport;
   send(cmd: EngineCommand): void;
@@ -26,7 +33,17 @@ export interface EngineHandle {
   onEvent(listener: EventListener): () => void;
   /** Loads an SF2 file; resolves false if it could not be parsed. */
   loadSoundFont(bytes: ArrayBuffer): Promise<boolean>;
+  /**
+   * Feeds the microphone to the engine. Resolves a function that stops it;
+   * rejects if there is no microphone or access is denied.
+   */
+  openMic(options: MicOptions): Promise<() => void>;
   close(): Promise<void>;
+}
+
+/** Whether the page runs inside the desktop app, where the engine is native (see native.ts). */
+export function isNativeHost(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
 /** Loads the Rust engine into an AudioWorklet. Call from a user gesture. */
@@ -42,7 +59,9 @@ export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
   const commands = shared ? RecordRing.create(8192) : null;
   const events = shared ? RecordRing.create(4096) : null;
   const node = new AudioWorkletNode(context, PROCESSOR_NAME, {
-    numberOfInputs: 0,
+    numberOfInputs: 1,
+    channelCount: 1,
+    channelCountMode: 'explicit',
     outputChannelCount: [2],
     processorOptions: { module, commands: commands?.buffer ?? null, events: events?.buffer ?? null },
   });
@@ -89,9 +108,10 @@ export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
       }, POLL_MS)
     : undefined;
 
+  const { outputLatency = 0, baseLatency = 0 } = context;
   return {
-    context,
-    node,
+    sampleRate,
+    outputLatencyMs: Math.round((outputLatency || baseLatency) * 1000),
     transport: shared ? 'shared-memory' : 'message-port',
     send(cmd) {
       const words = encodeCommand(cmd);
@@ -111,6 +131,17 @@ export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
         pendingSoundFont = resolve;
         node.port.postMessage({ type: 'soundfont', bytes } satisfies PortMessage, [bytes]);
       });
+    },
+    async openMic({ echoCancellation }) {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
+      });
+      const source = new MediaStreamAudioSourceNode(context, { mediaStream: stream });
+      source.connect(node);
+      return () => {
+        source.disconnect();
+        for (const track of stream.getTracks()) track.stop();
+      };
     },
     async close() {
       clearInterval(poll);

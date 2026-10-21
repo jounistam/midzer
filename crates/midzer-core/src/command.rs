@@ -1,5 +1,6 @@
 use crate::chord::{Chord, Quality};
 use crate::conductor::{IdleMode, Request};
+use crate::listen::ListenMode;
 use crate::song::Slot;
 
 /// Number of `u32` words in an encoded command.
@@ -51,6 +52,10 @@ pub enum Command {
     /// The band stops at song tick `tick` (in [`crate::style::PPQ`] per beat)
     /// and waits there until the wait moves or is cleared with `None`.
     SongWait { tick: Option<u32> },
+    /// What the microphone listens for, and how loud a sound must be (dBFS) to count.
+    SetListen { mode: ListenMode, gate_db: f32 },
+    /// Whether the band follows the player's tempo.
+    SetTempoFollow { on: bool },
 }
 
 mod op {
@@ -77,6 +82,8 @@ mod op {
     pub const SET_SONG: u32 = 21;
     pub const SONG_SEEK: u32 = 22;
     pub const SONG_WAIT: u32 = 23;
+    pub const SET_LISTEN: u32 = 24;
+    pub const SET_TEMPO_FOLLOW: u32 = 25;
 }
 
 fn request_code(request: Request) -> u32 {
@@ -158,6 +165,24 @@ impl Command {
             Command::SetSong { on } => [op::SET_SONG, on as u32, 0, 0],
             Command::SongSeek { bar } => [op::SONG_SEEK, bar as u32, 0, 0],
             Command::SongWait { tick } => [op::SONG_WAIT, tick.is_some() as u32, tick.unwrap_or(0), 0],
+            Command::SetListen { mode, gate_db } => {
+                let mode = ListenMode::ALL.iter().position(|m| *m == mode).unwrap_or(0) as u32;
+                [op::SET_LISTEN, mode, gate_db.to_bits(), 0]
+            }
+            Command::SetTempoFollow { on } => [op::SET_TEMPO_FOLLOW, on as u32, 0, 0],
+        }
+    }
+
+    /// Translates a raw MIDI message from a controller; mirrors `midiToCommand` in
+    /// `packages/audio-web/src/midi.ts`.
+    pub fn from_midi(data: &[u8]) -> Option<Self> {
+        let (status, d1, d2) = (*data.first()?, data.get(1).copied().unwrap_or(0), data.get(2).copied().unwrap_or(0));
+        match status & 0xf0 {
+            0x90 if d2 > 0 && d1 < 128 => Some(Command::NoteOn { note: d1, velocity: d2.min(127) }),
+            0x80 | 0x90 if d1 < 128 => Some(Command::NoteOff { note: d1 }),
+            // All Sound Off / All Notes Off
+            0xb0 if d1 == 120 || d1 == 123 => Some(Command::AllNotesOff),
+            _ => None,
         }
     }
 
@@ -194,6 +219,8 @@ impl Command {
             op::SET_SONG => Some(Command::SetSong { on: a != 0 }),
             op::SONG_SEEK => Some(Command::SongSeek { bar: short(a)? }),
             op::SONG_WAIT => Some(Command::SongWait { tick: (a != 0).then_some(b) }),
+            op::SET_LISTEN => Some(Command::SetListen { mode: *ListenMode::ALL.get(a as usize)?, gate_db: float(b)? }),
+            op::SET_TEMPO_FOLLOW => Some(Command::SetTempoFollow { on: a != 0 }),
             _ => None,
         }
     }
@@ -237,9 +264,22 @@ mod tests {
             Command::SongSeek { bar: 12 },
             Command::SongWait { tick: Some(5 * 480 + 240) },
             Command::SongWait { tick: None },
+            Command::SetListen { mode: ListenMode::Chords, gate_db: -45.0 },
+            Command::SetTempoFollow { on: true },
         ] {
             assert_eq!(Command::decode(cmd.encode()), Some(cmd));
         }
+    }
+
+    #[test]
+    fn translates_midi() {
+        assert_eq!(Command::from_midi(&[0x93, 60, 100]), Some(Command::NoteOn { note: 60, velocity: 100 }));
+        assert_eq!(Command::from_midi(&[0x90, 60, 0]), Some(Command::NoteOff { note: 60 }));
+        assert_eq!(Command::from_midi(&[0x80, 61, 30]), Some(Command::NoteOff { note: 61 }));
+        assert_eq!(Command::from_midi(&[0xb0, 123, 0]), Some(Command::AllNotesOff));
+        assert_eq!(Command::from_midi(&[0xb0, 64, 127]), None);
+        assert_eq!(Command::from_midi(&[0xf8]), None);
+        assert_eq!(Command::from_midi(&[]), None);
     }
 
     #[test]
@@ -255,5 +295,6 @@ mod tests {
         assert_eq!(Command::decode([op::SONG_CHORD, 0, 3, 0]), None);
         assert_eq!(Command::decode([op::SONG_MARK, 0, 7, 0]), None);
         assert_eq!(Command::decode([op::SONG_CLEAR, 70_000, 0, 0]), None);
+        assert_eq!(Command::decode([op::SET_LISTEN, 3, 0, 0]), None);
     }
 }

@@ -11,7 +11,9 @@
     "test": "cargo test --release && pnpm -r test",
     "e2e": "pnpm --filter @midzer/web e2e",
     "typecheck": "pnpm -r typecheck",
-    "demo": "node scripts/render-demo.mjs"
+    "demo": "node scripts/render-demo.mjs",
+    "desktop": "pnpm build:wasm && pnpm --filter @midzer/desktop app",
+    "desktop:build": "pnpm build:wasm && pnpm --filter @midzer/desktop app:build"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

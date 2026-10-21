@@ -1,0 +1,13 @@
+[package]
+name = "midzer-native"
+description = "Native host for midzer-core: cpal audio, midir MIDI and the microphone, for desktop and mobile."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+midzer-core = { path = "../midzer-core" }
+midzer-synth = { path = "../midzer-synth" }
+cpal = "0.18"
+midir = "0.11"
+crossbeam-queue = "0.3"

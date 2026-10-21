@@ -1,0 +1,9 @@
+{
+  "name": "@midzer/desktop",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "app": "cargo tauri dev",
+    "app:build": "cargo tauri build"
+  }
+}

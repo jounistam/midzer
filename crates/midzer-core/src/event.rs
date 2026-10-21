@@ -8,6 +8,9 @@ pub const WORDS_PER_EVENT: usize = 4;
 pub const MAX_EVENTS_PER_BLOCK: usize = 512;
 
 pub const DRUM_CHANNEL: u8 = 9;
+/// MIDI channel of what the microphone heard. These notes are reported but
+/// not played: the player's own sound is already in the room.
+pub const MIC_CHANNEL: u8 = 15;
 
 /// Something the engine did, for the synth, MIDI out and the UI.
 ///
@@ -28,6 +31,10 @@ pub enum EngineEvent {
     SongPosition { beat: u32 },
     /// The band stopped at song tick `tick` to wait for the player, or went on from there.
     Hold { holding: bool, tick: u32 },
+    /// Microphone loudness (0..=255 over -80..0 dBFS) and the note it hears, for meters.
+    Input { level: u8, key: Option<u8> },
+    /// Tempo follow moved the tempo, or turning it off restored it.
+    Tempo { bpm: f32 },
 }
 
 /// What the band is doing, for the UI.
@@ -60,9 +67,12 @@ mod op {
     pub const BAND: u32 = 7;
     pub const SONG_POSITION: u32 = 8;
     pub const HOLD: u32 = 9;
+    pub const INPUT: u32 = 10;
+    pub const TEMPO: u32 = 11;
 }
 
 const NO_CHORD: u32 = 0xff;
+const NO_KEY: u32 = 0xff;
 
 impl EngineEvent {
     pub fn encode(self, frame: u32) -> [u32; WORDS_PER_EVENT] {
@@ -87,6 +97,8 @@ impl EngineEvent {
             EngineEvent::Transport { playing } => [op::TRANSPORT, playing as u32, 0, frame],
             EngineEvent::SongPosition { beat } => [op::SONG_POSITION, beat, 0, frame],
             EngineEvent::Hold { holding, tick } => [op::HOLD, holding as u32, tick, frame],
+            EngineEvent::Input { level, key } => [op::INPUT, level as u32, key.map_or(NO_KEY, u32::from), frame],
+            EngineEvent::Tempo { bpm } => [op::TEMPO, bpm.to_bits(), 0, frame],
             EngineEvent::Band(s) => {
                 let section = Section::ALL.iter().position(|x| *x == s.section).unwrap_or(0) as u32;
                 let flags = s.playing as u32
@@ -101,6 +113,64 @@ impl EngineEvent {
                     frame,
                 ]
             }
+        }
+    }
+
+    /// Decodes a record from [`EngineEvent::encode`] into the event and its frame.
+    pub fn decode(words: [u32; WORDS_PER_EVENT]) -> Option<(Self, u32)> {
+        let [opcode, a, b, frame] = words;
+        let byte = |v: u32| (v & 0xff) as u8;
+        let event = match opcode {
+            op::NOTE_ON => EngineEvent::NoteOn { channel: byte(a >> 8), key: byte(a), velocity: byte(b) },
+            op::NOTE_OFF => EngineEvent::NoteOff { channel: byte(a >> 8), key: byte(a) },
+            op::PROGRAM_CHANGE => EngineEvent::ProgramChange { channel: byte(a), program: byte(b) },
+            op::CHORD_CHANGED if a == NO_CHORD => EngineEvent::ChordChanged(None),
+            op::CHORD_CHANGED => EngineEvent::ChordChanged(Some(Chord {
+                root: byte(a),
+                quality: *Quality::ALL.get((b & 0xff) as usize)?,
+                bass: byte(b >> 8),
+            })),
+            op::BEAT => EngineEvent::Beat { bar: a, beat: byte(b) },
+            op::TRANSPORT => EngineEvent::Transport { playing: a != 0 },
+            op::SONG_POSITION => EngineEvent::SongPosition { beat: a },
+            op::HOLD => EngineEvent::Hold { holding: a != 0, tick: b },
+            op::INPUT => EngineEvent::Input { level: byte(a), key: (b != NO_KEY).then_some(byte(b)) },
+            op::TEMPO => EngineEvent::Tempo { bpm: f32::from_bits(a) },
+            op::BAND => {
+                let flags = byte(b >> 8);
+                let next_style = byte(a >> 8);
+                EngineEvent::Band(BandState {
+                    style: byte(a),
+                    next_style: (next_style != 0xff).then_some(next_style),
+                    section: *Section::ALL.get(byte(a >> 16) as usize)?,
+                    variation: byte(a >> 24),
+                    next_variation: byte(b),
+                    playing: flags & 1 != 0,
+                    fill_pending: flags & 2 != 0,
+                    ending_pending: flags & 4 != 0,
+                    follow: flags & 8 != 0,
+                    intro_pending: flags & 16 != 0,
+                    energy: byte(b >> 16),
+                })
+            }
+            _ => return None,
+        };
+        Some((event, frame))
+    }
+
+    /// The MIDI message for external gear: the band's notes and programs.
+    /// The player's own notes and the microphone's are not sent.
+    pub fn to_midi(&self) -> Option<[u8; 3]> {
+        match *self {
+            EngineEvent::NoteOn { channel, .. } | EngineEvent::NoteOff { channel, .. }
+                if channel == crate::engine::PLAYER_CHANNEL || channel == MIC_CHANNEL =>
+            {
+                None
+            }
+            EngineEvent::NoteOn { channel, key, velocity } => Some([0x90 | channel, key, velocity]),
+            EngineEvent::NoteOff { channel, key } => Some([0x80 | channel, key, 0]),
+            EngineEvent::ProgramChange { channel, program } => Some([0xc0 | channel, program, 0]),
+            _ => None,
         }
     }
 
@@ -200,6 +270,58 @@ mod tests {
         let words = EngineEvent::ChordChanged(Some(chord)).encode(7);
         assert_eq!(words, [op::CHORD_CHANGED, 9, 11, 7]);
         assert_eq!(EngineEvent::ChordChanged(None).encode(0)[1], NO_CHORD);
+    }
+
+    #[test]
+    fn decodes_what_it_encodes() {
+        let band = BandState {
+            style: 3,
+            next_style: Some(1),
+            playing: true,
+            section: Section::Rest,
+            variation: 2,
+            next_variation: 0,
+            fill_pending: true,
+            intro_pending: false,
+            ending_pending: true,
+            follow: false,
+            energy: 77,
+        };
+        for event in [
+            EngineEvent::NoteOn { channel: 15, key: 64, velocity: 99 },
+            EngineEvent::NoteOff { channel: 9, key: 38 },
+            EngineEvent::ProgramChange { channel: 2, program: 33 },
+            EngineEvent::ChordChanged(None),
+            EngineEvent::ChordChanged(Some(Chord { root: 4, quality: Quality::Sus4, bass: 11 })),
+            EngineEvent::Beat { bar: 70_000, beat: 3 },
+            EngineEvent::Transport { playing: true },
+            EngineEvent::Band(band),
+            EngineEvent::Band(BandState { next_style: None, ..band }),
+            EngineEvent::SongPosition { beat: 99 },
+            EngineEvent::Hold { holding: true, tick: 1234 },
+            EngineEvent::Input { level: 9, key: None },
+            EngineEvent::Input { level: 9, key: Some(0) },
+            EngineEvent::Tempo { bpm: 88.25 },
+        ] {
+            assert_eq!(EngineEvent::decode(event.encode(42)), Some((event, 42)));
+        }
+        assert_eq!(EngineEvent::decode([99, 0, 0, 0]), None);
+    }
+
+    #[test]
+    fn only_band_notes_and_programs_go_to_midi_out() {
+        assert_eq!(EngineEvent::NoteOn { channel: 2, key: 40, velocity: 90 }.to_midi(), Some([0x92, 40, 90]));
+        assert_eq!(EngineEvent::NoteOff { channel: 9, key: 36 }.to_midi(), Some([0x89, 36, 0]));
+        assert_eq!(EngineEvent::NoteOn { channel: 0, key: 60, velocity: 90 }.to_midi(), None);
+        assert_eq!(EngineEvent::NoteOn { channel: MIC_CHANNEL, key: 60, velocity: 90 }.to_midi(), None);
+        assert_eq!(EngineEvent::Beat { bar: 0, beat: 0 }.to_midi(), None);
+    }
+
+    #[test]
+    fn encodes_input_and_tempo() {
+        assert_eq!(EngineEvent::Input { level: 200, key: Some(60) }.encode(3), [op::INPUT, 200, 60, 3]);
+        assert_eq!(EngineEvent::Input { level: 0, key: None }.encode(0)[2], NO_KEY);
+        assert_eq!(EngineEvent::Tempo { bpm: 101.5 }.encode(0), [op::TEMPO, 101.5f32.to_bits(), 0, 0]);
     }
 
     #[test]

@@ -1,7 +1,8 @@
 use crate::band::Band;
 use crate::chord::recognize;
 use crate::command::Command;
-use crate::event::{EngineEvent, EventBuffer, Timed};
+use crate::event::{EngineEvent, EventBuffer, MIC_CHANNEL, Timed};
+use crate::listen::{Heard, HeardList, ListenMode, Listener};
 
 /// MIDI channel for the player's own notes.
 pub const PLAYER_CHANNEL: u8 = 0;
@@ -17,11 +18,21 @@ pub struct Engine {
     /// Only notes below this key form chords; 0 means the whole keyboard.
     split: u8,
     events: EventBuffer,
+    listener: Listener,
+    /// Keys the microphone reports as sounding, on [`MIC_CHANNEL`].
+    mic_held: [bool; 128],
 }
 
 impl Engine {
     pub fn new(sample_rate: f32) -> Self {
-        Self { band: Band::new(sample_rate), held: [false; 128], split: 0, events: EventBuffer::default() }
+        Self {
+            band: Band::new(sample_rate),
+            held: [false; 128],
+            split: 0,
+            events: EventBuffer::default(),
+            listener: Listener::new(sample_rate),
+            mic_held: [false; 128],
+        }
     }
 
     pub fn handle(&mut self, cmd: Command) {
@@ -29,12 +40,13 @@ impl Engine {
             Command::NoteOn { note, velocity: 0 } | Command::NoteOff { note } => {
                 self.held[note as usize] = false;
                 self.events.push(0, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key: note });
-                self.band.set_keys_held(self.held.contains(&true));
+                self.update_keys_held();
             }
             Command::NoteOn { note, velocity } => {
                 self.held[note as usize] = true;
                 self.events.push(0, EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key: note, velocity });
                 self.band.note_played(velocity);
+                self.band.onset(0.0);
                 self.band.set_keys_held(true);
                 self.detect_chord();
             }
@@ -44,7 +56,7 @@ impl Engine {
                         self.events.push(0, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key: note });
                     }
                 }
-                self.band.set_keys_held(false);
+                self.update_keys_held();
             }
             Command::Play => self.band.play(&mut self.events),
             Command::Stop => self.band.stop(&mut self.events),
@@ -65,9 +77,78 @@ impl Engine {
             Command::SetSong { on } => self.band.set_song(on),
             Command::SongSeek { bar } => self.band.seek_song(bar as u32),
             Command::SongWait { tick } => self.band.set_song_wait(tick),
+            Command::SetListen { mode, gate_db } => {
+                let mut heard = HeardList::default();
+                self.listener.set_gate(gate_db);
+                self.listener.set_mode(mode, &mut heard);
+                self.on_heard(&heard);
+            }
+            Command::SetTempoFollow { on } => self.band.set_tempo_follow(on, &mut self.events),
             // Mixing is the synth's job; the host routes this one.
             Command::SetGain { .. } => {}
         }
+    }
+
+    /// Feeds this block's microphone input, before [`Engine::process`].
+    pub fn listen(&mut self, input: &[f32]) {
+        if self.listener.mode() == ListenMode::Off {
+            return;
+        }
+        let mut heard = HeardList::default();
+        self.listener.push(input, &mut heard);
+        self.on_heard(&heard);
+    }
+
+    fn on_heard(&mut self, heard: &HeardList) {
+        let late_ms = self.listener.mode().delay_ms();
+        for item in heard.as_slice() {
+            match *item {
+                Heard::NoteOn { key, velocity } => {
+                    self.mic_note(key, Some(velocity));
+                    self.band.note_played(velocity);
+                    self.band.onset(late_ms);
+                }
+                Heard::NoteOff { key } => self.mic_note(key, None),
+                Heard::Onset { velocity } => {
+                    self.band.note_played(velocity);
+                    self.band.onset(late_ms);
+                }
+                Heard::Chord { chord, velocity } => {
+                    self.release_mic();
+                    // Reported in root position around middle C, for the keyboard and Learn.
+                    for pc in chord.pitch_classes() {
+                        self.mic_note(60 + pc, Some(velocity));
+                    }
+                    self.band.set_chord(chord, late_ms, &mut self.events);
+                }
+                Heard::Silence => self.release_mic(),
+                Heard::Level { level, key } => self.events.push(0, EngineEvent::Input { level, key }),
+            }
+        }
+        self.update_keys_held();
+    }
+
+    fn mic_note(&mut self, key: u8, velocity: Option<u8>) {
+        let key = key.min(127);
+        self.mic_held[key as usize] = velocity.is_some();
+        let event = match velocity {
+            Some(velocity) => EngineEvent::NoteOn { channel: MIC_CHANNEL, key, velocity },
+            None => EngineEvent::NoteOff { channel: MIC_CHANNEL, key },
+        };
+        self.events.push(0, event);
+    }
+
+    fn release_mic(&mut self) {
+        for key in 0..128u8 {
+            if self.mic_held[key as usize] {
+                self.mic_note(key, None);
+            }
+        }
+    }
+
+    /// Held keys and a ringing mic note both count as playing.
+    fn update_keys_held(&mut self) {
+        self.band.set_keys_held(self.held.contains(&true) || self.listener.sounding());
     }
 
     /// Schedules this block and returns all of its events, sorted by frame.
@@ -100,7 +181,7 @@ impl Engine {
             len += 1;
         }
         if let Some(chord) = recognize(&notes[..len]) {
-            self.band.set_chord(chord, &mut self.events);
+            self.band.set_chord(chord, 0.0, &mut self.events);
         }
     }
 }
@@ -164,5 +245,39 @@ mod tests {
         engine.handle(Command::Stop);
         engine.end_block();
         assert!(engine.process(128).is_empty());
+    }
+
+    #[test]
+    fn microphone_chords_set_the_harmony_and_show_as_notes() {
+        let mut engine = Engine::new(48_000.0);
+        engine.handle(Command::SetListen { mode: ListenMode::Chords, gate_db: -50.0 });
+        let hz = |key: f32| 440.0 * 2f32.powf((key - 69.0) / 12.0);
+        let mut chords = Vec::new();
+        let mut mic_keys = Vec::new();
+        for block in 0..300 {
+            let input: Vec<f32> = (0..128)
+                .map(|i| {
+                    let t = (block * 128 + i) as f32 / 48_000.0;
+                    [48.0, 55.0, 60.0, 64.0, 67.0]
+                        .iter()
+                        .map(|&k| (2.0 * std::f32::consts::PI * hz(k) * t).sin() * 0.1)
+                        .sum()
+                })
+                .collect();
+            engine.listen(&input);
+            for timed in engine.process(128) {
+                match timed.event {
+                    EngineEvent::ChordChanged(c) => chords.push(c),
+                    EngineEvent::NoteOn { channel: MIC_CHANNEL, key, .. } => mic_keys.push(key),
+                    _ => {}
+                }
+            }
+            engine.end_block();
+        }
+        assert_eq!(chords, [Some(Chord::new(0, Quality::Major))]);
+        assert_eq!(mic_keys, [60, 64, 67]);
+        engine.handle(Command::SetListen { mode: ListenMode::Off, gate_db: -50.0 });
+        let offs = engine.process(128).iter().filter(|t| matches!(t.event, EngineEvent::NoteOff { channel: MIC_CHANNEL, .. })).count();
+        assert_eq!(offs, 3, "turning the mic off releases its notes");
     }
 }

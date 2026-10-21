@@ -15,6 +15,27 @@ const KEYS_HOME: f32 = 64.0;
 const PAD_HOME: f32 = 60.0;
 /// Human slack on top of the measured latency when latching a late chord.
 const LATE_SLACK_MS: f32 = 60.0;
+/// Tempo follow: how far the band may drift from the set tempo, and what counts
+/// as one attack (a chord's notes come within this many seconds).
+const TEMPO_FOLLOW_RANGE: f32 = 0.15;
+const ONSET_MERGE_S: f64 = 0.05;
+/// Tempo follow reports a new tempo to the UI once it moved this much.
+const TEMPO_REPORT_STEP: f32 = 0.5;
+
+/// Tempo follow: compares the player's attacks with the band's eighth-note grid.
+#[derive(Clone, Copy, Default)]
+struct TempoFollow {
+    on: bool,
+    /// The tempo the player set; following stays within range of it.
+    base_bpm: f32,
+    /// The last attack: seconds since Play and the grid tick it was nearest.
+    last: Option<(f64, f64)>,
+    /// Smoothed tempo of the player's attacks.
+    player_bpm: f32,
+    /// Smoothed timing error in beats; negative when the player is early.
+    phase: f32,
+    reported_bpm: f32,
+}
 
 #[derive(Clone, Copy, Default)]
 struct Sounding {
@@ -65,6 +86,7 @@ pub struct Band {
     hold: Option<(f64, u32)>,
     /// The band tick of the song beat playing, and that song beat.
     song_beat: Option<(f64, u32)>,
+    tempo: TempoFollow,
 }
 
 /// Converts song positions within the current block to frame offsets.
@@ -119,6 +141,7 @@ impl Band {
             wait: None,
             hold: None,
             song_beat: None,
+            tempo: TempoFollow { base_bpm: style.default_bpm, player_bpm: style.default_bpm, reported_bpm: style.default_bpm, ..TempoFollow::default() },
         }
     }
 
@@ -135,10 +158,74 @@ impl Band {
         &self.conductor
     }
 
+    /// The player set the tempo; tempo follow starts again from here.
     pub fn set_tempo(&mut self, bpm: f32) {
+        self.retime(bpm);
+        let bpm = self.bpm;
+        self.tempo = TempoFollow { on: self.tempo.on, base_bpm: bpm, player_bpm: bpm, reported_bpm: bpm, ..TempoFollow::default() };
+    }
+
+    fn retime(&mut self, bpm: f32) {
         self.anchor_tick = self.clock(0).tick_at(self.frame);
         self.anchor_frame = self.frame;
         self.bpm = bpm.clamp(30.0, 300.0);
+    }
+
+    /// Whether the band speeds up and slows down with the player. Turning it
+    /// off goes back to the set tempo.
+    pub fn set_tempo_follow(&mut self, on: bool, out: &mut EventBuffer) {
+        self.tempo.on = on;
+        if !on {
+            let base = self.tempo.base_bpm;
+            self.set_tempo(base);
+            out.push(0, EngineEvent::Tempo { bpm: base });
+        }
+    }
+
+    /// The player attacked a note or strum, `late_ms` after it was played on
+    /// top of the usual latency. With tempo follow on, attacks near the
+    /// eighth-note grid pull the tempo towards the player's.
+    pub fn onset(&mut self, late_ms: f32) {
+        if !self.tempo.on || !self.playing || self.hold.is_some() || self.click {
+            return;
+        }
+        let late_s = ((self.latency_ms + late_ms) / 1000.0) as f64;
+        let seconds = self.frame as f64 / self.sample_rate as f64 - late_s;
+        let tick = self.clock(1).tick_at(self.frame) - late_s * self.ticks_per_second();
+        let grid = PPQ as f64 / 2.0;
+        let nearest = (tick / grid).round() * grid;
+        let error = tick - nearest;
+        let t = &mut self.tempo;
+        if let Some((last_s, _)) = t.last
+            && seconds - last_s < ONSET_MERGE_S
+        {
+            return;
+        }
+        if error.abs() > grid * 0.3 {
+            return;
+        }
+        if let Some((last_s, last_tick)) = t.last {
+            let beats = (nearest - last_tick) / PPQ as f64;
+            let dt = seconds - last_s;
+            if beats >= 0.5 && (0.15..=2.5).contains(&dt) {
+                let heard = (60.0 * beats / dt) as f32;
+                if (heard / self.bpm - 1.0).abs() < 0.25 {
+                    t.player_bpm += 0.3 * (heard - t.player_bpm);
+                }
+            }
+        }
+        t.last = Some((seconds, nearest));
+        t.phase += 0.3 * ((error / PPQ as f64) as f32 - t.phase);
+        // Match the player's tempo, a little faster while they are ahead.
+        let target = t.player_bpm * (1.0 - 0.5 * t.phase);
+        let (lo, hi) = (t.base_bpm * (1.0 - TEMPO_FOLLOW_RANGE), t.base_bpm * (1.0 + TEMPO_FOLLOW_RANGE));
+        let bpm = (self.bpm + 0.5 * (target - self.bpm)).clamp(lo, hi);
+        self.retime(bpm);
+    }
+
+    #[cfg(test)]
+    fn bpm(&self) -> f32 {
+        self.bpm
     }
 
     fn clock(&self, frames: u32) -> BlockClock {
@@ -257,7 +344,9 @@ impl Band {
     /// unless it came just after a beat: then the player meant that beat, and
     /// the harmony changes right away.
     /// While a song plays, its chart has the harmony and this is ignored.
-    pub fn set_chord(&mut self, chord: Chord, out: &mut EventBuffer) {
+    /// `late_ms` is how much later than a key press this chord was recognised
+    /// (e.g. from a microphone).
+    pub fn set_chord(&mut self, chord: Chord, late_ms: f32, out: &mut EventBuffer) {
         if self.playing && self.song.active() {
             return;
         }
@@ -273,7 +362,7 @@ impl Band {
         let clock = self.clock(1);
         let now = clock.tick_at(self.frame);
         let since_beat = now - (now / PPQ as f64).floor() * PPQ as f64;
-        let grace = ((self.latency_ms + LATE_SLACK_MS) / 1000.0) as f64 * self.ticks_per_second();
+        let grace = ((self.latency_ms + late_ms + LATE_SLACK_MS) / 1000.0) as f64 * self.ticks_per_second();
         if since_beat > 1e-6 && since_beat <= grace.min(PPQ as f64 / 3.0) {
             self.change_chord(now, &clock, out);
         }
@@ -293,6 +382,8 @@ impl Band {
         self.anchor_tick = 0.0;
         self.hold = None;
         self.song_beat = None;
+        self.tempo.last = None;
+        self.tempo.phase = 0.0;
         let mut intro = intro;
         if self.song.active() {
             let (song_intro, variation) = self.song.start();
@@ -412,6 +503,10 @@ impl Band {
         let frame = clock.frame(tick);
         let beat_in_bar = (beat % BEATS_PER_BAR as u64) as u8;
         out.push(frame, EngineEvent::Beat { bar: (beat / BEATS_PER_BAR as u64) as u32, beat: beat_in_bar });
+        if (self.bpm - self.tempo.reported_bpm).abs() >= TEMPO_REPORT_STEP {
+            self.tempo.reported_bpm = self.bpm;
+            out.push(frame, EngineEvent::Tempo { bpm: self.bpm });
+        }
 
         if self.click {
             let velocity = if beat_in_bar == 0 { 120 } else { 90 };
@@ -730,7 +825,7 @@ mod tests {
         let (mut band, mut frame) = started_band();
         run(&mut band, 0.6, &mut frame); // well past beat 1 (frame 24000)
         let mut out = EventBuffer::default();
-        band.set_chord(Chord::new(9, Quality::Minor), &mut out);
+        band.set_chord(Chord::new(9, Quality::Minor), 0.0, &mut out);
         assert!(out.as_slice().is_empty(), "must not change mid-beat while playing");
 
         let events = run(&mut band, 0.5, &mut frame);
@@ -750,7 +845,7 @@ mod tests {
         band.set_latency(20.0);
         run(&mut band, 0.53, &mut frame); // 30 ms after beat 1
         let mut out = EventBuffer::default();
-        band.set_chord(Chord::new(9, Quality::Minor), &mut out);
+        band.set_chord(Chord::new(9, Quality::Minor), 0.0, &mut out);
         assert!(out.as_slice().iter().any(|t| t.event == EngineEvent::ChordChanged(Some(Chord::new(9, Quality::Minor)))));
         // The bass note of beat 1 is re-struck as A right away.
         assert!(out.as_slice().iter().any(|t| matches!(t.event, EngineEvent::NoteOn { channel: 2, key, .. } if key % 12 == 9)));
@@ -765,9 +860,9 @@ mod tests {
             band.stop(&mut out);
             band.play(&mut out);
             out.clear();
-            band.set_chord(Chord::new(0, Quality::Major), &mut out);
+            band.set_chord(Chord::new(0, Quality::Major), 0.0, &mut out);
             let mut events = run(&mut band, 3.3, &mut frame);
-            band.set_chord(Chord::new(7, Quality::Dominant7), &mut out);
+            band.set_chord(Chord::new(7, Quality::Dominant7), 0.0, &mut out);
             band.request(Request::Variation(2), &mut out);
             events.extend(run(&mut band, 4.2, &mut frame));
             band.request(Request::Ending, &mut out);
@@ -781,7 +876,7 @@ mod tests {
     fn muted_parts_go_silent_and_come_back() {
         let (mut band, mut frame) = started_band();
         let mut out = EventBuffer::default();
-        band.set_chord(Chord::new(0, Quality::Major), &mut out);
+        band.set_chord(Chord::new(0, Quality::Major), 0.0, &mut out);
         run(&mut band, 0.3, &mut frame);
         band.set_muted(2, true, &mut out);
         assert!(out.as_slice().iter().any(|t| matches!(t.event, EngineEvent::NoteOff { channel: 2, .. })));
@@ -796,7 +891,7 @@ mod tests {
     fn chord_applies_immediately_while_stopped() {
         let mut band = Band::new(SR);
         let mut out = EventBuffer::default();
-        band.set_chord(Chord::new(2, Quality::Minor), &mut out);
+        band.set_chord(Chord::new(2, Quality::Minor), 0.0, &mut out);
         assert_eq!(band.chord(), Some(Chord::new(2, Quality::Minor)));
         assert_eq!(out.as_slice().len(), 1);
     }
@@ -833,7 +928,7 @@ mod tests {
     fn rest_keeps_only_the_pad() {
         let (mut band, mut frame) = started_band();
         let mut out = EventBuffer::default();
-        band.set_chord(Chord::new(0, Quality::Major), &mut out);
+        band.set_chord(Chord::new(0, Quality::Major), 0.0, &mut out);
         band.note_played(90);
         run(&mut band, 2.0, &mut frame);
         let events = run(&mut band, 6.0, &mut frame);
@@ -852,7 +947,7 @@ mod tests {
         let (mut band, mut frame) = started_band();
         let mut out = EventBuffer::default();
         band.set_click(true, &mut out);
-        band.set_chord(Chord::new(0, Quality::Major), &mut out);
+        band.set_chord(Chord::new(0, Quality::Major), 0.0, &mut out);
         let events = run(&mut band, 2.1, &mut frame);
         let ons: Vec<_> = events.iter().filter(|(_, e)| matches!(e, EngineEvent::NoteOn { .. })).collect();
         assert_eq!(ons.len(), 5);
@@ -879,7 +974,7 @@ mod tests {
     fn songs_play_their_chart_and_end() {
         let (mut band, mut frame) = song_band();
         let mut out = EventBuffer::default();
-        band.set_chord(Chord::new(2, Quality::Minor), &mut out); // ignored while the song plays
+        band.set_chord(Chord::new(2, Quality::Minor), 0.0, &mut out); // ignored while the song plays
         let events = run(&mut band, 6.5, &mut frame);
         let chords: Vec<_> = events
             .iter()
@@ -1000,5 +1095,71 @@ mod tests {
                 .sum::<u32>()
         };
         assert!(velocities(1.0) > velocities(0.0) * 13 / 10);
+    }
+
+    /// Plays attacks every `beats` at `player_bpm` for `seconds`, starting on
+    /// the band's first beat. Returns the reported tempos.
+    fn play_along(band: &mut Band, frame: &mut u64, player_bpm: f32, beats: f32, seconds: f32) -> Vec<f32> {
+        let period = (60.0 / player_bpm * beats * SR) as u64;
+        let mut next = *frame;
+        let mut tempos = Vec::new();
+        let mut out = EventBuffer::default();
+        for _ in 0..(seconds * SR / BLOCK as f32) as usize {
+            if *frame >= next {
+                band.onset(0.0);
+                next += period;
+            }
+            band.process(BLOCK, &mut out);
+            tempos.extend(out.as_slice().iter().filter_map(|t| match t.event {
+                EngineEvent::Tempo { bpm } => Some(bpm),
+                _ => None,
+            }));
+            out.clear();
+            *frame += BLOCK as u64;
+        }
+        tempos
+    }
+
+    fn following_band() -> (Band, u64) {
+        let (mut band, frame) = started_band();
+        band.set_latency(0.0);
+        band.set_tempo_follow(true, &mut EventBuffer::default());
+        (band, frame)
+    }
+
+    #[test]
+    fn tempo_follow_is_off_by_default() {
+        let (mut band, mut frame) = started_band();
+        band.set_latency(0.0);
+        assert!(play_along(&mut band, &mut frame, 130.0, 1.0, 8.0).is_empty());
+        assert_eq!(band.bpm(), 120.0);
+    }
+
+    #[test]
+    fn steady_player_keeps_the_tempo() {
+        let (mut band, mut frame) = following_band();
+        assert!(play_along(&mut band, &mut frame, 120.0, 0.5, 8.0).is_empty());
+        assert!((band.bpm() - 120.0).abs() < 0.5, "{}", band.bpm());
+    }
+
+    #[test]
+    fn follows_a_player_who_speeds_up_or_slows_down() {
+        for player in [128.0, 112.0] {
+            let (mut band, mut frame) = following_band();
+            let tempos = play_along(&mut band, &mut frame, player, 1.0, 16.0);
+            assert!((band.bpm() - player).abs() < 2.0, "player {player}, band {}", band.bpm());
+            assert!(!tempos.is_empty(), "tempo changes are reported");
+        }
+    }
+
+    #[test]
+    fn tempo_follow_stays_near_the_set_tempo_and_turns_off_cleanly() {
+        let (mut band, mut frame) = following_band();
+        play_along(&mut band, &mut frame, 150.0, 1.0, 20.0);
+        assert!(band.bpm() <= 120.0 * 1.15 + 0.01, "{}", band.bpm());
+        let mut out = EventBuffer::default();
+        band.set_tempo_follow(false, &mut out);
+        assert_eq!(band.bpm(), 120.0);
+        assert!(out.as_slice().iter().any(|t| t.event == EngineEvent::Tempo { bpm: 120.0 }));
     }
 }

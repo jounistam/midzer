@@ -16,6 +16,8 @@ pub struct Host {
     synth: Synth,
     left: [f32; BLOCK_FRAMES],
     right: [f32; BLOCK_FRAMES],
+    /// Microphone input for the next block, filled by the worklet.
+    input: [f32; BLOCK_FRAMES],
     /// Events of the last block, encoded for the main thread.
     events: [[u32; WORDS_PER_EVENT]; MAX_EVENTS_PER_BLOCK],
 }
@@ -27,6 +29,7 @@ impl Host {
             synth: Synth::new(sample_rate),
             left: [0.0; BLOCK_FRAMES],
             right: [0.0; BLOCK_FRAMES],
+            input: [0.0; BLOCK_FRAMES],
             events: [[0; WORDS_PER_EVENT]; MAX_EVENTS_PER_BLOCK],
         }
     }
@@ -39,6 +42,15 @@ impl Host {
             None => return false,
         }
         true
+    }
+
+    /// Feeds `frames` of microphone input from [`Host::input_mut`]; call before [`Host::process`].
+    pub fn listen(&mut self, frames: usize) {
+        self.engine.listen(&self.input[..frames.min(BLOCK_FRAMES)]);
+    }
+
+    pub fn input_mut(&mut self) -> &mut [f32; BLOCK_FRAMES] {
+        &mut self.input
     }
 
     /// Renders up to [`BLOCK_FRAMES`] frames; returns the number of encoded events.
@@ -119,6 +131,24 @@ pub unsafe extern "C" fn mz_left_ptr(host: *const Host) -> *const f32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mz_right_ptr(host: *const Host) -> *const f32 {
     unsafe { (*host).right.as_ptr() }
+}
+
+/// Where the worklet writes a block of microphone input.
+///
+/// # Safety
+/// `host` must be a live pointer from [`mz_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mz_input_ptr(host: *mut Host) -> *mut f32 {
+    unsafe { (*host).input.as_mut_ptr() }
+}
+
+/// Analyses `frames` of microphone input from [`mz_input_ptr`]; call before [`mz_process`].
+///
+/// # Safety
+/// `host` must be a live pointer from [`mz_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mz_listen(host: *mut Host, frames: u32) {
+    unsafe { (*host).listen(frames as usize) }
 }
 
 /// Encoded events of the last [`mz_process`] call, `WORDS_PER_EVENT` u32 each.

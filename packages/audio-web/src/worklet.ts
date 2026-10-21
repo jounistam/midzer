@@ -32,6 +32,8 @@ interface MidzerExports {
   mz_left_ptr(host: number): number;
   mz_right_ptr(host: number): number;
   mz_events_ptr(host: number): number;
+  mz_input_ptr(host: number): number;
+  mz_listen(host: number, frames: number): void;
   mz_command(host: number, w0: number, w1: number, w2: number, w3: number): number;
   mz_process(host: number, frames: number): number;
 }
@@ -48,6 +50,7 @@ class MidzerProcessor extends AudioWorkletProcessor {
   private left!: Float32Array;
   private right!: Float32Array;
   private eventWords!: Uint32Array;
+  private input!: Float32Array;
   private dropped = 0;
 
   constructor(options: AudioWorkletNodeOptions) {
@@ -78,7 +81,7 @@ class MidzerProcessor extends AudioWorkletProcessor {
     }
   }
 
-  process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
+  process(inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const { wasm, host, record } = this;
     if (this.commands) {
       while (this.commands.pop(record)) {
@@ -88,6 +91,13 @@ class MidzerProcessor extends AudioWorkletProcessor {
 
     const out = outputs[0];
     const frames = out?.[0]?.length ?? BLOCK;
+    // The microphone, when connected; an unconnected input has no channels.
+    const mic = inputs[0]?.[0];
+    if (mic) {
+      if (this.input.buffer !== wasm.memory.buffer) this.refreshViews();
+      this.input.set(mic.length === BLOCK ? mic : mic.subarray(0, Math.min(mic.length, BLOCK)));
+      wasm.mz_listen(host, Math.min(mic.length, BLOCK));
+    }
     const count = wasm.mz_process(host, frames);
 
     // Growing wasm memory detaches old views; re-create them only then.
@@ -124,6 +134,7 @@ class MidzerProcessor extends AudioWorkletProcessor {
     this.left = new Float32Array(memory.buffer, this.wasm.mz_left_ptr(this.host), BLOCK);
     this.right = new Float32Array(memory.buffer, this.wasm.mz_right_ptr(this.host), BLOCK);
     this.eventWords = new Uint32Array(memory.buffer, this.wasm.mz_events_ptr(this.host), MAX_EVENTS * 4);
+    this.input = new Float32Array(memory.buffer, this.wasm.mz_input_ptr(this.host), BLOCK);
   }
 }
 

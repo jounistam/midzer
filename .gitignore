@@ -7,3 +7,4 @@ apps/web/public/wasm/
 apps/web/public/soundfonts/
 test-results
 playwright-report
+apps/desktop/src-tauri/gen/

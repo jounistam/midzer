@@ -29,6 +29,8 @@ const Cmd = {
   SetSong: 21,
   SongSeek: 22,
   SongWait: 23,
+  SetListen: 24,
+  SetTempoFollow: 25,
 } as const;
 
 /** Ticks per beat in song positions; mirrors `PPQ` in style.rs. */
@@ -51,6 +53,16 @@ const SECTION_REQUESTS: readonly SectionRequest[] = ['intro', 'A', 'B', 'C', 'fi
 /** What the band does when the player stops; mirrors `IDLE_MODES` in command.rs. */
 export type IdleMode = 'keepPlaying' | 'rest' | 'end';
 const IDLE_MODES: readonly IdleMode[] = ['keepPlaying', 'rest', 'end'];
+
+/** What the microphone listens for; mirrors `ListenMode::ALL` in listen.rs. */
+export type ListenMode = 'off' | 'notes' | 'chords';
+const LISTEN_MODES: readonly ListenMode[] = ['off', 'notes', 'chords'];
+
+/**
+ * Roughly how long after a sound starts the engine reports it, per mode;
+ * mirrors `ListenMode::delay_ms`.
+ */
+export const LISTEN_DELAY_MS: Record<ListenMode, number> = { off: 0, notes: 45, chords: 120 };
 
 /** A chord as the engine names it: pitch classes and an index into the qualities. */
 export interface ChordSpec {
@@ -99,13 +111,22 @@ export type EngineCommand =
   /** Stopped: where the song starts. Playing: a jump on the next bar line. */
   | { type: 'songSeek'; bar: number }
   /** The band stops at song tick `tick` (PPQ per beat) until the wait moves; null clears it. */
-  | { type: 'songWait'; tick: number | null };
+  | { type: 'songWait'; tick: number | null }
+  /** What the microphone listens for, and how loud (dBFS) a sound must be to count. */
+  | { type: 'setListen'; mode: ListenMode; gateDb: number }
+  /** Whether the band follows the player's tempo. */
+  | { type: 'setTempoFollow'; on: boolean };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
 const floatBits = (value: number) => {
   f32[0] = value;
   return f32Bits[0]!;
+};
+
+const bitsFloat = (bits: number) => {
+  f32Bits[0] = bits;
+  return f32[0]!;
 };
 
 export function encodeCommand(cmd: EngineCommand): RecordWords {
@@ -160,6 +181,10 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.SongSeek, cmd.bar, 0, 0];
     case 'songWait':
       return cmd.tick === null ? [Cmd.SongWait, 0, 0, 0] : [Cmd.SongWait, 1, cmd.tick, 0];
+    case 'setListen':
+      return [Cmd.SetListen, LISTEN_MODES.indexOf(cmd.mode), floatBits(cmd.gateDb), 0];
+    case 'setTempoFollow':
+      return [Cmd.SetTempoFollow, cmd.on ? 1 : 0, 0, 0];
   }
 }
 
@@ -176,6 +201,7 @@ export const QUALITY_INTERVALS: readonly (readonly number[])[] = [
 ];
 export const NOTE_NAMES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'] as const;
 const NO_CHORD = 0xff;
+const NO_KEY = 0xff;
 
 export interface ChordInfo {
   root: number;
@@ -220,7 +246,11 @@ export type EngineEvent =
   /** A song beat starts; sent on every beat while a song plays. */
   | { type: 'songPosition'; beat: number }
   /** The band stopped at song tick `tick` to wait for the player, or went on from there. */
-  | { type: 'hold'; holding: boolean; tick: number };
+  | { type: 'hold'; holding: boolean; tick: number }
+  /** Microphone loudness 0..1 (over -80..0 dBFS) and the note it hears, a few times a second. */
+  | { type: 'input'; level: number; key: number | null }
+  /** Tempo follow moved the tempo, or turning it off restored it. */
+  | { type: 'tempo'; bpm: number };
 
 /** An event plus the AudioContext frame at which it sounds. */
 export type TimedEvent = EngineEvent & { frame: number };
@@ -275,6 +305,10 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
       return { type: 'songPosition', beat: a, frame };
     case 9:
       return { type: 'hold', holding: a !== 0, tick: b, frame };
+    case 10:
+      return { type: 'input', level: a / 255, key: b === NO_KEY ? null : b, frame };
+    case 11:
+      return { type: 'tempo', bpm: bitsFloat(a), frame };
     default:
       return null;
   }

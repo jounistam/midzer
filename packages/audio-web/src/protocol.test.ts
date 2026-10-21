@@ -29,6 +29,13 @@ describe('encodeCommand', () => {
     expect(encodeCommand({ type: 'songWait', tick: null })).toEqual([23, 0, 0, 0]);
   });
 
+  it('encodes listening and tempo follow like command.rs', () => {
+    const [op, mode, gate] = encodeCommand({ type: 'setListen', mode: 'chords', gateDb: -45 });
+    expect([op, mode]).toEqual([24, 2]);
+    expect(new Float32Array(new Uint32Array([gate]).buffer)[0]).toBe(-45);
+    expect(encodeCommand({ type: 'setTempoFollow', on: true })).toEqual([25, 1, 0, 0]);
+  });
+
   it('encodes floats as f32 bits', () => {
     const [op, bits] = encodeCommand({ type: 'setTempo', bpm: 96.5 });
     expect(op).toBe(7);
@@ -80,6 +87,10 @@ describe('decodeEvent', () => {
   it('decodes song positions', () => {
     expect(decodeEvent(8, 17, 0, 3)).toEqual({ type: 'songPosition', beat: 17, frame: 3 });
     expect(decodeEvent(9, 1, 1200, 4)).toEqual({ type: 'hold', holding: true, tick: 1200, frame: 4 });
+    expect(decodeEvent(10, 255, 60, 0)).toEqual({ type: 'input', level: 1, key: 60, frame: 0 });
+    expect(decodeEvent(10, 0, 0xff, 0)).toEqual({ type: 'input', level: 0, key: null, frame: 0 });
+    const [, bits] = encodeCommand({ type: 'setTempo', bpm: 101.5 });
+    expect(decodeEvent(11, bits, 0, 0)).toEqual({ type: 'tempo', bpm: 101.5, frame: 0 });
   });
 
   it('ignores unknown opcodes', () => {

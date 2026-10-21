@@ -5,8 +5,11 @@ import {
   DRUM_CHANNEL,
   eventToMidi,
   isMidiSupported,
+  isNativeHost,
   KEYS_CHANNEL,
+  LISTEN_DELAY_MS,
   listenToInputs,
+  MIC_CHANNEL,
   PAD_CHANNEL,
   requestMidi,
   startEngine,
@@ -17,11 +20,13 @@ import {
   type EngineCommand,
   type EngineHandle,
   type IdleMode,
+  type ListenMode,
+  type NativeMidi,
   type SectionRequest,
   type TimedEvent,
 } from '@midzer/audio-web';
 import { create } from 'zustand';
-import { enqueue, flushLive, resetLive } from './live';
+import { enqueue, flushLive, live, resetLive } from './live';
 import { qwertyToNote } from './qwerty';
 import { isBuiltin, saveUserSong } from './songs/library';
 import { Recorder } from './songs/recorder';
@@ -96,7 +101,22 @@ interface SessionState {
   loop: LoopRange | null;
   /** A recorded performance is ready to save as MIDI. */
   hasTake: boolean;
+  /** What the microphone listens for; it is only open while this isn't 'off'. */
+  listenMode: ListenMode;
+  /** Sounds quieter than this (dBFS) are ignored. */
+  micGateDb: number;
+  /** With headphones the mic skips echo cancellation, which hears pitch better. */
+  headphones: boolean;
+  micError: string | null;
+  /** The band speeds up and slows down with the player. */
+  tempoFollow: boolean;
 }
+
+export const LISTEN_OPTIONS: { mode: ListenMode; label: string; hint: string }[] = [
+  { mode: 'off', label: 'Off', hint: '' },
+  { mode: 'notes', label: 'Single notes', hint: 'Sing, whistle or play a melody line.' },
+  { mode: 'chords', label: 'Chords', hint: 'Strum a guitar; the band follows your chords.' },
+];
 
 export const IDLE_OPTIONS: { mode: IdleMode; label: string }[] = [
   { mode: 'rest', label: 'Band waits for you' },
@@ -119,25 +139,32 @@ interface Prefs {
   style: number;
   idleMode: IdleMode;
   tapOffsetMs: number | null;
+  micGateDb: number;
+  headphones: boolean;
+  tempoFollow: boolean;
 }
 
 function readPrefs(): Prefs {
-  const defaults: Prefs = { style: 0, idleMode: 'rest', tapOffsetMs: null };
+  const defaults: Prefs = { style: 0, idleMode: 'rest', tapOffsetMs: null, micGateDb: -50, headphones: false, tempoFollow: false };
   try {
     const saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Partial<Prefs>;
     const style = Number.isInteger(saved.style) && STYLES[saved.style!] ? saved.style! : defaults.style;
     const idleMode = IDLE_OPTIONS.some((o) => o.mode === saved.idleMode) ? saved.idleMode! : defaults.idleMode;
     const tapOffsetMs = typeof saved.tapOffsetMs === 'number' ? saved.tapOffsetMs : null;
-    return { style, idleMode, tapOffsetMs };
+    const micGateDb = typeof saved.micGateDb === 'number' ? Math.min(-10, Math.max(-90, saved.micGateDb)) : defaults.micGateDb;
+    const headphones = saved.headphones === true;
+    const tempoFollow = saved.tempoFollow === true;
+    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow };
   } catch {
     return defaults;
   }
 }
 
 function savePrefs(): void {
-  const { style, idleMode, tapOffsetMs } = get();
+  const { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow } = get();
+  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow };
   try {
-    localStorage.setItem(PREFS_KEY, JSON.stringify({ style, idleMode, tapOffsetMs } satisfies Prefs));
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch {
     // Not persisted; defaults next time.
   }
@@ -151,7 +178,7 @@ export const useSession = create<SessionState>(() => ({
   audio: 'idle',
   loadProgress: 0,
   error: null,
-  midiSupported: isMidiSupported(),
+  midiSupported: isMidiSupported() || isNativeHost(),
   midiInputs: [],
   midiOutputs: [],
   midiOutputId: null,
@@ -187,6 +214,11 @@ export const useSession = create<SessionState>(() => ({
   songStartBar: 0,
   loop: null,
   hasTake: false,
+  listenMode: 'off',
+  micGateDb: prefs.micGateDb,
+  headphones: prefs.headphones,
+  micError: null,
+  tempoFollow: prefs.tempoFollow,
 }));
 
 const set = useSession.setState;
@@ -194,6 +226,8 @@ const get = useSession.getState;
 
 let engine: EngineHandle | null = null;
 let midiAccess: MIDIAccess | null = null;
+/** In the desktop app MIDI is native; otherwise Web MIDI through `midiAccess`. */
+let nativeMidi: NativeMidi | null = null;
 let recorder: Recorder | null = null;
 
 // ---- Navigation -------------------------------------------------------------
@@ -228,18 +262,25 @@ export async function startAudio(): Promise<void> {
   if (get().audio !== 'idle' && get().audio !== 'error') return;
   set({ audio: 'starting', error: null });
   try {
-    engine = await startEngine('/wasm/midzer.wasm');
+    if (isNativeHost()) {
+      const { startNativeEngine } = await import('@midzer/audio-web/native');
+      const native = await startNativeEngine();
+      nativeMidi = native.midi;
+      engine = native;
+    } else {
+      engine = await startEngine('/wasm/midzer.wasm');
+    }
     engine.onEvent(onEngineEvent);
-    const { bpm, volume, split, muted, style, idleMode } = get();
-    const { outputLatency = 0, baseLatency = 0 } = engine.context;
-    set({ outputLatencyMs: Math.round((outputLatency || baseLatency) * 1000) });
+    const { bpm, volume, split, muted, style, idleMode, tempoFollow } = get();
+    set({ outputLatencyMs: engine.outputLatencyMs });
     engine.send({ type: 'setStyle', index: style });
+    engine.send({ type: 'setTempoFollow', on: tempoFollow });
     engine.send({ type: 'setIdleMode', mode: idleMode });
     sendLatency();
     engine.send({ type: 'setTempo', bpm });
     engine.send({ type: 'setGain', gain: volume });
     engine.send({ type: 'setSplit', note: split });
-    recorder = new Recorder(engine.context.sampleRate);
+    recorder = new Recorder(engine.sampleRate);
     syncSong();
     for (const [part, isMuted] of Object.entries(muted)) {
       if (isMuted) engine.send({ type: 'setMute', channel: BAND_CHANNELS[part as BandPart], muted: true });
@@ -262,6 +303,11 @@ function frameLoop(): void {
 }
 
 function onEngineEvent(event: TimedEvent, timeMs: number): void {
+  if ((event.type === 'noteOn' || event.type === 'noteOff') && event.channel === MIC_CHANNEL) {
+    // Heard by the mic: it was played before the engine noticed, not when this is heard.
+    const playedMs = timeMs - get().outputLatencyMs - LISTEN_DELAY_MS[get().listenMode];
+    notifyPlayer(event.type === 'noteOn' ? { type: 'noteOn', note: event.key, velocity: event.velocity } : { type: 'noteOff', note: event.key }, playedMs);
+  }
   enqueue(event, timeMs);
   sendMidiOut(event, timeMs);
   recorder?.record(event);
@@ -292,6 +338,13 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
       break;
     case 'band':
       setTimeout(() => set({ band: event.state }), delay);
+      break;
+    case 'tempo':
+      setTimeout(() => set({ bpm: Math.round(event.bpm) }), delay);
+      break;
+    case 'input':
+      live.mic.level = event.level;
+      live.mic.key = event.key ?? -1;
       break;
   }
   for (const listener of beatListeners) if (event.type === 'beat') listener(event.bar, event.beat, timeMs);
@@ -462,6 +515,70 @@ export function tapTempo(now = performance.now()): void {
   }
 }
 
+/** The band speeds up and slows down with the player, within 15 % of the set tempo. */
+export function setTempoFollow(on: boolean): void {
+  set({ tempoFollow: on });
+  savePrefs();
+  send({ type: 'setTempoFollow', on });
+}
+
+// ---- Microphone ---------------------------------------------------------------
+
+let closeMic: (() => void) | null = null;
+
+/** Opens the microphone (asking permission) or closes it. */
+export async function setListenMode(mode: ListenMode): Promise<void> {
+  if (!engine) return;
+  set({ listenMode: mode, micError: null });
+  if (mode === 'off') {
+    stopMic();
+    return;
+  }
+  if (!closeMic) {
+    try {
+      closeMic = await engine.openMic({ echoCancellation: !get().headphones });
+    } catch (e) {
+      set({ listenMode: 'off', micError: micErrorText(e) });
+      return;
+    }
+  }
+  if (get().listenMode !== mode) return; // changed while asking for permission
+  send({ type: 'setListen', mode, gateDb: get().micGateDb });
+}
+
+function stopMic(): void {
+  send({ type: 'setListen', mode: 'off', gateDb: get().micGateDb });
+  closeMic?.();
+  closeMic = null;
+  live.mic.level = 0;
+  live.mic.key = -1;
+}
+
+function micErrorText(e: unknown): string {
+  const name = e instanceof DOMException ? e.name : '';
+  if (name === 'NotAllowedError') return 'Microphone access was blocked. Allow it in the browser to listen.';
+  if (name === 'NotFoundError') return 'No microphone was found.';
+  return e instanceof Error ? e.message : String(e);
+}
+
+export function setMicGate(db: number): void {
+  set({ micGateDb: db });
+  savePrefs();
+  const { listenMode } = get();
+  if (listenMode !== 'off') send({ type: 'setListen', mode: listenMode, gateDb: db });
+}
+
+/** Headphones turn echo cancellation off; an open mic reopens with the new setting. */
+export function setHeadphones(on: boolean): void {
+  set({ headphones: on });
+  savePrefs();
+  const { listenMode } = get();
+  if (closeMic) {
+    stopMic();
+    void setListenMode(listenMode);
+  }
+}
+
 // ---- Songs ------------------------------------------------------------------
 
 /** Loads the open song's chart, loop and start into the engine. */
@@ -599,6 +716,19 @@ export function attachQwerty(): () => void {
 // ---- MIDI devices -----------------------------------------------------------
 
 async function connectMidi(): Promise<void> {
+  if (nativeMidi) {
+    // Native inputs already reach the engine; the UI only hears about them.
+    nativeMidi.onInput((cmd) => notifyPlayer(cmd));
+    nativeMidi.onPorts(({ inputs, outputs }) => {
+      const { midiOutputId } = get();
+      set({
+        midiInputs: inputs,
+        midiOutputs: outputs,
+        midiOutputId: outputs.some((o) => o.id === midiOutputId) ? midiOutputId : null,
+      });
+    });
+    return;
+  }
   midiAccess = await requestMidi();
   if (!midiAccess) return;
   listenToInputs(midiAccess, playerCommand);
@@ -620,6 +750,10 @@ async function connectMidi(): Promise<void> {
 export function setMidiOutput(id: string | null): void {
   silenceMidiOut();
   set({ midiOutputId: id });
+  nativeMidi?.setOutput(id).catch((e: unknown) => {
+    console.warn('midzer: MIDI out', e);
+    set({ midiOutputId: null });
+  });
 }
 
 function currentOutput(): MIDIOutput | undefined {

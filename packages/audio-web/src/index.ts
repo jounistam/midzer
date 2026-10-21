@@ -1,4 +1,4 @@
-export { startEngine, type EngineHandle, type EventListener, type Transport } from './engine';
+export { isNativeHost, startEngine, type EngineHandle, type EventListener, type MicOptions, type Transport } from './engine';
 export * from './channels';
 export { eventToMidi, isMidiSupported, listenToInputs, midiToCommand, requestMidi } from './midi';
 export {
@@ -18,9 +18,12 @@ export {
   type EngineCommand,
   type EngineEvent,
   type IdleMode,
+  LISTEN_DELAY_MS,
+  type ListenMode,
   type Section,
   type SectionRequest,
   type SongMark,
   type TimedEvent,
 } from './protocol';
 export { RecordRing } from './ring';
+export type { MidiPort, MidiPorts, NativeEngineHandle, NativeMidi } from './native';

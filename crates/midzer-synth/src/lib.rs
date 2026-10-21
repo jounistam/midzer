@@ -3,7 +3,7 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use midzer_core::{EngineEvent, Timed};
+use midzer_core::{EngineEvent, MIC_CHANNEL, Timed};
 use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
 
 /// rustysynth applies events at its internal block boundaries, so this bounds
@@ -72,6 +72,8 @@ impl Synth {
 
 fn apply(synth: &mut Synthesizer, event: &EngineEvent) {
     match *event {
+        // The microphone's notes are already sounding in the room.
+        EngineEvent::NoteOn { channel: MIC_CHANNEL, .. } | EngineEvent::NoteOff { channel: MIC_CHANNEL, .. } => {}
         EngineEvent::NoteOn { channel, key, velocity } => synth.note_on(channel as i32, key as i32, velocity as i32),
         EngineEvent::NoteOff { channel, key } => synth.note_off(channel as i32, key as i32),
         EngineEvent::ProgramChange { channel, program } => {
@@ -83,7 +85,9 @@ fn apply(synth: &mut Synthesizer, event: &EngineEvent) {
         | EngineEvent::Transport { .. }
         | EngineEvent::Band(_)
         | EngineEvent::SongPosition { .. }
-        | EngineEvent::Hold { .. } => {}
+        | EngineEvent::Hold { .. }
+        | EngineEvent::Input { .. }
+        | EngineEvent::Tempo { .. } => {}
     }
 }
 

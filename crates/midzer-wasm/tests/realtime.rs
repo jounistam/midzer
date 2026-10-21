@@ -4,7 +4,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use midzer_core::{Chord, Command, IdleMode, Quality, Request, Slot};
+use midzer_core::{Chord, Command, IdleMode, ListenMode, Quality, Request, Slot};
 use midzer_wasm::{BLOCK_FRAMES, Host};
 
 struct CountingAlloc;
@@ -106,6 +106,26 @@ fn playing_band_renders_without_allocating() {
             _ => {}
         }
         events += host.process(BLOCK_FRAMES);
+    }
+    command(&mut host, Command::Stop);
+    host.process(BLOCK_FRAMES);
+
+    // Listening to a microphone in both modes, with tempo follow.
+    command(&mut host, Command::SetSong { on: false });
+    command(&mut host, Command::SetTempoFollow { on: true });
+    command(&mut host, Command::Play);
+    for mode in [ListenMode::Notes, ListenMode::Chords, ListenMode::Off] {
+        command(&mut host, Command::SetListen { mode, gate_db: -50.0 });
+        for block in 0..2000usize {
+            let hz = [220.0, 261.6, 329.6][block / 300 % 3];
+            let strum = (block % 200) as f32 / 200.0;
+            for (i, x) in host.input_mut().iter_mut().enumerate() {
+                let t = (block * BLOCK_FRAMES + i) as f32 / 48_000.0;
+                *x = (2.0 * std::f32::consts::PI * hz * t).sin() * 0.3 * (1.0 - strum);
+            }
+            host.listen(BLOCK_FRAMES);
+            events += host.process(BLOCK_FRAMES);
+        }
     }
     command(&mut host, Command::Stop);
     host.process(BLOCK_FRAMES);

@@ -46,7 +46,20 @@
   - Songs can have a melody (`Song.melody`, with a small notation in `songs/melody.ts`). Three public-domain tunes were added with melodies (Mary Had a Little Lamb, Twinkle, Ode to Joy). MIDI import keeps the top line of the highest mostly single-note part as the melody.
   - Storage is IndexedDB (`storage/db.ts`), with a memory fallback. It holds My songs (moved over from localStorage on first load) and Learn progress (best stars, accuracy and streak per lesson or song part).
   - Tests: Rust hold tests, waits in the no-allocation test, Vitest for targets, clock, judge, lanes, lessons, progress, the library migration and MIDI melodies, and a Playwright Learn flow.
-- **Next: M5** (desktop + mic).
+- **M5 desktop + mic:** done (2026-10-21).
+  - Listening (`listen.rs`, in the engine): the input is low-passed and decimated to ~24 kHz and analysed every 256 samples (~11 ms). "Single notes" uses YIN pitch with a two-hop confirmation and hysteresis; "Chords" uses a 4096-point FFT, chroma from spectral peaks and cosine matching against nine chord qualities, confirmed over three analyses and reported again on each strum. Attacks come from the level jumping over a decaying envelope. A gate (sensitivity) ignores quiet sounds. All buffers are allocated up front; the no-allocation test covers both modes.
+  - The mic's notes go out on channel 15: shown on the keyboard and judged by Learn, never played by the synth or sent to MIDI out. Its chords drive the band like played chords, with the mic's delay (≈45/120 ms) added to the late-chord grace.
+  - Tempo follow (`Band::onset`, off by default): attacks near the eighth-note grid give a smoothed player tempo plus a phase error; the band moves towards them within ±15 % of the set tempo and reports `Tempo` events. Turning it off goes back to the set tempo.
+  - Web: the AudioWorklet takes the mic as its input (`getUserMedia`, no AGC/noise suppression; echo cancellation unless "Headphones" is on). Settings → Microphone has the mode, a level meter with the gate, sensitivity and headphones.
+  - `midzer-native`: the engine renders in the cpal output callback in 128-frame blocks; commands, events and mic samples travel through lock-free `crossbeam` queues; SoundFonts are parsed off the audio thread and swapped in. A forwarder thread sends events to the UI with the frame being heard, plays MIDI out (midir) at the time each event is heard, and rescans MIDI devices every second. MIDI input goes straight into the engine.
+  - `apps/desktop`: Tauri 2 around the same web build. `native.ts` gives the UI the same `EngineHandle` over Tauri commands and one update channel, plus native MIDI. `MIDZER_SELFTEST=1` drives the app once and reports.
+  - Tests: listener tests on synthetic notes and strums, engine mic test, tempo follow tests, event decode round trip, Vitest for the protocol and native helpers, a Playwright mic test with a fake microphone playing a strummed Am, and the desktop self-test.
+- **Next: M6** (mp3 → MIDI).
+- Open from M5:
+  - Nobody has tried the mic with a real guitar or voice yet. The gate, onset and chord thresholds need a hands-on pass, and there is no echo cancellation in the desktop app.
+  - Tempo follow needs a hands-on pass too; it is off by default.
+  - The desktop app has only been built on Linux. macOS/Windows builds, code signing and a smaller bundled SoundFont are still to do. The SoundFont is fetched through the webview and sent to the native side (32 MB over IPC).
+  - The native mic must run at the output's sample rate; there is no resampling.
 - Open from M4:
   - Learn screens aren't in the Figma file; the Figma MCP call limit was hit again. They were built straight in direction A.
   - Nobody has tried the lessons on a real MIDI keyboard yet. The timing windows and the any-octave default need a hands-on pass.
@@ -141,13 +154,13 @@ crates/
                    # conductor, style/pattern engine, song model, scheduler
   midzer-synth/    # SF2/SF3 playback (rustysynth) + mixer/effects (fundsp or hand-rolled)
   midzer-wasm/     # wasm-bindgen bindings; runs core+synth inside AudioWorklet
-  midzer-native/   # (M5) midir + cpal host for Tauri desktop / mobile
+  midzer-native/   # midir + cpal host for Tauri desktop / mobile (M5)
 packages/
   protocol/        # TS types for UI<->engine messages (generated from Rust via ts-rs/specta)
   audio-web/       # AudioWorklet loader, Web MIDI → worklet forwarding, QWERTY input
 apps/
   web/             # React + TS + Vite UI, Zustand state, PixiJS for visuals
-  desktop/         # (M5) Tauri 2 shell around apps/web + midzer-native
+  desktop/         # Tauri 2 shell around apps/web + midzer-native (M5)
 services/
   transcribe/      # (M6) optional Python service if native ONNX path is not enough
 ```

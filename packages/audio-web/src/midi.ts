@@ -2,7 +2,7 @@
 // be tested without a browser.
 
 import type { EngineCommand, EngineEvent } from './protocol';
-import { PLAYER_CHANNEL } from './channels';
+import { MIC_CHANNEL, PLAYER_CHANNEL } from './channels';
 
 /** Translates a raw MIDI message from a controller into an engine command. */
 export function midiToCommand(data: ArrayLike<number>): EngineCommand | null {
@@ -21,10 +21,10 @@ export function midiToCommand(data: ArrayLike<number>): EngineCommand | null {
 export function eventToMidi(event: EngineEvent, { echoPlayer = false } = {}): number[] | null {
   switch (event.type) {
     case 'noteOn':
-      if (event.channel === PLAYER_CHANNEL && !echoPlayer) return null;
+      if (event.channel === MIC_CHANNEL || (event.channel === PLAYER_CHANNEL && !echoPlayer)) return null;
       return [0x90 | event.channel, event.key, event.velocity];
     case 'noteOff':
-      if (event.channel === PLAYER_CHANNEL && !echoPlayer) return null;
+      if (event.channel === MIC_CHANNEL || (event.channel === PLAYER_CHANNEL && !echoPlayer)) return null;
       return [0x80 | event.channel, event.key, 0];
     case 'programChange':
       return [0xc0 | event.channel, event.program];

@@ -1,5 +1,21 @@
+import { NOTE_NAMES } from '@midzer/audio-web';
 import { useEffect, useRef, useState } from 'react';
-import { IDLE_OPTIONS, playerLatencyMs, setIdleMode, setMidiOutput, setSplit, setVolume, SPLIT_OPTIONS, useSession } from '../session';
+import { live } from '../live';
+import {
+  IDLE_OPTIONS,
+  LISTEN_OPTIONS,
+  playerLatencyMs,
+  setHeadphones,
+  setIdleMode,
+  setListenMode,
+  setMicGate,
+  setMidiOutput,
+  setSplit,
+  setTempoFollow,
+  setVolume,
+  SPLIT_OPTIONS,
+  useSession,
+} from '../session';
 import { Calibration } from './Calibration';
 
 export function SettingsDrawer({ onClose }: { onClose: () => void }) {
@@ -73,6 +89,22 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
+        <div className="setting">
+          <span>
+            Follow my tempo
+            <small>The band speeds up and slows down with you.</small>
+          </span>
+          <button
+            className={`toggle ${s.tempoFollow ? 'on' : ''}`}
+            aria-pressed={s.tempoFollow}
+            onClick={() => setTempoFollow(!s.tempoFollow)}
+          >
+            {s.tempoFollow ? 'On' : 'Off'}
+          </button>
+        </div>
+
+        <MicSettings />
+
         <h3 className="label">Advanced</h3>
 
         <label className="setting">
@@ -122,6 +154,95 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
           </select>
         </label>
       </div>
+    </div>
+  );
+}
+
+function MicSettings() {
+  const s = useSession();
+  const hint = LISTEN_OPTIONS.find((o) => o.mode === s.listenMode)?.hint;
+  return (
+    <section className="mic-settings" aria-labelledby="mic-label">
+      <h3 className="label" id="mic-label">
+        Microphone
+      </h3>
+      <div className="segmented" role="group" aria-label="Listen for">
+        {LISTEN_OPTIONS.map((o) => (
+          <button
+            key={o.mode}
+            className={`seg ${s.listenMode === o.mode ? 'on' : ''}`}
+            aria-pressed={s.listenMode === o.mode}
+            disabled={s.audio !== 'ready'}
+            onClick={() => void setListenMode(o.mode)}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+      {s.micError && (
+        <p className="setting-note error" role="alert">
+          {s.micError}
+        </p>
+      )}
+      {s.listenMode !== 'off' && (
+        <>
+          {hint && <p className="setting-note">{hint}</p>}
+          <MicMeter gateDb={s.micGateDb} showNote={s.listenMode === 'notes'} />
+          <label className="setting">
+            <span>
+              Sensitivity
+              <small>Quieter sounds than the line are ignored.</small>
+            </span>
+            <input
+              type="range"
+              min={-80}
+              max={-20}
+              step={1}
+              value={-100 - s.micGateDb}
+              aria-label="Sensitivity"
+              onChange={(e) => setMicGate(-100 - Number(e.target.value))}
+            />
+          </label>
+          <div className="setting">
+            <span>
+              Headphones
+              <small>{s.headphones ? 'Clearest pitch.' : 'With speakers the mic also hears the band.'}</small>
+            </span>
+            <button className={`toggle ${s.headphones ? 'on' : ''}`} aria-pressed={s.headphones} onClick={() => setHeadphones(!s.headphones)}>
+              {s.headphones ? 'On' : 'Off'}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+/** Live input level with the gate marked, and the note being heard. */
+function MicMeter({ gateDb, showNote }: { gateDb: number; showNote: boolean }) {
+  const fill = useRef<HTMLDivElement>(null);
+  const note = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    let frame = 0;
+    const draw = () => {
+      if (fill.current) fill.current.style.width = `${Math.round(live.mic.level * 100)}%`;
+      if (note.current) {
+        const key = live.mic.key;
+        note.current.textContent = key < 0 ? '–' : `${NOTE_NAMES[key % 12]}${Math.floor(key / 12) - 1}`;
+      }
+      frame = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  const gatePercent = ((gateDb + 80) / 80) * 100;
+  return (
+    <div className="mic-meter">
+      <div className="mic-meter-track" role="meter" aria-label="Microphone level">
+        <div className="mic-meter-fill" ref={fill} />
+        <div className="mic-meter-gate" style={{ left: `${gatePercent}%` }} />
+      </div>
+      {showNote && <span className="mic-meter-note" ref={note} aria-label="Note heard" />}
     </div>
   );
 }

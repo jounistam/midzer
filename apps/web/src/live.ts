@@ -4,7 +4,7 @@
 // Engine events arrive a little before they are heard (by the audio output
 // latency), so they are queued and applied at their `timeMs`.
 
-import { partOfChannel, type TimedEvent } from '@midzer/audio-web';
+import { MIC_CHANNEL, partOfChannel, type TimedEvent } from '@midzer/audio-web';
 
 export const live = {
   /** Velocity of each key the player is holding, 0 when up. */
@@ -13,6 +13,8 @@ export const live = {
   band: new Uint8Array(128),
   /** Keys Learn asks for next: 1 melody, 2 chord, 0 none. */
   hint: new Uint8Array(128),
+  /** Microphone loudness 0..1 and the note it hears (-1 none), for the meter. */
+  mic: { level: 0, key: -1 },
   /** Bumped on every change so renderers can skip unchanged frames. */
   version: 0,
 };
@@ -50,7 +52,8 @@ export function resetLive(): void {
 
 function apply(event: TimedEvent): void {
   if (event.type !== 'noteOn' && event.type !== 'noteOff') return;
-  const part = partOfChannel(event.channel);
+  // The microphone's notes show like keys the player holds.
+  const part = event.channel === MIC_CHANNEL ? 'player' : partOfChannel(event.channel);
   if (part === null || part === 'drums') return;
   const on = event.type === 'noteOn';
   if (part === 'player') {

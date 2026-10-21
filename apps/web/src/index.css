@@ -1777,3 +1777,55 @@ code {
     animation: none;
   }
 }
+
+/* ---- Microphone ----------------------------------------------------------- */
+
+.mic-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.mic-settings h3 {
+  margin: 0;
+}
+
+.setting-note.error {
+  color: var(--color-status-danger);
+}
+
+.mic-meter {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.mic-meter-track {
+  position: relative;
+  flex: 1;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-track);
+  overflow: hidden;
+}
+
+.mic-meter-fill {
+  height: 100%;
+  width: 0;
+  background: var(--color-accent-default);
+}
+
+.mic-meter-gate {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-primary-default);
+}
+
+.mic-meter-note {
+  min-width: 3ch;
+  font-family: var(--font-family-display);
+  font-weight: 600;
+  text-align: right;
+}
