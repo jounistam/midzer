@@ -70,7 +70,7 @@
     - These feed tier 1: chords from bass+other, the melody from the voice's top line, and the parts as tracks on the beat grid. The stems are saved as WAV files. A 4.5-minute song takes about 2¾ minutes on this laptop's CPU, peaking at 2.1 GB.
   - UI: drop or pick a recording on the Songs page. The dialog says it stays on the device and to use recordings you have the right to use. The desktop app offers Quick or "Separate the instruments", and the analysis shows its step and progress and can be cancelled. The result opens as a song (`source: 'audio'`) with notes on tempo, key and where the melody came from, and is saved to My songs. "Save transcription as MIDI" exports the parts.
   - Tests: unit tests for the resampler, STFT peaks, beat tracking, tuning/chroma, chords, downbeat, sections, melody, basic-pitch note creation and drums. An end-to-end Rust test renders the band itself (three styles and tempos) through the SoundFont and reads back the tempo, first downbeat and chords. Vitest covers the conversion and MIDI export, and a Playwright test imports a synthetic WAV. The desktop self-test imports one too: Quick by default, with stem separation under `MIDZER_SELFTEST=stems` (21 s, 1.5 GB peak).
-- **Next: M7** (mobile).
+- **Next: M7** (drummers, the user's choice on 2026-10-21), then M8 (any backing track). Mobile moves to M9.
 - Open from M6:
   - Only checked by eye on a few real songs (folk-rock, EDM pop and metal). Folk-rock and pop came out close; distorted metal is messy. Sevenths are under-detected on purpose. There is no meter detection (4/4 only) and no tempo map: the chart uses the median tempo.
   - The rough melody from the mix is often the wrong line. With stems, the vocal melody is plausible but unverified by ear.
@@ -116,6 +116,7 @@ Decisions from the user:
 - **Input:** start with MIDI keyboard, MIDI drums/pads and the computer keyboard. Guitar and voice via mic must stay possible.
 - **Modes:** free jam with styles (arranger style) *and* song-based playback/training.
 - **Performance matters.** The user asked about Kotlin/Wasm vs Rust. Conclusion below: a Rust core with a TypeScript UI.
+- **Drummers (2026-10-21):** the piano keyboard doesn't work for them, so they get their own setup before mobile. Mostly e-kits (MIDI). First "the drummer leads the band", then playing along with any backing track, with its tempo and beat found by the app so the playing can be judged.
 
 ## Architecture decision: Rust core + TypeScript UI
 - **What needs raw performance is the real-time audio thread** (synth, mixing, effects, sample-accurate scheduling). It has hard ~3 ms deadlines and can't tolerate garbage-collection pauses. Rust compiles to WASM with no garbage collector. Kotlin/Wasm uses WasmGC, so it is garbage-collected, which makes it a poor fit for the audio thread.
@@ -252,6 +253,39 @@ AudioWorklet thread:  midzer-wasm
   - In-browser via WebGPU is possible later, but the models are big and slow, so don't start there.
 - The output is a "good starting point". Ship a chord/section editor to fix it.
 
+### Drummers (M7)
+- **The core problem:** the band gets its harmony from the player's chords, and a drummer plays none. So for a drummer the harmony comes from a song chart or a progression loop, and the drummer controls what a keyboardist doesn't: **time, feel and the arrangement**.
+- **Input:**
+  - Mostly MIDI e-kits. A new `Command::DrumHit { piece, velocity }`, so drum notes no longer pass through the chord path (this fixes the "channel 10 is treated as notes" gap).
+  - Kit maps live in TS (`apps/web/src/drums/`): General MIDI as the default, presets for Roland TD, Alesis and Yamaha DTX, and a learn wizard ("hit the snare… now the kick"). Pieces: kick, snare (head, rim), hi-hat (closed, open, pedal), toms 1–3, crash, ride (bow, bell), plus spare pads.
+  - The hi-hat pedal comes as CC4 (openness) and chokes as polyphonic aftertouch; both are mapped.
+  - The e-kit's module makes the drum sound, so midzer doesn't play the hits by default (no doubled sound). "Play kit sounds" is a setting for pad controllers without a module.
+  - QWERTY and touch pads for trying it without a kit and for Playwright tests.
+  - An acoustic kit through the mic (onsets sorted into kick, snare and hi-hat, as M6 does on the drum stem) is possible later but not planned, because most users have e-kits.
+- **The instrument choice:** onboarding and settings ask for Keys, Drums or Guitar/voice. With Drums, a PixiJS kit view (pieces light up with velocity) replaces the keyboard.
+- **Harmony sources:** song charts (built-in, imported, or converted in M6), and progression loops: a few 4- or 8-bar progressions per style, stored as short built-in looping songs so they reuse song mode.
+- **The band in drummer mode:** its drums are muted by default (the options are muted, a light percussion layer such as shaker or tambourine, or a click). Bass, keys and pad play.
+- **The drummer leads:**
+  - **Count-in:** the band waits until four evenly spaced hits on a chosen piece (hi-hat or stick clicks by default) give the tempo and phase, then starts on the next 1.
+  - **Tempo follow tuned for drums:** onsets are weighted by piece and beat position (kick and snare on the main beats count most, ghost notes and fills barely). It's always on in drummer mode, with a wider range and a faster response than the keyboard follow. It must not chase a fill.
+  - **Energy** from velocity and density, as now. An experiment: the cymbal picks the variation (closed hi-hat → A, open hi-hat or ride → B, crash-heavy → C).
+  - **Fills:** a burst of toms or snare above the groove's usual density, late in the bar, counts as a fill. The band moves to the next section on the bar line, and a crash on that 1 confirms it.
+  - **Control from the kit:** a spare pad, cymbal or foot switch (a MIDI CC) can be set to "next section", "fill" or "ending". A cymbal choke stops the band. The on-screen section pads stay too.
+  - **Stopping:** after two quiet bars the existing idle behaviour applies (end, rest or keep going).
+- **The display:** the hands and feet are busy, so the screen is read from about 2 m, not clicked. Big chord, section and next-section text, the tempo and whether it's following, and a rushing/dragging meter against the band's grid. A new Jam layout in direction A.
+- **Latency:** drummers notice about 10 ms. The target setup is an e-kit with the desktop app (native audio). The browser is fine for trying it out. The tap calibration is reused, tapping on the kit.
+
+### Backing tracks (M8)
+- **The goal:** play along with any recording and get judged on time, without midzer's band.
+- **Two sources:**
+  1. **A file, analysed first.** M6 tier 1 already finds beats and downbeats. Add a **tempo map** (beat times, not just the median tempo) so tracks that drift are judged correctly. midzer plays the audio itself (decoded PCM streamed into the worklet or the native mixer), so every beat's sample time is known exactly. With stems (desktop), the drums can be muted: a drum-less mix to play over (this also wires up the M6 "play along with the stems" gap).
+  2. **Any audio, live.** Audio that midzer doesn't play: system audio loopback in the desktop app (a PipeWire/PulseAudio monitor source on Linux, WASAPI loopback on Windows, ScreenCaptureKit on macOS), tab audio through `getDisplayMedia` in Chrome, or a line input.
+- **Live beat tracking** (in Rust, next to `listen.rs`, allocation-free): spectral-flux onset strength (from `midzer-analyze`, made causal), tempo from a running autocorrelation of the onset envelope, and the beat phase from a comb filter bank or PLL. It locks after a few bars and reports a confidence. The downbeat comes from the drummer's count-in or a tap, or is guessed from where the kick and bass land.
+- **Judging:** each drum hit is matched against the nearest 8th or 16th of the track's grid. Judging can look back: a hit is graded once the beats around it are known, about one beat later. That is fine for the statistics. The live meter just lags by a beat.
+  - Per-piece offsets (e.g. "snare 12 ms late on the backbeat"), a histogram, and accuracy over time.
+  - Clock alignment: the e-kit's MIDI timestamps and the audio clock are put on one timeline. For live sources, the loopback captures audio before the output latency, so it needs its own calibration (tap along to the track once).
+- **Later:** the M6 drum transcription as a drum part to learn (lanes per piece), tempo trainer and gap bars.
+
 ---
 
 ## 3. Things to think about
@@ -290,7 +324,7 @@ AudioWorklet thread:  midzer-wasm
      - Also mark which elements are GPU-drawn (PixiJS) and which are regular page elements (React DOM).
   2. **Visual direction:** 2–3 mood directions (Stage/club, Friendly/playful, Pro instrument). Show each one applied to the *same* Jam screen and Learn screen, so they're easy to compare. The user picks one, or a blend.
   3. **Design tokens and core components** for the chosen direction: colour, type, spacing, radius, motion timing; buttons, big mode cards, chord badge, section pads, energy slider, keyboard, note lanes. Also: a dark/light decision, touch target sizes for mobile, and accessibility contrast.
-  4. **Responsive check:** a laptop and a tablet/phone layout of the Jam screen, so mobile (M7) isn't designed into a corner.
+  4. **Responsive check:** a laptop and a tablet/phone layout of the Jam screen, so mobile (M9) isn't designed into a corner.
   5. **Quick usability check:** walk 2–3 people, including a non-musician, through the onboarding frames. Fix the confusing parts before coding.
   - **Output:** a Figma file with the final screens and tokens. In M1, the tokens are exported to CSS variables and a small TS theme, so PixiJS and React share them.
 - **M0 — Skeleton:**
@@ -312,7 +346,14 @@ AudioWorklet thread:  midzer-wasm
   - Mic input with pitch and chord detection.
   - Optional tempo follow.
 - **M6 — mp3 → MIDI:** the native ONNX pipeline (Python fallback), imported as a Song with an editor.
-- **M7 — Mobile:**
+- **M7 — Drummers lead the band** (see "Drummers (M7)" above):
+  1. **M7a drum input:** `DrumHit`, kit maps, presets and the learn wizard, the hi-hat pedal and chokes, the instrument choice in onboarding and settings, the PixiJS kit view, QWERTY/touch pads.
+  2. **M7b drummer mode:** band drums muted (or percussion/click), progression loops, count-in start, drum-tuned tempo follow, fill and crash detection driving the conductor, control from spare pads and foot switches, the stage display with the rushing/dragging meter. Figma frames for the display in direction A, if the MCP limit allows.
+  - **Later ideas, not planned yet:** Drum Learn (lanes per kit piece, lessons from the styles' own grooves and fills, channel 10 kept in MIDI imports), groove tools (timing per piece, tempo trainer, gap bars), an acoustic kit through the mic.
+- **M8 — Any backing track** (see "Backing tracks (M8)" above):
+  1. **M8a files:** a tempo map from the analysis, midzer playing the track (optionally without the drum stem), and judging against its beats.
+  2. **M8b live audio:** loopback and tab-audio capture, the live beat tracker with confidence, look-back judging, and calibration for the capture path.
+- **M9 — Mobile:**
   - Tauri 2 builds for iOS and Android.
   - Native MIDI and audio through `midzer-native`.
   - A touch-optimized UI.
@@ -330,6 +371,11 @@ The first steps after approval are **D0 (Figma drafts) and M0 (skeleton) in para
 - **Real-time safety:** a debug build with an allocation counter in `process()` that must stay at zero after warm-up.
 - **Manual MIDI testing on Linux:** a real keyboard, or a virtual port (`sudo modprobe snd-virmidi` + `aconnect`). Check that MIDI out reaches a DAW or `fluidsynth`.
 - **UI tests (Playwright):** drive the app through the QWERTY/on-screen input or an injected mock input. Check that the band starts, the chord display updates and onboarding completes.
+- **Drummers (M7, M8):**
+  - Rust tests from scripted hit streams: count-in tempo and phase, tempo follow through a fill without chasing it, fill detection, choke stop, and drum hits in the no-allocation test.
+  - The live beat tracker on the band's own renders and on click tracks with tempo drift: time to lock, phase error, and holding through breaks.
+  - Vitest for kit maps and presets, the learn wizard and judging. Playwright for a drummer jam through the QWERTY pads.
+  - A hands-on pass with a real e-kit (count-in, follow, fills) before M7 counts as done.
 - **Performance targets:**
   - Under 30 ms perceived MIDI input→sound latency on Chrome/Linux.
   - No audio dropouts while the visuals run at 60 fps, verified with the Chrome Performance panel and the worklet's underrun counter.
