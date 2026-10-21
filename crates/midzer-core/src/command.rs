@@ -1,5 +1,6 @@
 use crate::chord::{Chord, Quality};
 use crate::conductor::{IdleMode, Request};
+use crate::drums::{Instrument, Piece};
 use crate::listen::ListenMode;
 use crate::song::Slot;
 
@@ -56,6 +57,19 @@ pub enum Command {
     SetListen { mode: ListenMode, gate_db: f32 },
     /// Whether the band follows the player's tempo.
     SetTempoFollow { on: bool },
+    /// A note from a drum source (the MIDI drum channel), played through the kit map.
+    DrumNote { note: u8, velocity: u8 },
+    /// A hit on a piece, from the on-screen or computer-keyboard pads.
+    DrumHit { piece: Piece, velocity: u8 },
+    /// Which piece `note` plays; `None` ignores it.
+    KitNote { note: u8, piece: Option<Piece> },
+    SetInstrument { instrument: Instrument },
+    /// The hi-hat pedal position (MIDI CC 4) as the kit sends it.
+    HiHatPedal { value: u8 },
+    /// A cymbal grabbed to stop it ringing (polyphonic aftertouch on its note).
+    DrumChoke { note: u8 },
+    /// Whether the built-in synth sounds the player's drums; an e-kit's own module usually does.
+    SetKitSound { on: bool },
 }
 
 mod op {
@@ -84,7 +98,19 @@ mod op {
     pub const SONG_WAIT: u32 = 23;
     pub const SET_LISTEN: u32 = 24;
     pub const SET_TEMPO_FOLLOW: u32 = 25;
+    pub const DRUM_NOTE: u32 = 26;
+    pub const DRUM_HIT: u32 = 27;
+    pub const KIT_NOTE: u32 = 28;
+    pub const SET_INSTRUMENT: u32 = 29;
+    pub const HI_HAT_PEDAL: u32 = 30;
+    pub const DRUM_CHOKE: u32 = 31;
+    pub const SET_KIT_SOUND: u32 = 32;
 }
+
+/// MIDI channel 10, where e-kits and drum pads send.
+const MIDI_DRUM_CHANNEL: u8 = 9;
+/// The MIDI controller for the hi-hat pedal (foot controller).
+const HI_HAT_CC: u8 = 4;
 
 fn request_code(request: Request) -> u32 {
     match request {
@@ -135,6 +161,7 @@ fn slot_from(kind: u32, packed: u32) -> Option<Slot> {
 }
 
 const IDLE_MODES: [IdleMode; 3] = [IdleMode::KeepPlaying, IdleMode::Rest, IdleMode::End];
+const INSTRUMENTS: [Instrument; 2] = [Instrument::Keys, Instrument::Drums];
 
 impl Command {
     pub fn encode(self) -> [u32; WORDS_PER_COMMAND] {
@@ -170,6 +197,16 @@ impl Command {
                 [op::SET_LISTEN, mode, gate_db.to_bits(), 0]
             }
             Command::SetTempoFollow { on } => [op::SET_TEMPO_FOLLOW, on as u32, 0, 0],
+            Command::DrumNote { note, velocity } => [op::DRUM_NOTE, note as u32, velocity as u32, 0],
+            Command::DrumHit { piece, velocity } => [op::DRUM_HIT, piece.index() as u32, velocity as u32, 0],
+            // Pieces travel as index + 1, with 0 for none.
+            Command::KitNote { note, piece } => [op::KIT_NOTE, note as u32, piece.map_or(0, |p| p.index() as u32 + 1), 0],
+            Command::SetInstrument { instrument } => {
+                [op::SET_INSTRUMENT, INSTRUMENTS.iter().position(|i| *i == instrument).unwrap_or(0) as u32, 0, 0]
+            }
+            Command::HiHatPedal { value } => [op::HI_HAT_PEDAL, value as u32, 0, 0],
+            Command::DrumChoke { note } => [op::DRUM_CHOKE, note as u32, 0, 0],
+            Command::SetKitSound { on } => [op::SET_KIT_SOUND, on as u32, 0, 0],
         }
     }
 
@@ -177,9 +214,15 @@ impl Command {
     /// `packages/audio-web/src/midi.ts`.
     pub fn from_midi(data: &[u8]) -> Option<Self> {
         let (status, d1, d2) = (*data.first()?, data.get(1).copied().unwrap_or(0), data.get(2).copied().unwrap_or(0));
+        let drums = status & 0x0f == MIDI_DRUM_CHANNEL;
         match status & 0xf0 {
+            0x90 if d2 > 0 && d1 < 128 && drums => Some(Command::DrumNote { note: d1, velocity: d2.min(127) }),
             0x90 if d2 > 0 && d1 < 128 => Some(Command::NoteOn { note: d1, velocity: d2.min(127) }),
+            // Drum hits don't hold: their releases mean nothing.
+            0x80 | 0x90 if drums => None,
             0x80 | 0x90 if d1 < 128 => Some(Command::NoteOff { note: d1 }),
+            0xa0 if d2 > 0 && d1 < 128 => Some(Command::DrumChoke { note: d1 }),
+            0xb0 if d1 == HI_HAT_CC => Some(Command::HiHatPedal { value: d2.min(127) }),
             // All Sound Off / All Notes Off
             0xb0 if d1 == 120 || d1 == 123 => Some(Command::AllNotesOff),
             _ => None,
@@ -221,6 +264,16 @@ impl Command {
             op::SONG_WAIT => Some(Command::SongWait { tick: (a != 0).then_some(b) }),
             op::SET_LISTEN => Some(Command::SetListen { mode: *ListenMode::ALL.get(a as usize)?, gate_db: float(b)? }),
             op::SET_TEMPO_FOLLOW => Some(Command::SetTempoFollow { on: a != 0 }),
+            op::DRUM_NOTE => Some(Command::DrumNote { note: midi(a)?, velocity: midi(b)? }),
+            op::DRUM_HIT => Some(Command::DrumHit { piece: Piece::from_index(a as usize)?, velocity: midi(b)? }),
+            op::KIT_NOTE => Some(Command::KitNote {
+                note: midi(a)?,
+                piece: if b == 0 { None } else { Some(Piece::from_index(b as usize - 1)?) },
+            }),
+            op::SET_INSTRUMENT => Some(Command::SetInstrument { instrument: *INSTRUMENTS.get(a as usize)? }),
+            op::HI_HAT_PEDAL => Some(Command::HiHatPedal { value: midi(a)? }),
+            op::DRUM_CHOKE => Some(Command::DrumChoke { note: midi(a)? }),
+            op::SET_KIT_SOUND => Some(Command::SetKitSound { on: a != 0 }),
             _ => None,
         }
     }
@@ -266,6 +319,17 @@ mod tests {
             Command::SongWait { tick: None },
             Command::SetListen { mode: ListenMode::Chords, gate_db: -45.0 },
             Command::SetTempoFollow { on: true },
+            Command::DrumNote { note: 38, velocity: 127 },
+            Command::DrumHit { piece: Piece::China, velocity: 1 },
+            Command::DrumHit { piece: Piece::Kick, velocity: 90 },
+            Command::KitNote { note: 26, piece: Some(Piece::HiHatOpen) },
+            Command::KitNote { note: 0, piece: Some(Piece::Kick) },
+            Command::KitNote { note: 127, piece: None },
+            Command::SetInstrument { instrument: Instrument::Drums },
+            Command::SetInstrument { instrument: Instrument::Keys },
+            Command::HiHatPedal { value: 64 },
+            Command::DrumChoke { note: 49 },
+            Command::SetKitSound { on: true },
         ] {
             assert_eq!(Command::decode(cmd.encode()), Some(cmd));
         }
@@ -278,6 +342,13 @@ mod tests {
         assert_eq!(Command::from_midi(&[0x80, 61, 30]), Some(Command::NoteOff { note: 61 }));
         assert_eq!(Command::from_midi(&[0xb0, 123, 0]), Some(Command::AllNotesOff));
         assert_eq!(Command::from_midi(&[0xb0, 64, 127]), None);
+        // Channel 10 is drums: hits only, releases ignored.
+        assert_eq!(Command::from_midi(&[0x99, 38, 120]), Some(Command::DrumNote { note: 38, velocity: 120 }));
+        assert_eq!(Command::from_midi(&[0x89, 38, 0]), None);
+        assert_eq!(Command::from_midi(&[0x99, 38, 0]), None);
+        assert_eq!(Command::from_midi(&[0xb9, 4, 90]), Some(Command::HiHatPedal { value: 90 }));
+        assert_eq!(Command::from_midi(&[0xa9, 49, 127]), Some(Command::DrumChoke { note: 49 }));
+        assert_eq!(Command::from_midi(&[0xa9, 49, 0]), None);
         assert_eq!(Command::from_midi(&[0xf8]), None);
         assert_eq!(Command::from_midi(&[]), None);
     }
@@ -296,5 +367,8 @@ mod tests {
         assert_eq!(Command::decode([op::SONG_MARK, 0, 7, 0]), None);
         assert_eq!(Command::decode([op::SONG_CLEAR, 70_000, 0, 0]), None);
         assert_eq!(Command::decode([op::SET_LISTEN, 3, 0, 0]), None);
+        assert_eq!(Command::decode([op::DRUM_HIT, Piece::COUNT as u32, 100, 0]), None);
+        assert_eq!(Command::decode([op::KIT_NOTE, 36, Piece::COUNT as u32 + 1, 0]), None);
+        assert_eq!(Command::decode([op::SET_INSTRUMENT, 2, 0, 0]), None);
     }
 }

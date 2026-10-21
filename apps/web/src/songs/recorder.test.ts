@@ -36,6 +36,19 @@ describe('Recorder', () => {
     expect(drums!.notes[0]!.tick).toBe(480);
   });
 
+  it("writes the player's drums on channel 10 in their own track", () => {
+    const rec = new Recorder(SR);
+    rec.record({ type: 'transport', playing: true, frame: 0 });
+    rec.record({ type: 'beat', bar: 0, beat: 0, frame: 0 });
+    rec.record({ type: 'beat', bar: 0, beat: 1, frame: 24_000 });
+    rec.record({ type: 'noteOn', channel: 14, key: 38, velocity: 100, frame: 24_000 });
+    rec.record({ type: 'noteOff', channel: 14, key: 38, frame: 28_800 });
+    rec.record({ type: 'transport', playing: false, frame: 48_000 });
+    const smf = readSmf(rec.export(120)!);
+    expect(smf.tracks.map((t) => t.name)).toEqual(['midzer', 'Your drums']);
+    expect(smf.tracks[1]!.notes).toEqual([{ tick: 480, duration: 96, channel: 9, key: 38, velocity: 100 }]);
+  });
+
   it('writes tempo changes where the beats speed up', () => {
     const rec = new Recorder(SR);
     rec.record({ type: 'transport', playing: true, frame: 0 });

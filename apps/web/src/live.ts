@@ -4,7 +4,9 @@
 // Engine events arrive a little before they are heard (by the audio output
 // latency), so they are queued and applied at their `timeMs`.
 
-import { MIC_CHANNEL, partOfChannel, type TimedEvent } from '@midzer/audio-web';
+import { DRUM_PIECES, MIC_CHANNEL, partOfChannel, type TimedEvent } from '@midzer/audio-web';
+
+const PIECE_OF_NOTE = new Map<number, number>(DRUM_PIECES.map((p, i) => [p.note, i]));
 
 export const live = {
   /** Velocity of each key the player is holding, 0 when up. */
@@ -13,6 +15,12 @@ export const live = {
   band: new Uint8Array(128),
   /** Keys Learn asks for next: 1 melody, 2 chord, 0 none. */
   hint: new Uint8Array(128),
+  /** When each drum piece was last hit (performance.now() ms), in engine piece order. */
+  drumTime: new Float64Array(DRUM_PIECES.length).fill(-Infinity),
+  /** Velocity of each piece's last hit. */
+  drumVelocity: new Uint8Array(DRUM_PIECES.length),
+  /** The hi-hat pedal (MIDI CC 4) as the kit last sent it, -1 before it has. */
+  hiHat: -1,
   /** Microphone loudness 0..1 and the note it hears (-1 none), for the meter. */
   mic: { level: 0, key: -1 },
   /** Bumped on every change so renderers can skip unchanged frames. */
@@ -34,7 +42,7 @@ export function enqueue(event: TimedEvent, timeMs: number): void {
 export function flushLive(now = performance.now()): void {
   let applied = 0;
   while (applied < queue.length && queue[applied]!.timeMs <= now) {
-    apply(queue[applied]!.event);
+    apply(queue[applied]!.event, queue[applied]!.timeMs);
     applied++;
   }
   if (applied > 0) {
@@ -47,16 +55,23 @@ export function resetLive(): void {
   queue.length = 0;
   live.player.fill(0);
   live.band.fill(0);
+  live.drumTime.fill(-Infinity);
   live.version++;
 }
 
-function apply(event: TimedEvent): void {
+function apply(event: TimedEvent, timeMs: number): void {
   if (event.type !== 'noteOn' && event.type !== 'noteOff') return;
   // The microphone's notes show like keys the player holds.
   const part = event.channel === MIC_CHANNEL ? 'player' : partOfChannel(event.channel);
   if (part === null || part === 'drums') return;
   const on = event.type === 'noteOn';
-  if (part === 'player') {
+  if (part === 'playerDrums') {
+    const piece = PIECE_OF_NOTE.get(event.key);
+    if (on && piece !== undefined) {
+      live.drumTime[piece] = timeMs;
+      live.drumVelocity[piece] = event.velocity;
+    }
+  } else if (part === 'player') {
     live.player[event.key] = on ? event.velocity : 0;
   } else {
     const n = live.band[event.key]!;

@@ -5,7 +5,7 @@
 // the musical grid, so frames are mapped to ticks between the surrounding
 // beats; tempo changes and drift land exactly where they were played.
 
-import { partOfChannel, type TimedEvent } from '@midzer/audio-web';
+import { DRUM_CHANNEL, partOfChannel, PLAYER_DRUM_CHANNEL, type TimedEvent } from '@midzer/audio-web';
 import { tempoEvent, writeSmf, type TrackEvents } from './smf';
 
 const PPQ = 480;
@@ -17,13 +17,15 @@ interface Recorded {
   bytes: number[];
 }
 
-const TRACKS = [
+/** Each part's track; `out` is the channel in the file, when it differs. */
+const TRACKS: readonly { name: string; channel: number; out?: number }[] = [
   { name: 'You', channel: 0 },
+  { name: 'Your drums', channel: PLAYER_DRUM_CHANNEL, out: DRUM_CHANNEL },
   { name: 'Keys', channel: 1 },
   { name: 'Bass', channel: 2 },
   { name: 'Pad', channel: 3 },
-  { name: 'Drums', channel: 9 },
-] as const;
+  { name: 'Drums', channel: DRUM_CHANNEL },
+];
 
 export class Recorder {
   private beats: number[] = [];
@@ -103,7 +105,7 @@ export class Recorder {
     }
 
     const endTick = toTick(Math.max(this.endFrame, this.events[this.events.length - 1]?.frame ?? 0));
-    const tracks = TRACKS.map(({ name, channel }) => {
+    const tracks = TRACKS.map(({ name, channel, out = channel }) => {
       const sounding = new Set<number>();
       const events: number[][] = [];
       for (const e of this.events) {
@@ -111,9 +113,9 @@ export class Recorder {
         const kind = e.bytes[0]! & 0xf0;
         if (kind === 0x90) sounding.add(e.bytes[1]!);
         else if (kind === 0x80 && !sounding.delete(e.bytes[1]!)) continue; // an orphan release
-        events.push([toTick(e.frame), ...e.bytes]);
+        events.push([toTick(e.frame), kind | out, ...e.bytes.slice(1)]);
       }
-      for (const key of sounding) events.push([endTick, 0x80 | channel, key, 0]);
+      for (const key of sounding) events.push([endTick, 0x80 | out, key, 0]);
       return { name, events };
     });
     return writeSmf(PPQ, [conductor, ...tracks.filter((t) => t.events.some((e) => (e[1]! & 0xf0) === 0x90))]);

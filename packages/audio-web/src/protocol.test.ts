@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { eventToMidi, midiToCommand } from './midi';
-import { chordName, chordTones, decodeEvent, encodeCommand } from './protocol';
+import { chordName, chordTones, decodeEvent, DRUM_PIECES, encodeCommand, pieceOfNote } from './protocol';
 
 describe('encodeCommand', () => {
   it('encodes sections and modes like command.rs', () => {
@@ -34,6 +34,25 @@ describe('encodeCommand', () => {
     expect([op, mode]).toEqual([24, 2]);
     expect(new Float32Array(new Uint32Array([gate]).buffer)[0]).toBe(-45);
     expect(encodeCommand({ type: 'setTempoFollow', on: true })).toEqual([25, 1, 0, 0]);
+  });
+
+  it('encodes drum commands like command.rs', () => {
+    expect(encodeCommand({ type: 'drumNote', note: 38, velocity: 127 })).toEqual([26, 38, 127, 0]);
+    expect(encodeCommand({ type: 'drumHit', piece: 'china', velocity: 1 })).toEqual([27, 16, 1, 0]);
+    expect(encodeCommand({ type: 'drumHit', piece: 'kick', velocity: 90 })).toEqual([27, 0, 90, 0]);
+    expect(encodeCommand({ type: 'kitNote', note: 26, piece: 'hiHatOpen' })).toEqual([28, 26, 6, 0]);
+    expect(encodeCommand({ type: 'kitNote', note: 127, piece: null })).toEqual([28, 127, 0, 0]);
+    expect(encodeCommand({ type: 'setInstrument', instrument: 'drums' })).toEqual([29, 1, 0, 0]);
+    expect(encodeCommand({ type: 'hiHatPedal', value: 64 })).toEqual([30, 64, 0, 0]);
+    expect(encodeCommand({ type: 'drumChoke', note: 49 })).toEqual([31, 49, 0, 0]);
+    expect(encodeCommand({ type: 'setKitSound', on: true })).toEqual([32, 1, 0, 0]);
+  });
+
+  it('knows each piece by its General MIDI key', () => {
+    expect(DRUM_PIECES).toHaveLength(17);
+    expect(new Set(DRUM_PIECES.map((p) => p.note)).size).toBe(17);
+    expect(pieceOfNote(38)).toBe('snare');
+    expect(pieceOfNote(60)).toBeNull();
   });
 
   it('encodes floats as f32 bits', () => {
@@ -115,6 +134,15 @@ describe('midiToCommand', () => {
     expect(midiToCommand([0x90, 60, 0])).toEqual({ type: 'noteOff', note: 60 });
   });
 
+  it('plays channel 10 as drums, with chokes and the hi-hat pedal', () => {
+    expect(midiToCommand([0x99, 38, 120])).toEqual({ type: 'drumNote', note: 38, velocity: 120 });
+    expect(midiToCommand([0x89, 38, 0])).toBeNull();
+    expect(midiToCommand([0x99, 38, 0])).toBeNull();
+    expect(midiToCommand([0xa9, 49, 127])).toEqual({ type: 'drumChoke', note: 49 });
+    expect(midiToCommand([0xa9, 49, 0])).toBeNull();
+    expect(midiToCommand([0xb9, 4, 90])).toEqual({ type: 'hiHatPedal', value: 90 });
+  });
+
   it('maps all-notes-off and ignores the rest', () => {
     expect(midiToCommand([0xb0, 123, 0])).toEqual({ type: 'allNotesOff' });
     expect(midiToCommand([0xb0, 7, 100])).toBeNull();
@@ -131,5 +159,8 @@ describe('eventToMidi', () => {
     ]);
     expect(eventToMidi({ type: 'programChange', channel: 1, program: 4 })).toEqual([0xc1, 4]);
     expect(eventToMidi({ type: 'beat', bar: 0, beat: 0 })).toBeNull();
+    // The player's drums go out on channel 10 when echoed.
+    expect(eventToMidi({ type: 'noteOn', channel: 14, key: 38, velocity: 90 })).toBeNull();
+    expect(eventToMidi({ type: 'noteOn', channel: 14, key: 38, velocity: 90 }, { echoPlayer: true })).toEqual([0x99, 38, 90]);
   });
 });

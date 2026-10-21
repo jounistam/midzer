@@ -17,9 +17,11 @@ import {
   type BandPart,
   type BandState,
   type ChordInfo,
+  type DrumPiece,
   type EngineCommand,
   type EngineHandle,
   type IdleMode,
+  type Instrument,
   type ListenMode,
   type NativeMidi,
   type SectionRequest,
@@ -27,6 +29,7 @@ import {
 } from '@midzer/audio-web';
 import { create } from 'zustand';
 import { enqueue, flushLive, live, resetLive } from './live';
+import { kitCommands, kitMap, parseKitSetup, qwertyToPiece, type KitSetup } from './drums/kit';
 import { qwertyToNote } from './qwerty';
 import { isBuiltin, saveUserSong } from './songs/library';
 import { transcriptionMidi } from './songs/audio';
@@ -111,6 +114,12 @@ interface SessionState {
   micError: string | null;
   /** The band speeds up and slows down with the player. */
   tempoFollow: boolean;
+  /** Keys or drums: what the player's notes are and what the screen shows. */
+  instrument: Instrument;
+  /** Which note of the e-kit plays which piece. */
+  kit: KitSetup;
+  /** The built-in synth sounds the player's drums; off when the kit's own module does. */
+  kitSound: boolean;
 }
 
 export const LISTEN_OPTIONS: { mode: ListenMode; label: string; hint: string }[] = [
@@ -143,10 +152,23 @@ interface Prefs {
   micGateDb: number;
   headphones: boolean;
   tempoFollow: boolean;
+  instrument: Instrument;
+  kit: KitSetup;
+  kitSound: boolean;
 }
 
 function readPrefs(): Prefs {
-  const defaults: Prefs = { style: 0, idleMode: 'rest', tapOffsetMs: null, micGateDb: -50, headphones: false, tempoFollow: false };
+  const defaults: Prefs = {
+    style: 0,
+    idleMode: 'rest',
+    tapOffsetMs: null,
+    micGateDb: -50,
+    headphones: false,
+    tempoFollow: false,
+    instrument: 'keys',
+    kit: { preset: 'gm' },
+    kitSound: false,
+  };
   try {
     const saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Partial<Prefs>;
     const style = Number.isInteger(saved.style) && STYLES[saved.style!] ? saved.style! : defaults.style;
@@ -155,15 +177,18 @@ function readPrefs(): Prefs {
     const micGateDb = typeof saved.micGateDb === 'number' ? Math.min(-10, Math.max(-90, saved.micGateDb)) : defaults.micGateDb;
     const headphones = saved.headphones === true;
     const tempoFollow = saved.tempoFollow === true;
-    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow };
+    const instrument = saved.instrument === 'drums' ? 'drums' : 'keys';
+    const kit = parseKitSetup(saved.kit);
+    const kitSound = saved.kitSound === true;
+    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound };
   } catch {
     return defaults;
   }
 }
 
 function savePrefs(): void {
-  const { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow } = get();
-  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow };
+  const { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound } = get();
+  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound };
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch {
@@ -220,6 +245,9 @@ export const useSession = create<SessionState>(() => ({
   headphones: prefs.headphones,
   micError: null,
   tempoFollow: prefs.tempoFollow,
+  instrument: prefs.instrument,
+  kit: prefs.kit,
+  kitSound: prefs.kitSound,
 }));
 
 const set = useSession.setState;
@@ -272,8 +300,11 @@ export async function startAudio(): Promise<void> {
       engine = await startEngine('/wasm/midzer.wasm');
     }
     engine.onEvent(onEngineEvent);
-    const { bpm, volume, split, muted, style, idleMode, tempoFollow } = get();
+    const { bpm, volume, split, muted, style, idleMode, tempoFollow, instrument, kit, kitSound } = get();
     set({ outputLatencyMs: engine.outputLatencyMs });
+    engine.send({ type: 'setInstrument', instrument });
+    for (const cmd of kitCommands(kitMap(kit))) engine.send(cmd);
+    engine.send({ type: 'setKitSound', on: kitSound });
     engine.send({ type: 'setStyle', index: style });
     engine.send({ type: 'setTempoFollow', on: tempoFollow });
     engine.send({ type: 'setIdleMode', mode: idleMode });
@@ -377,6 +408,30 @@ function notifyPlayer(cmd: EngineCommand, timeMs = performance.now()): void {
     const on = cmd.type === 'noteOn' && cmd.velocity > 0;
     for (const listener of playerListeners) listener(cmd.note, on, timeMs);
   }
+}
+
+type DrumInputListener = (note: number, velocity: number) => void;
+const drumInputListeners = new Set<DrumInputListener>();
+
+/**
+ * Calls `listener` with each note a drum source sends, before the kit map:
+ * notes on the MIDI drum channel, and every note while playing drums.
+ * Returns an unsubscribe function.
+ */
+export function onDrumInput(listener: DrumInputListener): () => void {
+  drumInputListeners.add(listener);
+  return () => drumInputListeners.delete(listener);
+}
+
+/** Tells the UI about input from a MIDI device, which the engine already has. */
+function notifyInput(cmd: EngineCommand): void {
+  const drums = get().instrument === 'drums';
+  if (cmd.type === 'drumNote' || (drums && cmd.type === 'noteOn')) {
+    for (const listener of drumInputListeners) listener(cmd.note, cmd.velocity);
+  } else if (cmd.type === 'hiHatPedal') {
+    live.hiHat = cmd.value;
+  }
+  if (!drums) notifyPlayer(cmd);
 }
 
 type BeatListener = (bar: number, beat: number, timeMs: number) => void;
@@ -521,6 +576,33 @@ export function setTempoFollow(on: boolean): void {
   set({ tempoFollow: on });
   savePrefs();
   send({ type: 'setTempoFollow', on });
+}
+
+// ---- Drums --------------------------------------------------------------------
+
+export function setInstrument(instrument: Instrument): void {
+  set({ instrument });
+  savePrefs();
+  send({ type: 'setInstrument', instrument });
+  resetLive();
+}
+
+/** Uses a preset or a learned note map for the e-kit. */
+export function setKit(kit: KitSetup): void {
+  set({ kit });
+  savePrefs();
+  for (const cmd of kitCommands(kitMap(kit))) send(cmd);
+}
+
+export function setKitSound(on: boolean): void {
+  set({ kitSound: on });
+  savePrefs();
+  send({ type: 'setKitSound', on });
+}
+
+/** A hit from the on-screen or computer-keyboard pads. */
+export function drumHit(piece: DrumPiece, velocity = 100): void {
+  send({ type: 'drumHit', piece, velocity });
 }
 
 // ---- Microphone ---------------------------------------------------------------
@@ -681,7 +763,7 @@ function downloadMidi(bytes: Uint8Array, name: string): void {
 /** Sends the player's notes to the engine and to whoever listens for them. */
 function playerCommand(cmd: EngineCommand): void {
   send(cmd);
-  notifyPlayer(cmd);
+  notifyInput(cmd);
 }
 
 export function playerNoteOn(note: number, velocity = 100): void {
@@ -705,10 +787,17 @@ export function attachQwerty(): () => void {
       if (!e.repeat) togglePlay();
       return;
     }
+    if (get().instrument === 'drums') {
+      // Shift for an accent.
+      const piece = qwertyToPiece(e.key);
+      if (piece && !e.repeat) drumHit(piece, e.shiftKey ? 127 : 96);
+      return;
+    }
     const note = qwertyToNote(e.key);
     if (note !== undefined && !e.repeat) playerNoteOn(note);
   };
   const up = (e: KeyboardEvent) => {
+    if (get().instrument === 'drums') return;
     const note = qwertyToNote(e.key);
     if (note !== undefined) playerNoteOff(note);
   };
@@ -731,7 +820,7 @@ export function attachQwerty(): () => void {
 async function connectMidi(): Promise<void> {
   if (nativeMidi) {
     // Native inputs already reach the engine; the UI only hears about them.
-    nativeMidi.onInput((cmd) => notifyPlayer(cmd));
+    nativeMidi.onInput(notifyInput);
     nativeMidi.onPorts(({ inputs, outputs }) => {
       const { midiOutputId } = get();
       set({

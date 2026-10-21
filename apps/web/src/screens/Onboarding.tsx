@@ -2,8 +2,9 @@ import { STYLES } from '@midzer/audio-web';
 import { ChordDisplay } from '../components/ChordDisplay';
 import { PlayButton } from '../components/ControlPanel';
 import { Keyboard } from '../components/Keyboard';
+import { KitView } from '../components/KitView';
 import { DeviceChip } from '../components/TopBar';
-import { finishOnboarding, setOnboardingStep, setStyle, startAudio, useSession } from '../session';
+import { finishOnboarding, setInstrument, setOnboardingStep, setStyle, startAudio, useSession } from '../session';
 import { LoadingStatus } from './LoadingStatus';
 
 export function Onboarding() {
@@ -13,7 +14,7 @@ export function Onboarding() {
       <header className="onboarding-head">
         <span className="brand">midzer</span>
         <ol className="steps" aria-label="Setup progress">
-          {['Keyboard', 'Vibe', 'Play'].map((label, i) => (
+          {['Connect', 'Vibe', 'Play'].map((label, i) => (
             <li key={label} className={i === step ? 'current' : i < step ? 'done' : ''}>
               {label}
             </li>
@@ -29,6 +30,7 @@ export function Onboarding() {
 
 function ConnectStep() {
   const supported = useSession((s) => s.midiSupported);
+  const drums = useSession((s) => s.instrument === 'drums');
   const begin = () => {
     void startAudio();
     setOnboardingStep(1);
@@ -36,10 +38,19 @@ function ConnectStep() {
   return (
     <section className="step">
       <p className="eyebrow">Step 1 of 3</p>
-      <h1>Plug in your keyboard</h1>
+      <div className="segmented instrument-pick" role="group" aria-label="I play">
+        <button className={`seg ${drums ? '' : 'on'}`} aria-pressed={!drums} onClick={() => setInstrument('keys')}>
+          I play keys
+        </button>
+        <button className={`seg ${drums ? 'on' : ''}`} aria-pressed={drums} onClick={() => setInstrument('drums')}>
+          I play drums
+        </button>
+      </div>
+      <h1>{drums ? 'Plug in your e-kit' : 'Plug in your keyboard'}</h1>
       <p className="lead">
-        Connect a MIDI keyboard with USB, then press Continue. No keyboard? No problem — you can play with your computer
-        keys.
+        {drums
+          ? 'Connect your electronic drum kit with USB or a MIDI cable, then press Continue. No kit? You can drum on your computer keys.'
+          : 'Connect a MIDI keyboard with USB, then press Continue. No keyboard? No problem — you can play with your computer keys.'}
       </p>
       {!supported && (
         <p className="notice">This browser can't use MIDI devices. Chrome or Edge can — or carry on with your computer keys.</p>
@@ -88,6 +99,37 @@ function VibeStep() {
 }
 
 function PlayStep() {
+  const drums = useSession((s) => s.instrument === 'drums');
+  return drums ? <DrumPlayStep /> : <KeysPlayStep />;
+}
+
+function DrumPlayStep() {
+  return (
+    <section className="step step-play">
+      <div className="step-play-head">
+        <div>
+          <p className="eyebrow">Step 3 of 3</p>
+          <h1>Hit your drums</h1>
+          <p className="lead">
+            Each drum you hit lights up below. On the computer: <kbd>V</kbd> kick, <kbd>F</kbd> snare, <kbd>J</kbd> hi-hat. If
+            the wrong drum lights up, open Settings and choose Learn my kit.
+          </p>
+        </div>
+        <DeviceChip />
+      </div>
+      <div className="actions">
+        <PlayButton />
+        <button className="btn btn-primary btn-xl" onClick={finishOnboarding}>
+          Start jamming
+        </button>
+        <LoadingStatus />
+      </div>
+      <KitView height={220} />
+    </section>
+  );
+}
+
+function KeysPlayStep() {
   const chord = useSession((s) => s.chord);
   const playing = useSession((s) => s.playing);
   return (

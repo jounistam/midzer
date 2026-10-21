@@ -38,6 +38,7 @@ impl Host {
     pub fn command(&mut self, words: [u32; 4]) -> bool {
         match Command::decode(words) {
             Some(Command::SetGain { gain }) => self.synth.set_gain(gain),
+            Some(Command::SetKitSound { on }) => self.synth.set_kit_sound(on),
             Some(cmd) => self.engine.handle(cmd),
             None => return false,
         }

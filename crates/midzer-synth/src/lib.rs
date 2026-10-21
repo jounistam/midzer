@@ -3,7 +3,7 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use midzer_core::{EngineEvent, MIC_CHANNEL, Timed};
+use midzer_core::{DRUM_CHANNEL, EngineEvent, MIC_CHANNEL, PLAYER_DRUM_CHANNEL, Timed};
 use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
 
 /// rustysynth applies events at its internal block boundaries, so this bounds
@@ -15,12 +15,14 @@ const DEFAULT_GAIN: f32 = 0.6;
 pub struct Synth {
     sample_rate: i32,
     gain: f32,
+    /// Whether the player's drum hits sound; an e-kit's module usually plays them.
+    kit_sound: bool,
     inner: Option<Synthesizer>,
 }
 
 impl Synth {
     pub fn new(sample_rate: f32) -> Self {
-        Self { sample_rate: sample_rate as i32, gain: DEFAULT_GAIN, inner: None }
+        Self { sample_rate: sample_rate as i32, gain: DEFAULT_GAIN, kit_sound: false, inner: None }
     }
 
     pub fn is_loaded(&self) -> bool {
@@ -47,6 +49,10 @@ impl Synth {
         }
     }
 
+    pub fn set_kit_sound(&mut self, on: bool) {
+        self.kit_sound = on;
+    }
+
     /// Renders one block, applying each event at its frame. Silent until a
     /// SoundFont is loaded.
     pub fn render(&mut self, events: &[Timed], left: &mut [f32], right: &mut [f32]) {
@@ -62,7 +68,7 @@ impl Synth {
                 synth.render(&mut left[pos..frame], &mut right[pos..frame]);
                 pos = frame;
             }
-            apply(synth, &timed.event);
+            apply(synth, &timed.event, self.kit_sound);
         }
         if pos < left.len() {
             synth.render(&mut left[pos..], &mut right[pos..]);
@@ -70,10 +76,17 @@ impl Synth {
     }
 }
 
-fn apply(synth: &mut Synthesizer, event: &EngineEvent) {
+fn apply(synth: &mut Synthesizer, event: &EngineEvent, kit_sound: bool) {
     match *event {
         // The microphone's notes are already sounding in the room.
         EngineEvent::NoteOn { channel: MIC_CHANNEL, .. } | EngineEvent::NoteOff { channel: MIC_CHANNEL, .. } => {}
+        // Only the drum channel has drum sounds, so the player's hits share the band's kit.
+        EngineEvent::NoteOn { channel: PLAYER_DRUM_CHANNEL, key, velocity } => {
+            if kit_sound {
+                synth.note_on(DRUM_CHANNEL as i32, key as i32, velocity as i32);
+            }
+        }
+        EngineEvent::NoteOff { channel: PLAYER_DRUM_CHANNEL, key } => synth.note_off(DRUM_CHANNEL as i32, key as i32),
         EngineEvent::NoteOn { channel, key, velocity } => synth.note_on(channel as i32, key as i32, velocity as i32),
         EngineEvent::NoteOff { channel, key } => synth.note_off(channel as i32, key as i32),
         EngineEvent::ProgramChange { channel, program } => {
@@ -143,6 +156,23 @@ mod tests {
             assert!(loudest <= 1.0, "channel {channel} clipping: {loudest}");
             synth.render(&[Timed { frame: 0, event: EngineEvent::NoteOff { channel, key } }], &mut l, &mut r);
         }
+    }
+
+    #[test]
+    fn player_drums_sound_only_with_kit_sound_on() {
+        let Some(mut synth) = loaded() else { return };
+        let loudest = |synth: &mut Synth| {
+            let (mut l, mut r) = (vec![0.0; 128], vec![0.0; 128]);
+            let hit = [Timed { frame: 0, event: EngineEvent::NoteOn { channel: PLAYER_DRUM_CHANNEL, key: 38, velocity: 110 } }];
+            synth.render(&hit, &mut l, &mut r);
+            (0..40).fold(0.0f32, |m, _| {
+                synth.render(&[], &mut l, &mut r);
+                m.max(peak(&l))
+            })
+        };
+        assert_eq!(loudest(&mut synth), 0.0);
+        synth.set_kit_sound(true);
+        assert!(loudest(&mut synth) > 0.01);
     }
 
     #[test]

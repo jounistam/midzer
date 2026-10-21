@@ -70,7 +70,24 @@
     - These feed tier 1: chords from bass+other, the melody from the voice's top line, and the parts as tracks on the beat grid. The stems are saved as WAV files. A 4.5-minute song takes about 2¾ minutes on this laptop's CPU, peaking at 2.1 GB.
   - UI: drop or pick a recording on the Songs page. The dialog says it stays on the device and to use recordings you have the right to use. The desktop app offers Quick or "Separate the instruments", and the analysis shows its step and progress and can be cancelled. The result opens as a song (`source: 'audio'`) with notes on tempo, key and where the melody came from, and is saved to My songs. "Save transcription as MIDI" exports the parts.
   - Tests: unit tests for the resampler, STFT peaks, beat tracking, tuning/chroma, chords, downbeat, sections, melody, basic-pitch note creation and drums. An end-to-end Rust test renders the band itself (three styles and tempos) through the SoundFont and reads back the tempo, first downbeat and chords. Vitest covers the conversion and MIDI export, and a Playwright test imports a synthetic WAV. The desktop self-test imports one too: Quick by default, with stem separation under `MIDZER_SELFTEST=stems` (21 s, 1.5 GB peak).
-- **Next: M7** (drummers, the user's choice on 2026-10-21), then M8 (any backing track). Mobile moves to M9.
+- **M7a drum input:** done (2026-10-21).
+  - Engine (`drums.rs`): 17 pieces, each reported and sounded as its General MIDI key, and a kit map (128 notes → piece) that starts out as General MIDI.
+  - Commands: `DrumNote` (raw notes from a drum source), `DrumHit` (pads), `KitNote`, `SetInstrument`, `HiHatPedal`, `DrumChoke` and `SetKitSound`.
+  - MIDI channel 10 is always drums, in both instruments. Its note-offs are ignored, polyphonic aftertouch chokes, and CC 4 is the hi-hat pedal. With the instrument set to Drums, notes on every channel go through the kit map.
+  - Hits go out on channel 15 (`PLAYER_DRUM_CHANNEL`, 14 from 0) and are released after a fixed 100 ms gate, because kits send their own releases right after the hit. A retrigger releases first; a choke releases at once.
+  - Hits count as playing for energy, stop detection and tempo follow. They never form chords.
+  - Kit sounds are off by default (the kit's module plays). When on, the synth plays hits on the drum channel, so they use the band's kit for the style. The host routes `SetKitSound` like `SetGain`.
+  - MIDI out sends the player's drums only when the player is echoed, on channel 10. The take recorder writes them as their own "Your drums" track on channel 10.
+  - Web (`apps/web/src/drums`): piece names and computer keys, the presets (General MIDI, which covers Alesis, Yamaha DTX and most kits by default, and Roland V-Drums with the tom rims and cymbal edges), and the learn wizard (every note heard during a piece's turn plays it; Skip, Back, Clear). The setup is saved in the prefs.
+  - UI: onboarding asks "I play keys / drums". The e-kit has its own connect and play steps. Settings has an "I play" switch and a Drum kit section (note map, Learn my kit, Kit sounds). Chord detection is hidden for drums.
+  - `KitView` (PixiJS) replaces the keyboard in Jam and Song for drummers: a top-down kit, with rings for the open hi-hat, snare rim and ride bow. Hits light up by velocity and fade. It shows the pedal position and the last hit with its velocity, and pieces can be clicked or touched. Computer pads: V kick, F snare, J/U/N hi-hat closed/open/pedal, T/Y/H/B toms, E/I crashes, K/O ride/bell, R rim, D cross-stick, W splash, P china; Shift accents.
+  - Tests: Rust engine, command and synth tests for drums, drums in the no-allocation test, Vitest for the protocol, MIDI translation, kit maps, layout, the learn wizard and the recorder, and a Playwright drummer flow with a fake Web MIDI e-kit (onboarding, pads, channel-10 hits, learning a kit, remembered after reload).
+- **Next: M7b** (drummer mode: the drummer leads the band), then M8 (any backing track). Mobile moves to M9.
+- Open from M7a:
+  - Nobody has tried it with a real e-kit yet. The Roland map comes from its published default note chart and is unverified; the learn wizard is the fallback.
+  - The kit's own open/closed hi-hat notes are trusted; the pedal position is only shown, not used.
+  - In M7a the band still plays its own drums and waits for chords; muting them and the harmony sources are M7b.
+  - Learn and calibration still expect keys. The desktop app wasn't rebuilt here (its GTK build needs pkg-config), but `midzer-native` builds and passes its tests.
 - Open from M6:
   - Only checked by eye on a few real songs (folk-rock, EDM pop and metal). Folk-rock and pop came out close; distorted metal is messy. Sevenths are under-detected on purpose. There is no meter detection (4/4 only) and no tempo map: the chart uses the median tempo.
   - The rough melody from the mix is often the wrong line. With stems, the vocal melody is plausible but unverified by ear.
@@ -101,7 +118,7 @@
 ## Known gaps
 - The SoundFont is 32 MB and gets parsed on the audio thread. Load it before playback, and replace it with a smaller curated set later. Its sample provenance needs review before any commercial release.
 - There's no MIDI-out lookahead. The external sound lines up with the internal audio only within that audio's output latency.
-- MIDI input: the sustain pedal is not handled yet, and drum-pad (channel 10) input is treated as notes.
+- MIDI input: the sustain pedal is not handled yet.
 
 ## Context
 The repo is empty (no commits yet). The goal is a tool where a musician or hobbyist plays along with a "backing band" that reacts to what they play. It needs:

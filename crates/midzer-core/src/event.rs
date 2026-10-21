@@ -11,6 +11,9 @@ pub const DRUM_CHANNEL: u8 = 9;
 /// MIDI channel of what the microphone heard. These notes are reported but
 /// not played: the player's own sound is already in the room.
 pub const MIC_CHANNEL: u8 = 15;
+/// MIDI channel of the player's drum hits, one General MIDI key per piece.
+/// The synth plays them on the drum channel when kit sounds are on.
+pub const PLAYER_DRUM_CHANNEL: u8 = 14;
 
 /// Something the engine did, for the synth, MIDI out and the UI.
 ///
@@ -159,11 +162,11 @@ impl EngineEvent {
     }
 
     /// The MIDI message for external gear: the band's notes and programs.
-    /// The player's own notes and the microphone's are not sent.
+    /// The player's own notes and drums and the microphone's are not sent.
     pub fn to_midi(&self) -> Option<[u8; 3]> {
         match *self {
             EngineEvent::NoteOn { channel, .. } | EngineEvent::NoteOff { channel, .. }
-                if channel == crate::engine::PLAYER_CHANNEL || channel == MIC_CHANNEL =>
+                if channel == crate::engine::PLAYER_CHANNEL || channel == MIC_CHANNEL || channel == PLAYER_DRUM_CHANNEL =>
             {
                 None
             }

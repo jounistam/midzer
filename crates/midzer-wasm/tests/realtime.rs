@@ -4,7 +4,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use midzer_core::{Chord, Command, IdleMode, ListenMode, Quality, Request, Slot};
+use midzer_core::{Chord, Command, IdleMode, Instrument, ListenMode, Piece, Quality, Request, Slot};
 use midzer_wasm::{BLOCK_FRAMES, Host};
 
 struct CountingAlloc;
@@ -126,6 +126,30 @@ fn playing_band_renders_without_allocating() {
             host.listen(BLOCK_FRAMES);
             events += host.process(BLOCK_FRAMES);
         }
+    }
+    command(&mut host, Command::Stop);
+    host.process(BLOCK_FRAMES);
+
+    // A drummer: a remapped kit, sounding through the synth, with chokes and the pedal.
+    command(&mut host, Command::SetListen { mode: ListenMode::Off, gate_db: -50.0 });
+    command(&mut host, Command::SetInstrument { instrument: Instrument::Drums });
+    command(&mut host, Command::SetKitSound { on: true });
+    command(&mut host, Command::KitNote { note: 26, piece: Some(Piece::HiHatOpen) });
+    command(&mut host, Command::Play);
+    for block in 0..3000usize {
+        match block % 24 {
+            0 => command(&mut host, Command::NoteOn { note: 36, velocity: 110 }),
+            6 => command(&mut host, Command::DrumNote { note: 26, velocity: 80 }),
+            12 => command(&mut host, Command::DrumHit { piece: Piece::Snare, velocity: 100 }),
+            18 => command(&mut host, Command::HiHatPedal { value: (block % 128) as u8 }),
+            _ => {}
+        }
+        if block % 500 == 0 {
+            command(&mut host, Command::DrumHit { piece: Piece::Crash, velocity: 127 });
+        } else if block % 500 == 100 {
+            command(&mut host, Command::DrumChoke { note: 49 });
+        }
+        events += host.process(BLOCK_FRAMES);
     }
     command(&mut host, Command::Stop);
     host.process(BLOCK_FRAMES);

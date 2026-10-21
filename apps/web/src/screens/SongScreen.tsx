@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { ChartView, type Selection } from '../components/ChartView';
 import { BandMutes, EnergyControl, PlayButton, TakeButton, TempoControl } from '../components/ControlPanel';
 import { Keyboard } from '../components/Keyboard';
+import { KitView } from '../components/KitView';
 import { TopBar } from '../components/TopBar';
 import {
   closeSong,
@@ -31,6 +32,7 @@ import { LoadingStatus } from './LoadingStatus';
 export function SongScreen() {
   const song = useSession((s) => s.song);
   const split = useSession((s) => s.split);
+  const drums = useSession((s) => s.instrument === 'drums');
   const notes = useSession((s) => s.songNotes);
   const [editing, setEditing] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -79,7 +81,7 @@ export function SongScreen() {
           {song.transcription && <TranscriptionButton tracks={song.transcription.length} />}
         </aside>
       </main>
-      <Keyboard split={split} />
+      {drums ? <KitView /> : <Keyboard split={split} />}
     </div>
   );
 }

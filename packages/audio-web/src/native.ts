@@ -40,7 +40,7 @@ interface Started {
   outputLatencyMs: number;
 }
 
-/** Decodes the player commands MIDI input produces (note on/off, all notes off). */
+/** Decodes the player commands MIDI input produces (`Command::from_midi`). */
 export function decodeInputCommand(op: number, a: number, b: number): EngineCommand | null {
   switch (op) {
     case 1:
@@ -49,6 +49,12 @@ export function decodeInputCommand(op: number, a: number, b: number): EngineComm
       return { type: 'noteOff', note: a };
     case 4:
       return { type: 'allNotesOff' };
+    case 26:
+      return { type: 'drumNote', note: a, velocity: b };
+    case 30:
+      return { type: 'hiHatPedal', value: a };
+    case 31:
+      return { type: 'drumChoke', note: a };
     default:
       return null;
   }

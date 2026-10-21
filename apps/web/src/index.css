@@ -811,6 +811,58 @@ select {
   cursor: pointer;
 }
 
+.kit-view {
+  position: relative;
+  width: 100%;
+  background: var(--color-bg-stage);
+  border-top: 1px solid var(--color-border-default);
+}
+
+.kit-canvas {
+  width: 100%;
+  touch-action: none;
+  user-select: none;
+  cursor: pointer;
+}
+
+.kit-last {
+  position: absolute;
+  left: var(--space-4);
+  bottom: var(--space-2);
+  margin: 0;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+  pointer-events: none;
+}
+
+.instrument-pick {
+  max-width: 360px;
+  margin-bottom: var(--space-6);
+}
+
+.kit-learn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.kit-learn-piece {
+  margin: 0;
+  font-family: var(--font-family-display);
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--color-text-accent);
+}
+
+.kit-learn-notes {
+  min-height: 20px;
+  margin: 0;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+
 .onboarding,
 .home {
   max-width: 1120px;

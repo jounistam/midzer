@@ -1,11 +1,15 @@
 use crate::band::Band;
 use crate::chord::recognize;
 use crate::command::Command;
-use crate::event::{EngineEvent, EventBuffer, MIC_CHANNEL, Timed};
+use crate::drums::{Instrument, Kit, Piece};
+use crate::event::{EngineEvent, EventBuffer, MIC_CHANNEL, PLAYER_DRUM_CHANNEL, Timed};
 use crate::listen::{Heard, HeardList, ListenMode, Listener};
 
 /// MIDI channel for the player's own notes.
 pub const PLAYER_CHANNEL: u8 = 0;
+/// How long a drum hit sounds before its release, in seconds. Kits send their
+/// own releases right after the hit, which would cut cymbals short.
+const DRUM_GATE_S: f32 = 0.1;
 
 /// The engine for one session: player input, chord detection and the band.
 ///
@@ -21,6 +25,11 @@ pub struct Engine {
     listener: Listener,
     /// Keys the microphone reports as sounding, on [`MIC_CHANNEL`].
     mic_held: [bool; 128],
+    instrument: Instrument,
+    kit: Kit,
+    /// Frames until each piece's last hit is released; 0 once it is.
+    drum_gate: [u32; Piece::COUNT],
+    gate_frames: u32,
 }
 
 impl Engine {
@@ -32,11 +41,18 @@ impl Engine {
             events: EventBuffer::default(),
             listener: Listener::new(sample_rate),
             mic_held: [false; 128],
+            instrument: Instrument::Keys,
+            kit: Kit::default(),
+            drum_gate: [0; Piece::COUNT],
+            gate_frames: (sample_rate * DRUM_GATE_S) as u32,
         }
     }
 
     pub fn handle(&mut self, cmd: Command) {
+        let drums = self.instrument == Instrument::Drums;
         match cmd {
+            Command::NoteOn { note, velocity } if drums => self.drum_note(note, velocity),
+            Command::NoteOff { .. } if drums => {}
             Command::NoteOn { note, velocity: 0 } | Command::NoteOff { note } => {
                 self.held[note as usize] = false;
                 self.events.push(0, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key: note });
@@ -84,8 +100,24 @@ impl Engine {
                 self.on_heard(&heard);
             }
             Command::SetTempoFollow { on } => self.band.set_tempo_follow(on, &mut self.events),
-            // Mixing is the synth's job; the host routes this one.
-            Command::SetGain { .. } => {}
+            Command::DrumNote { note, velocity } => self.drum_note(note, velocity),
+            Command::DrumHit { piece, velocity } => self.drum_hit(piece, velocity),
+            Command::KitNote { note, piece } => self.kit.set(note, piece),
+            Command::SetInstrument { instrument } => {
+                if instrument != self.instrument {
+                    self.handle(Command::AllNotesOff);
+                    self.instrument = instrument;
+                }
+            }
+            Command::DrumChoke { note } => {
+                if let Some(piece) = self.kit.piece(note) {
+                    self.release_drum(piece, 0);
+                }
+            }
+            // Kits send their own open and closed hi-hat notes; the pedal is for the UI.
+            Command::HiHatPedal { .. } => {}
+            // Mixing is the synth's job; the host routes these.
+            Command::SetGain { .. } | Command::SetKitSound { .. } => {}
         }
     }
 
@@ -151,8 +183,44 @@ impl Engine {
         self.band.set_keys_held(self.held.contains(&true) || self.listener.sounding());
     }
 
+    fn drum_note(&mut self, note: u8, velocity: u8) {
+        if let Some(piece) = self.kit.piece(note) {
+            self.drum_hit(piece, velocity);
+        }
+    }
+
+    /// Sounds a hit on [`PLAYER_DRUM_CHANNEL`] and counts it as playing.
+    fn drum_hit(&mut self, piece: Piece, velocity: u8) {
+        if velocity == 0 {
+            return;
+        }
+        self.release_drum(piece, 0);
+        self.drum_gate[piece.index()] = self.gate_frames;
+        self.events.push(0, EngineEvent::NoteOn { channel: PLAYER_DRUM_CHANNEL, key: piece.note(), velocity });
+        self.band.note_played(velocity);
+        self.band.onset(0.0);
+    }
+
+    fn release_drum(&mut self, piece: Piece, frame: u32) {
+        if std::mem::take(&mut self.drum_gate[piece.index()]) > 0 {
+            self.events.push(frame, EngineEvent::NoteOff { channel: PLAYER_DRUM_CHANNEL, key: piece.note() });
+        }
+    }
+
+    /// Releases the hits whose gate ends in this block.
+    fn release_drums(&mut self, frames: u32) {
+        for piece in Piece::ALL {
+            match self.drum_gate[piece.index()] {
+                0 => {}
+                left if left < frames => self.release_drum(piece, left),
+                left => self.drum_gate[piece.index()] = left - frames,
+            }
+        }
+    }
+
     /// Schedules this block and returns all of its events, sorted by frame.
     pub fn process(&mut self, frames: u32) -> &[Timed] {
+        self.release_drums(frames);
         self.band.process(frames, &mut self.events);
         self.events.sort();
         self.events.as_slice()
@@ -234,6 +302,66 @@ mod tests {
             engine.handle(Command::NoteOn { note, velocity: 90 });
         }
         assert_eq!(chord_events(engine.process(128)).last(), Some(&Some(Chord::new(0, Quality::Major))));
+    }
+
+    fn drum_events(events: &[Timed]) -> Vec<(u32, bool, u8)> {
+        events
+            .iter()
+            .filter_map(|t| match t.event {
+                EngineEvent::NoteOn { channel: PLAYER_DRUM_CHANNEL, key, .. } => Some((t.frame, true, key)),
+                EngineEvent::NoteOff { channel: PLAYER_DRUM_CHANNEL, key } => Some((t.frame, false, key)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Runs blocks until `frames` have passed, collecting the player's drum events.
+    fn run_drums(engine: &mut Engine, frames: u32) -> Vec<(u32, bool, u8)> {
+        let mut out = Vec::new();
+        for block in 0..frames / 128 {
+            out.extend(drum_events(engine.process(128)).into_iter().map(|(f, on, key)| (block * 128 + f, on, key)));
+            engine.end_block();
+        }
+        out
+    }
+
+    #[test]
+    fn drum_channel_notes_are_hits_released_after_the_gate() {
+        let mut engine = Engine::new(48_000.0);
+        engine.handle(Command::DrumNote { note: 38, velocity: 100 });
+        // The kit's own release is ignored; the gate releases 100 ms later.
+        engine.handle(Command::NoteOff { note: 38 });
+        let events = run_drums(&mut engine, 9_600);
+        assert_eq!(events, vec![(0, true, 38), (4_800, false, 38)]);
+        assert!(chord_events(engine.process(128)).is_empty());
+    }
+
+    #[test]
+    fn drums_mode_plays_every_note_through_the_kit() {
+        let mut engine = Engine::new(48_000.0);
+        engine.handle(Command::SetInstrument { instrument: Instrument::Drums });
+        engine.handle(Command::KitNote { note: 26, piece: Some(Piece::HiHatOpen) });
+        engine.handle(Command::KitNote { note: 36, piece: None });
+        for note in [26, 36, 60, 64, 67] {
+            engine.handle(Command::NoteOn { note, velocity: 90 });
+        }
+        let events = engine.process(128);
+        assert!(chord_events(events).is_empty(), "drums form no chords");
+        assert!(!events.iter().any(|t| matches!(t.event, EngineEvent::NoteOn { channel: PLAYER_CHANNEL, .. })));
+        assert_eq!(drum_events(events), vec![(0, true, Piece::HiHatOpen.note())]);
+    }
+
+    #[test]
+    fn retriggers_release_first_and_chokes_cut_the_hit() {
+        let mut engine = Engine::new(48_000.0);
+        engine.handle(Command::DrumHit { piece: Piece::Crash, velocity: 110 });
+        assert_eq!(run_drums(&mut engine, 128), vec![(0, true, 49)]);
+        engine.handle(Command::DrumHit { piece: Piece::Crash, velocity: 80 });
+        assert_eq!(run_drums(&mut engine, 128), vec![(0, false, 49), (0, true, 49)]);
+        engine.handle(Command::DrumChoke { note: 49 });
+        assert_eq!(run_drums(&mut engine, 9_600), vec![(0, false, 49)], "choked, so no gate release later");
+        engine.handle(Command::DrumHit { piece: Piece::Kick, velocity: 0 });
+        assert!(run_drums(&mut engine, 128).is_empty());
     }
 
     #[test]

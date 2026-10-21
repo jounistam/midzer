@@ -150,6 +150,7 @@ struct Renderer {
     engine: Box<Engine>,
     synth: Box<Synth>,
     gain: f32,
+    kit_sound: bool,
     left: [f32; BLOCK],
     right: [f32; BLOCK],
     input: [f32; BLOCK],
@@ -163,6 +164,7 @@ impl Renderer {
             engine: Box::new(Engine::new(rate)),
             synth: Box::new(Synth::new(rate)),
             gain: 0.6,
+            kit_sound: false,
             left: [0.0; BLOCK],
             right: [0.0; BLOCK],
             input: [0.0; BLOCK],
@@ -182,6 +184,7 @@ impl Renderer {
 
         if let Some(mut synth) = shared.synth_in.pop() {
             synth.set_gain(self.gain);
+            synth.set_kit_sound(self.kit_sound);
             std::mem::swap(&mut self.synth, &mut synth);
             // Dropping frees memory; the forwarder thread does that.
             let _ = shared.synth_out.push(synth);
@@ -191,6 +194,10 @@ impl Renderer {
                 Some(Command::SetGain { gain }) => {
                     self.gain = gain;
                     self.synth.set_gain(gain);
+                }
+                Some(Command::SetKitSound { on }) => {
+                    self.kit_sound = on;
+                    self.synth.set_kit_sound(on);
                 }
                 Some(cmd) => self.engine.handle(cmd),
                 None => {}

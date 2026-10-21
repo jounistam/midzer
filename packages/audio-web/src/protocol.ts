@@ -31,6 +31,13 @@ const Cmd = {
   SongWait: 23,
   SetListen: 24,
   SetTempoFollow: 25,
+  DrumNote: 26,
+  DrumHit: 27,
+  KitNote: 28,
+  SetInstrument: 29,
+  HiHatPedal: 30,
+  DrumChoke: 31,
+  SetKitSound: 32,
 } as const;
 
 /** Ticks per beat in song positions; mirrors `PPQ` in style.rs. */
@@ -63,6 +70,38 @@ const LISTEN_MODES: readonly ListenMode[] = ['off', 'notes', 'chords'];
  * mirrors `ListenMode::delay_ms`.
  */
 export const LISTEN_DELAY_MS: Record<ListenMode, number> = { off: 0, notes: 45, chords: 120 };
+
+/** What the player plays; mirrors `Instrument` in drums.rs. */
+export type Instrument = 'keys' | 'drums';
+const INSTRUMENTS: readonly Instrument[] = ['keys', 'drums'];
+
+/** Pieces of a drum kit in engine order, with the General MIDI key each sounds; mirrors `Piece` in drums.rs. */
+export const DRUM_PIECES = [
+  { id: 'kick', note: 36 },
+  { id: 'snare', note: 38 },
+  { id: 'snareRim', note: 40 },
+  { id: 'sideStick', note: 37 },
+  { id: 'hiHatClosed', note: 42 },
+  { id: 'hiHatOpen', note: 46 },
+  { id: 'hiHatPedal', note: 44 },
+  { id: 'tom1', note: 48 },
+  { id: 'tom2', note: 45 },
+  { id: 'tom3', note: 43 },
+  { id: 'tom4', note: 41 },
+  { id: 'crash', note: 49 },
+  { id: 'crash2', note: 57 },
+  { id: 'ride', note: 51 },
+  { id: 'rideBell', note: 53 },
+  { id: 'splash', note: 55 },
+  { id: 'china', note: 52 },
+] as const;
+export type DrumPiece = (typeof DRUM_PIECES)[number]['id'];
+const PIECE_INDEX = new Map<DrumPiece, number>(DRUM_PIECES.map((p, i) => [p.id, i]));
+
+/** The piece a player drum event's key stands for. */
+export function pieceOfNote(note: number): DrumPiece | null {
+  return DRUM_PIECES.find((p) => p.note === note)?.id ?? null;
+}
 
 /** A chord as the engine names it: pitch classes and an index into the qualities. */
 export interface ChordSpec {
@@ -115,7 +154,20 @@ export type EngineCommand =
   /** What the microphone listens for, and how loud (dBFS) a sound must be to count. */
   | { type: 'setListen'; mode: ListenMode; gateDb: number }
   /** Whether the band follows the player's tempo. */
-  | { type: 'setTempoFollow'; on: boolean };
+  | { type: 'setTempoFollow'; on: boolean }
+  /** A note from a drum source (the MIDI drum channel), played through the kit map. */
+  | { type: 'drumNote'; note: number; velocity: number }
+  /** A hit on a piece, from the on-screen or computer-keyboard pads. */
+  | { type: 'drumHit'; piece: DrumPiece; velocity: number }
+  /** Which piece `note` plays; null ignores it. */
+  | { type: 'kitNote'; note: number; piece: DrumPiece | null }
+  | { type: 'setInstrument'; instrument: Instrument }
+  /** The hi-hat pedal position (MIDI CC 4) as the kit sends it. */
+  | { type: 'hiHatPedal'; value: number }
+  /** A cymbal grabbed to stop it ringing. */
+  | { type: 'drumChoke'; note: number }
+  /** Whether the built-in synth sounds the player's drums. */
+  | { type: 'setKitSound'; on: boolean };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -185,6 +237,20 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.SetListen, LISTEN_MODES.indexOf(cmd.mode), floatBits(cmd.gateDb), 0];
     case 'setTempoFollow':
       return [Cmd.SetTempoFollow, cmd.on ? 1 : 0, 0, 0];
+    case 'drumNote':
+      return [Cmd.DrumNote, cmd.note, cmd.velocity, 0];
+    case 'drumHit':
+      return [Cmd.DrumHit, PIECE_INDEX.get(cmd.piece)!, cmd.velocity, 0];
+    case 'kitNote':
+      return [Cmd.KitNote, cmd.note, cmd.piece === null ? 0 : PIECE_INDEX.get(cmd.piece)! + 1, 0];
+    case 'setInstrument':
+      return [Cmd.SetInstrument, INSTRUMENTS.indexOf(cmd.instrument), 0, 0];
+    case 'hiHatPedal':
+      return [Cmd.HiHatPedal, cmd.value, 0, 0];
+    case 'drumChoke':
+      return [Cmd.DrumChoke, cmd.note, 0, 0];
+    case 'setKitSound':
+      return [Cmd.SetKitSound, cmd.on ? 1 : 0, 0, 0];
   }
 }
 
