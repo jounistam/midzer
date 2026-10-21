@@ -98,7 +98,7 @@ test('songs: play a chart, jump, loop, edit, save, import and export', async ({ 
     keys.forEach((k) => events.push([i * 1920, 0x90, k, 90], [(i + 1) * 1920 - 10, 0x80, k, 0])),
   );
   const midi = writeSmf(480, [{ name: 'Piano', events: [tempoEvent(0, 88), ...events] }]);
-  await page.getByLabel('Import a MIDI or ChordPro file').setInputFiles({
+  await page.getByLabel('Import a recording, MIDI or ChordPro file').setInputFiles({
     name: 'two_chords.mid',
     mimeType: 'audio/midi',
     buffer: Buffer.from(midi),

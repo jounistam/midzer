@@ -4,15 +4,29 @@
 //! `packages/audio-web/src/native.ts` for the other side.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use midzer_native::{NativeEngine, Ports, Update};
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeBody, Request};
 use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 #[derive(Default)]
 struct AppEngine(Mutex<Option<NativeEngine>>);
+
+/// A recording waiting to be analysed, and the flag that cancels its analysis.
+#[derive(Default)]
+struct AudioJob {
+    bytes: Mutex<Option<Vec<u8>>>,
+    cancel: AtomicBool,
+}
+
+#[derive(Serialize, Clone)]
+struct AudioProgress {
+    fraction: f32,
+    step: u32,
+}
 
 #[derive(Serialize, Clone)]
 struct Port {
@@ -105,6 +119,54 @@ fn midi_set_output(state: State<AppEngine>, id: Option<String>) -> Result<(), St
     with_engine(&state, |engine| engine.set_midi_output(id.as_deref()))
 }
 
+/// Takes a recording, sent as the raw request body, for [`audio_analyze`].
+#[tauri::command]
+fn audio_load(job: State<AudioJob>, request: Request) -> Result<(), String> {
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Expected the recording as raw bytes.".into());
+    };
+    *job.bytes.lock().map_err(|e| e.to_string())? = Some(bytes.clone());
+    Ok(())
+}
+
+/// Analyses the loaded recording into a song (JSON, see `midzer_analyze::Analysis`).
+/// With `stems`, the instruments are separated first; the models are downloaded
+/// into the app's data folder on first use and the stems saved next to them.
+#[tauri::command]
+async fn audio_analyze(app: AppHandle, stems: bool, on_progress: Channel<AudioProgress>) -> Result<String, String> {
+    let job = app.state::<AudioJob>();
+    let bytes = job.bytes.lock().map_err(|e| e.to_string())?.take().ok_or("No recording was loaded.")?;
+    job.cancel.store(false, Ordering::Relaxed);
+    let data = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
+    let worker = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let job = worker.state::<AudioJob>();
+        let mut progress = |fraction: f32, step: midzer_analyze::Step| {
+            let _ = on_progress.send(AudioProgress { fraction, step: step as u32 });
+        };
+        let analysis = if stems {
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let options = midzer_stems::Options {
+                models: &data.join("models"),
+                stems_out: Some(data.join("stems").join(stamp.to_string())),
+                cancel: &job.cancel,
+            };
+            midzer_stems::transcribe_file(bytes, &options, &mut progress)
+        } else {
+            midzer_analyze::analyze_file(bytes, &mut progress)
+        }?;
+        serde_json::to_string(&analysis).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Stops a running [`audio_analyze`] at its next step.
+#[tauri::command]
+fn audio_cancel(job: State<AudioJob>) {
+    job.cancel.store(true, Ordering::Relaxed);
+}
+
 /// Ends a `MIDZER_SELFTEST` run: prints what the page saw and exits.
 #[tauri::command]
 fn selftest_done(app: AppHandle, ok: bool, log: String) {
@@ -114,20 +176,24 @@ fn selftest_done(app: AppHandle, ok: bool, log: String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // `MIDZER_SELFTEST=stems` also separates the stems of its test recording (models downloaded if needed).
     let selftest = std::env::var_os("MIDZER_SELFTEST").is_some();
+    let stems = std::env::var("MIDZER_SELFTEST").is_ok_and(|v| v == "stems");
     if selftest {
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_secs(60));
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(if stems { 360 } else { 60 }));
             eprintln!("selftest: timed out");
             std::process::exit(2);
         });
     }
     tauri::Builder::default()
         .manage(AppEngine::default())
+        .manage(AudioJob::default())
         .on_page_load(move |webview, payload| {
             if selftest && payload.event() == PageLoadEvent::Finished {
                 eprintln!("selftest: page loaded: {}", payload.url());
-                if let Err(e) = webview.eval(include_str!("selftest.js")) {
+                let script = format!("window.__MIDZER_SELFTEST_STEMS = {stems};\n{}", include_str!("selftest.js"));
+                if let Err(e) = webview.eval(&script) {
                     eprintln!("selftest: could not run: {e}");
                 }
             }
@@ -140,6 +206,9 @@ pub fn run() {
             mic_close,
             midi_ports,
             midi_set_output,
+            audio_load,
+            audio_analyze,
+            audio_cancel,
             selftest_done
         ])
         .run(tauri::generate_context!())

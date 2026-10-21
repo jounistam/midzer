@@ -7,6 +7,7 @@ import {
   closeSong,
   editSong,
   saveSong,
+  saveTranscription,
   seekSong,
   setLoop,
   setTempo,
@@ -75,6 +76,7 @@ export function SongScreen() {
           <TempoControl />
           <BandMutes />
           <TakeButton />
+          {song.transcription && <TranscriptionButton tracks={song.transcription.length} />}
         </aside>
       </main>
       <Keyboard split={split} />
@@ -343,6 +345,19 @@ function LoopControl({ song, selection }: { song: Song; selection: Selection | n
       >
         {loop ? `Looping ${describe(loop)}` : `Loop ${describe(range)}`}
       </button>
+    </div>
+  );
+}
+
+/** For songs made from a recording with separated instruments: the transcribed parts as MIDI. */
+function TranscriptionButton({ tracks }: { tracks: number }) {
+  return (
+    <div className="control-group">
+      <p className="label">Transcription</p>
+      <button className="btn btn-secondary" onClick={saveTranscription}>
+        Save transcription as MIDI
+      </button>
+      <p className="setting-note">{tracks} parts heard in the recording, on the chart's beat grid.</p>
     </div>
   );
 }

@@ -149,3 +149,27 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
     },
   };
 }
+
+/**
+ * Analyses a recording in the desktop app (crates/midzer-analyze, or with
+ * `stems` crates/midzer-stems) and returns the analysis as JSON.
+ */
+export async function analyzeNative(
+  bytes: Uint8Array,
+  stems: boolean,
+  onProgress: (fraction: number, step: number) => void,
+  signal?: AbortSignal,
+): Promise<string> {
+  await invoke('audio_load', bytes);
+  const channel = new Channel<{ fraction: number; step: number }>();
+  channel.onmessage = (p) => onProgress(p.fraction, p.step);
+  const cancel = () => void invoke('audio_cancel');
+  signal?.addEventListener('abort', cancel);
+  try {
+    return await invoke<string>('audio_analyze', { stems, onProgress: channel });
+  } catch (e) {
+    throw new Error(String(e));
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+  }
+}

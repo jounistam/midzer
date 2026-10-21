@@ -10,7 +10,7 @@ export interface Imported {
   notes: string[];
 }
 
-const titleOf = (fileName: string) => fileName.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+export const titleOf = (fileName: string) => fileName.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
 
 /** Reads ChordPro, or chart notation ("C | Am | F | G") when there are no ChordPro markings. */
 export function importText(text: string, title = 'Untitled song'): Imported {

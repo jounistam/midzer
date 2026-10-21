@@ -29,6 +29,7 @@ import { create } from 'zustand';
 import { enqueue, flushLive, live, resetLive } from './live';
 import { qwertyToNote } from './qwerty';
 import { isBuiltin, saveUserSong } from './songs/library';
+import { transcriptionMidi } from './songs/audio';
 import { Recorder } from './songs/recorder';
 import { chartCommands, newSongId, type Song } from './songs/song';
 
@@ -653,12 +654,24 @@ export function saveTake(): void {
   const { bpm, song } = get();
   const bytes = recorder?.export(bpm);
   if (!bytes) return;
-  const name = (song?.title ?? 'jam').replace(/[^\w\- ]+/g, '').trim() || 'midzer';
   const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+  downloadMidi(bytes, `${fileName(song?.title ?? 'jam')} ${stamp}.mid`);
+}
+
+/** Downloads the parts transcribed from the open song's recording. */
+export function saveTranscription(): void {
+  const song = get().song;
+  if (!song?.transcription) return;
+  downloadMidi(transcriptionMidi(song.transcription, song.bpm), `${fileName(song.title)} (transcribed).mid`);
+}
+
+const fileName = (title: string) => title.replace(/[^\w\- ]+/g, '').trim() || 'midzer';
+
+function downloadMidi(bytes: Uint8Array, name: string): void {
   const url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'audio/midi' }));
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${name} ${stamp}.mid`;
+  a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

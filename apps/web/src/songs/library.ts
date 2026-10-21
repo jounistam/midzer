@@ -3,6 +3,7 @@
 
 import { STYLES } from '@midzer/audio-web';
 import { store } from '../storage/db';
+import type { AnalysedTrack } from './audio';
 import { BUILTIN_SONGS } from './builtin';
 import type { MelodyNote } from './melody';
 import { BEATS_PER_BAR, type Bar, type Song, type SongSection } from './song';
@@ -40,8 +41,21 @@ function sanitize(value: unknown): Song | null {
     style: Number.isInteger(s.style) && STYLES[s.style!] ? s.style! : 0,
     bars,
     melody: Array.isArray(s.melody) ? sanitizeMelody(s.melody) : undefined,
-    source: s.source === 'chordpro' || s.source === 'midi' ? s.source : 'user',
+    source: s.source === 'chordpro' || s.source === 'midi' || s.source === 'audio' ? s.source : 'user',
+    transcription: Array.isArray(s.transcription) ? sanitizeTracks(s.transcription) : undefined,
   };
+}
+
+function sanitizeTracks(tracks: unknown[]): AnalysedTrack[] | undefined {
+  const ok = tracks.slice(0, 16).flatMap((t) => {
+    const { name, program, drums, notes } = (t ?? {}) as Partial<AnalysedTrack>;
+    if (typeof name !== 'string' || !Number.isInteger(program) || !Array.isArray(notes)) return [];
+    const valid = notes.filter(
+      (n) => typeof n?.at === 'number' && typeof n.len === 'number' && Number.isInteger(n.key) && Number.isInteger(n.velocity),
+    );
+    return [{ name, program: program!, drums: drums === true, notes: valid }];
+  });
+  return ok.length ? ok : undefined;
 }
 
 function sanitizeMelody(notes: unknown[]): MelodyNote[] | undefined {

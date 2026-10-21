@@ -5,7 +5,7 @@
   "packageManager": "pnpm@11.17.0",
   "scripts": {
     "fetch:sounds": "node scripts/fetch-soundfont.mjs",
-    "build:wasm": "cargo build -p midzer-wasm --release --target wasm32-unknown-unknown && node scripts/copy-wasm.mjs",
+    "build:wasm": "cargo build -p midzer-wasm -p midzer-analyze --release --target wasm32-unknown-unknown && node scripts/copy-wasm.mjs",
     "dev": "pnpm fetch:sounds && pnpm build:wasm && pnpm --filter @midzer/web dev",
     "build": "pnpm fetch:sounds && pnpm build:wasm && pnpm -r build",
     "test": "cargo test --release && pnpm -r test",

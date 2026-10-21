@@ -3,17 +3,20 @@ import { useEffect, useRef, useState, type DragEvent } from 'react';
 import { TopBar } from '../components/TopBar';
 import { goTo, openSong } from '../session';
 import { BUILTIN_SONGS } from '../songs/builtin';
-import { importFile, importText, type Imported } from '../songs/importing';
+import { AUDIO_ACCEPT, isAudioFile } from '../songs/audio';
+import { importFile, importText, titleOf, type Imported } from '../songs/importing';
 import { deleteUserSong, loadUserSongs, saveUserSong } from '../songs/library';
 import { newSongId, parseChart, type Song } from '../songs/song';
+import { AudioImport } from './AudioImport';
 import { LoadingStatus } from './LoadingStatus';
 
-const ACCEPT = '.mid,.midi,.cho,.chopro,.chordpro,.crd,.pro,.txt';
+const ACCEPT = `.mid,.midi,.cho,.chopro,.chordpro,.crd,.pro,.txt,${AUDIO_ACCEPT}`;
 
 export function Songs() {
   const [mine, setMine] = useState<Song[]>([]);
   const [pasting, setPasting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [recording, setRecording] = useState<{ name: string; bytes: Uint8Array } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -33,6 +36,11 @@ export function Songs() {
     if (!file) return;
     setError(null);
     try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      if (isAudioFile(file.name, bytes.subarray(0, 16))) {
+        setRecording({ name: file.name, bytes });
+        return;
+      }
       open(await importFile(file));
     } catch (e) {
       setError(`${file.name}: ${e instanceof Error ? e.message : String(e)}`);
@@ -66,7 +74,7 @@ export function Songs() {
         <div className="songs-head">
           <div>
             <h1>Songs</h1>
-            <p className="lead">The band plays the chart while you play on top. Drop a MIDI or ChordPro file anywhere here.</p>
+            <p className="lead">The band plays the chart while you play on top. Drop a recording, a MIDI or a ChordPro file anywhere here.</p>
           </div>
           <div className="actions">
             <button className="btn btn-primary" onClick={newSong}>
@@ -83,7 +91,7 @@ export function Songs() {
               type="file"
               accept={ACCEPT}
               hidden
-              aria-label="Import a MIDI or ChordPro file"
+              aria-label="Import a recording, MIDI or ChordPro file"
               onChange={(e) => {
                 void fromFile(e.target.files?.[0]);
                 e.target.value = '';
@@ -108,6 +116,18 @@ export function Songs() {
         <SongList songs={BUILTIN_SONGS} />
       </main>
       {pasting && <PasteDialog onClose={() => setPasting(false)} onImport={open} />}
+      {recording && (
+        <AudioImport
+          file={recording.name}
+          bytes={recording.bytes}
+          title={titleOf(recording.name)}
+          onDone={(result) => {
+            setRecording(null);
+            open(result);
+          }}
+          onClose={() => setRecording(null)}
+        />
+      )}
     </div>
   );
 }

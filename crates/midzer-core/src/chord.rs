@@ -107,7 +107,7 @@ impl Quality {
         self.intervals().iter().fold(0, |m, i| m | 1 << i)
     }
 
-    pub(crate) const ALL: [Quality; 15] = [
+    pub const ALL: [Quality; 15] = [
         Quality::Major,
         Quality::Minor,
         Quality::Diminished,

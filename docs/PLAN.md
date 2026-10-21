@@ -54,7 +54,28 @@
   - `midzer-native`: the engine renders in the cpal output callback in 128-frame blocks; commands, events and mic samples travel through lock-free `crossbeam` queues; SoundFonts are parsed off the audio thread and swapped in. A forwarder thread sends events to the UI with the frame being heard, plays MIDI out (midir) at the time each event is heard, and rescans MIDI devices every second. MIDI input goes straight into the engine.
   - `apps/desktop`: Tauri 2 around the same web build. `native.ts` gives the UI the same `EngineHandle` over Tauri commands and one update channel, plus native MIDI. `MIDZER_SELFTEST=1` drives the app once and reports.
   - Tests: listener tests on synthetic notes and strums, engine mic test, tempo follow tests, event decode round trip, Vitest for the protocol and native helpers, a Playwright mic test with a fake microphone playing a strummed Am, and the desktop self-test.
-- **Next: M6** (mp3 → MIDI).
+- **M6 recordings → songs:** done (2026-10-21), in two tiers (the user's choice).
+  - Tier 1, everywhere (`crates/midzer-analyze`, plain DSP, no models):
+    - Decoding with symphonia (mp3, AAC/M4A, FLAC, WAV, Ogg Vorbis), up to 15 minutes, and title/artist from the tags. Windowed-sinc resampling to 22.05 kHz mono.
+    - Beats: spectral flux over 40 log bands, the tempo from the envelope's autocorrelation with a log-normal prior around 115 BPM, and beat times by Ellis-style dynamic programming.
+    - Chroma from spectral peaks (8192-point frames) after estimating the tuning, split into treble and bass, averaged per beat.
+    - Key from Krumhansl profiles. Chords per beat by an HMM over 12 roots × major/minor/7/m7/maj7 plus no chord, with harmonic templates, a bass bonus, a diatonic bonus and rarity penalties. A first pass finds the downbeat (chord changes plus bass onsets); the second makes changes cheaper on the bar line. Short gaps hold the chord, and a bass clearly on another chord tone gives an inversion.
+    - Sections from a checkerboard novelty over bar-level self-similarity plus loudness jumps, preferring 4- and 8-bar boundaries. Repeated segments share a label; labels become A/B/C by loudness. A short unrepeated first or last segment is the intro or ending.
+    - A rough melody from the mix: harmonic-sum salience over G3–C6 tracked by Viterbi (an L1 step cost, so O(frames × pitches)), cut into notes and quantized to sixteenths.
+    - Web: built to `public/wasm/analyze.wasm` (raw C ABI, like the engine) and run in a worker per file (`songs/analyze.worker.ts`). A 4.5-minute mp3 takes about 5 s and 210 MB in wasm, about 1.7 s natively.
+  - Tier 2, desktop only (`crates/midzer-stems`, ONNX Runtime through `ort`, statically linked):
+    - Models are downloaded on first use into the app's data folder, at pinned revisions and checked by SHA-256: HT-Demucs with fp16 weights as one ONNX graph (166 MB, MIT) and basic-pitch (230 KB, Apache-2.0).
+    - Demucs separates 7.8 s segments with quarter overlaps and cross-fades. Graph optimization must stay off, and so must the CPU arena and memory patterns: with them, loading alone took over 6 GB and memory kept growing (an earlier test run took the machine down). Without them it peaks around 1 GB.
+    - basic-pitch runs on the bass, other and vocal stems; its note creation (inferred onsets, the melodia trick with a heap) is ported to Rust. Drum hits come from band onsets in the drum stem (kick, snare, hi-hat).
+    - These feed tier 1: chords from bass+other, the melody from the voice's top line, and the parts as tracks on the beat grid. The stems are saved as WAV files. A 4.5-minute song takes about 2¾ minutes on this laptop's CPU, peaking at 2.1 GB.
+  - UI: drop or pick a recording on the Songs page. The dialog says it stays on the device and to use recordings you have the right to use. The desktop app offers Quick or "Separate the instruments", and the analysis shows its step and progress and can be cancelled. The result opens as a song (`source: 'audio'`) with notes on tempo, key and where the melody came from, and is saved to My songs. "Save transcription as MIDI" exports the parts.
+  - Tests: unit tests for the resampler, STFT peaks, beat tracking, tuning/chroma, chords, downbeat, sections, melody, basic-pitch note creation and drums. An end-to-end Rust test renders the band itself (three styles and tempos) through the SoundFont and reads back the tempo, first downbeat and chords. Vitest covers the conversion and MIDI export, and a Playwright test imports a synthetic WAV. The desktop self-test imports one too: Quick by default, with stem separation under `MIDZER_SELFTEST=stems` (21 s, 1.5 GB peak).
+- **Next: M7** (mobile).
+- Open from M6:
+  - Only checked by eye on a few real songs (folk-rock, EDM pop and metal). Folk-rock and pop came out close; distorted metal is messy. Sevenths are under-detected on purpose. There is no meter detection (4/4 only) and no tempo map: the chart uses the median tempo.
+  - The rough melody from the mix is often the wrong line. With stems, the vocal melody is plausible but unverified by ear.
+  - Playing along with the original recording, or with the stems (e.g. without vocals), isn't wired up; the stems are only saved.
+  - Stem separation runs on the CPU only; no GPU execution providers are configured.
 - Open from M5:
   - Nobody has tried the mic with a real guitar or voice yet. The gate, onset and chord thresholds need a hands-on pass, and there is no echo cancellation in the desktop app.
   - Tempo follow needs a hands-on pass too; it is off by default.
@@ -217,7 +238,7 @@ AudioWorklet thread:  midzer-wasm
 - For polyphonic notes: basic-pitch through ONNX (`ort` natively, ONNX Runtime Web in the browser).
 - Expect around 50–150 ms of latency, so chord latches stay beat-quantized for audio input.
 
-### mp3 → stems → MIDI (M6)
+### mp3 → stems → MIDI (M6, done: see Status for what was built)
 - **Pipeline:**
   1. **Demucs v4** (htdemucs / htdemucs_6s) for stems
   2. a beat/downbeat tracker (`beat_this`)

@@ -9,6 +9,7 @@
 
 import type { EngineCommand, SongMark } from '@midzer/audio-web';
 import { isNoChord, parseChord } from './chords';
+import type { AnalysedTrack } from './audio';
 import type { MelodyNote } from './melody';
 
 export const BEATS_PER_BAR = 4;
@@ -36,7 +37,7 @@ export interface Bar {
   lyric?: string;
 }
 
-export type SongSource = 'builtin' | 'user' | 'chordpro' | 'midi';
+export type SongSource = 'builtin' | 'user' | 'chordpro' | 'midi' | 'audio';
 
 export interface Song {
   id: string;
@@ -48,6 +49,8 @@ export interface Song {
   bars: Bar[];
   /** The tune, for Learn; from the song's notation or a MIDI file's melody track. */
   melody?: MelodyNote[];
+  /** Parts transcribed from a recording, for MIDI export. */
+  transcription?: AnalysedTrack[];
   source: SongSource;
 }
 
