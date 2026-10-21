@@ -4,7 +4,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use midzer_core::{BandDrums, Chord, Command, IdleMode, Instrument, KitAction, ListenMode, Piece, Quality, Request, Slot, Trigger};
+use midzer_core::{BandDrums, Chord, Command, IdleMode, Instrument, KitAction, ListenMode, Piece, Quality, Request, Slot, Track, Trigger};
 use midzer_wasm::{BLOCK_FRAMES, Host};
 
 struct CountingAlloc;
@@ -45,6 +45,9 @@ fn playing_band_renders_without_allocating() {
     command(&mut host, Command::SetIdleMode { mode: IdleMode::Rest });
     command(&mut host, Command::Play);
     host.process(BLOCK_FRAMES); // warm-up; also builds the styles
+    // A 20 s recording with a drum stem, for the backing track at the end.
+    let samples = |v: i16| (0..48_000 * 20 * 2).map(|i| (i % 2000) as i16 - 1000 + v).collect::<Vec<i16>>();
+    host.set_track(Some(Track { main: samples(0), drums: Some(samples(7)) }));
 
     COUNTING.store(true, Ordering::Relaxed);
     let chords: [&[u8]; 4] = [&[48, 52, 55], &[45, 48, 52], &[41, 45, 48], &[43, 47, 50, 53]];
@@ -193,6 +196,31 @@ fn playing_band_renders_without_allocating() {
         command(&mut host, Command::DrumChoke { note: 49 });
         host.process(BLOCK_FRAMES);
     }
+
+    // The song again, played by the recording: a 112 BPM tempo map, a loop,
+    // a seek, the drum stem muted and a drummer judged against it all.
+    command(&mut host, Command::TrackClear { beats: 33 });
+    for i in 0..33 {
+        command(&mut host, Command::TrackBeat { index: i, seconds: 0.4 + i as f32 * 60.0 / 112.0 });
+    }
+    command(&mut host, Command::SetSong { on: true });
+    command(&mut host, Command::SetTrack { on: true });
+    command(&mut host, Command::SongLoop { start: 1, end: 3 });
+    command(&mut host, Command::Play);
+    for block in 0..6000usize {
+        if block % 94 == 0 {
+            command(&mut host, Command::DrumHit { piece: [Piece::Kick, Piece::HiHatClosed, Piece::Snare][block / 94 % 3], velocity: 90 });
+        }
+        match block {
+            1500 => command(&mut host, Command::SongSeek { bar: 0 }),
+            2500 => command(&mut host, Command::SetTrackDrums { on: false }),
+            3000 => command(&mut host, Command::SongLoop { start: 0, end: 0 }),
+            _ => {}
+        }
+        events += host.process(BLOCK_FRAMES);
+    }
+    command(&mut host, Command::SetTrack { on: false });
+    host.process(BLOCK_FRAMES);
     COUNTING.store(false, Ordering::Relaxed);
 
     assert!(events > 1000, "band produced only {events} events");

@@ -161,6 +161,49 @@ async fn audio_analyze(app: AppHandle, stems: bool, on_progress: Channel<AudioPr
     .map_err(|e| e.to_string())?
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackLoaded {
+    seconds: f32,
+    drum_stem: bool,
+}
+
+/// Decodes a recording off the UI thread at the engine's rate and hands it to the engine.
+async fn load_track(app: AppHandle, decode: impl FnOnce(u32) -> Result<midzer_analyze::Track, String> + Send + 'static) -> Result<TrackLoaded, String> {
+    let rate = with_engine(&app.state::<AppEngine>(), |engine| Ok(engine.sample_rate()))?;
+    let track = tauri::async_runtime::spawn_blocking(move || decode(rate)).await.map_err(|e| e.to_string())??;
+    let loaded = TrackLoaded { seconds: track.frames() as f32 / rate as f32, drum_stem: track.drums.is_some() };
+    with_engine(&app.state::<AppEngine>(), |engine| {
+        engine.load_track(Some(track));
+        Ok(loaded)
+    })
+}
+
+/// Loads a recording, sent as the raw request body, as the songs' backing track.
+#[tauri::command]
+async fn track_load(app: AppHandle, request: Request<'_>) -> Result<TrackLoaded, String> {
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Expected the recording as raw bytes.".into());
+    };
+    let bytes = bytes.clone();
+    load_track(app, move |rate| midzer_analyze::backing_track(bytes, rate)).await
+}
+
+/// Loads a song's saved stems as its backing track, with the drums apart.
+#[tauri::command]
+async fn track_load_stems(app: AppHandle, dir: String) -> Result<TrackLoaded, String> {
+    load_track(app, move |rate| midzer_stems::backing_from_stems(std::path::Path::new(&dir), rate)).await
+}
+
+/// Frees the backing track.
+#[tauri::command]
+fn track_unload(state: State<AppEngine>) -> Result<(), String> {
+    with_engine(&state, |engine| {
+        engine.load_track(None);
+        Ok(())
+    })
+}
+
 /// Stops a running [`audio_analyze`] at its next step.
 #[tauri::command]
 fn audio_cancel(job: State<AudioJob>) {
@@ -209,6 +252,9 @@ pub fn run() {
             audio_load,
             audio_analyze,
             audio_cancel,
+            track_load,
+            track_load_stems,
+            track_unload,
             selftest_done
         ])
         .run(tauri::generate_context!())

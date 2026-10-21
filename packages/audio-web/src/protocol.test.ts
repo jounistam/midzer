@@ -58,6 +58,15 @@ describe('encodeCommand', () => {
     expect(encodeCommand({ type: 'controlChange', cc: 64, value: 127 })).toEqual([36, 64, 127, 0]);
   });
 
+  it('encodes backing tracks like command.rs', () => {
+    expect(encodeCommand({ type: 'setTrack', on: true })).toEqual([37, 1, 0, 0]);
+    expect(encodeCommand({ type: 'trackClear', beats: 2049 })).toEqual([38, 2049, 0, 0]);
+    const [op, index, seconds] = encodeCommand({ type: 'trackBeat', index: 2048, seconds: 312.625 });
+    expect([op, index]).toEqual([39, 2048]);
+    expect(new Float32Array(new Uint32Array([seconds]).buffer)[0]).toBe(312.625);
+    expect(encodeCommand({ type: 'setTrackDrums', on: false })).toEqual([40, 0, 0, 0]);
+  });
+
   it('knows each piece by its General MIDI key', () => {
     expect(DRUM_PIECES).toHaveLength(17);
     expect(new Set(DRUM_PIECES.map((p) => p.note)).size).toBe(17);
@@ -119,6 +128,13 @@ describe('decodeEvent', () => {
     const [, bits] = encodeCommand({ type: 'setTempo', bpm: -12.5 });
     expect(decodeEvent(12, bits, 0, 1)).toEqual({ type: 'timing', ms: -12.5, frame: 1 });
     expect(decodeEvent(13, 3, 0, 2)).toEqual({ type: 'countIn', hits: 3, frame: 2 });
+  });
+
+  it('decodes judged hits like event.rs', () => {
+    const [, bits] = encodeCommand({ type: 'setTempo', bpm: -12.5 });
+    // China (16), sixteenth 15 of bar 511.
+    expect(decodeEvent(14, bits, 16 | (15 << 8) | (511 << 16), 9)).toEqual({ type: 'judged', ms: -12.5, piece: 'china', sixteenth: 15, bar: 511, frame: 9 });
+    expect(decodeEvent(14, bits, 99, 9)).toBeNull();
   });
 
   it('decodes song positions', () => {

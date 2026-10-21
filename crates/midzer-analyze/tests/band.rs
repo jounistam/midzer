@@ -97,3 +97,45 @@ fn reads_back_what_the_band_played() {
         assert!(right >= 14, "style {style}: {found:?}");
     }
 }
+
+/// Clicks speeding up from 100 to 112 BPM over the recording, a kick-like
+/// thump on every fourth; returns the audio at [`RATE`] and the click times.
+fn drifting_clicks(seconds: f32) -> (Vec<f32>, Vec<f32>) {
+    let mut x = vec![0.0f32; (RATE as f32 * seconds) as usize];
+    let mut seed = 7u32;
+    let (mut t, mut k) = (0.5f32, 0);
+    let mut times = Vec::new();
+    while ((t * RATE as f32) as usize) + 3000 < x.len() {
+        let at = (t * RATE as f32) as usize;
+        times.push(t);
+        for i in 0..1500 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = (seed >> 9) as f32 / (1 << 23) as f32 * 2.0 - 1.0;
+            let env = (-(i as f32) / 300.0).exp();
+            let thump = if k % 4 == 0 { (i as f32 / RATE as f32 * 60.0 * std::f32::consts::TAU).sin() * 0.8 } else { 0.0 };
+            x[at + i] += (0.4 * noise + thump) * env;
+        }
+        let bpm = 100.0 + 12.0 * t / seconds;
+        t += 60.0 / bpm;
+        k += 1;
+    }
+    (x, times)
+}
+
+#[test]
+fn the_tempo_map_follows_a_recording_that_speeds_up() {
+    let (audio, clicks) = drifting_clicks(60.0);
+    let a = analyze(&audio, Extras::default(), &mut |_: f32, _: Step| {}).unwrap();
+    assert_eq!(a.beat_times.len(), a.bar_times.len() * 4 + 1);
+    // Every mapped beat inside the recording sits on a click, though the
+    // usual tempo alone would be far off by the end.
+    let last_click = *clicks.last().unwrap();
+    let mut worst = 0.0f32;
+    for &b in a.beat_times.iter().filter(|&&b| b <= last_click) {
+        let nearest = clicks.iter().map(|c| (c - b).abs()).fold(f32::MAX, f32::min);
+        worst = worst.max(nearest);
+    }
+    assert!(worst < 0.02, "a beat {worst} s off its click");
+    let drift = a.beat_times.iter().enumerate().map(|(i, b)| (a.bar_times[0] + i as f32 * 60.0 / a.bpm - b).abs()).fold(0.0, f32::max);
+    assert!(drift > 0.3, "a steady grid would be only {drift} s off");
+}

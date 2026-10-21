@@ -51,7 +51,28 @@ export interface Song {
   melody?: MelodyNote[];
   /** Parts transcribed from a recording, for MIDI export. */
   transcription?: AnalysedTrack[];
+  /** The recording the song was read from, to play along with (kept in storage/db under the song's id). */
+  backing?: SongBacking;
   source: SongSource;
+}
+
+/** Mirrors `MAX_TRACK_BEATS` in backing.rs: every beat of the longest chart, plus its end. */
+export const MAX_TRACK_BEATS = MAX_BARS * BEATS_PER_BAR + 1;
+
+/** Loads a recording's tempo map into the engine. */
+export function trackCommands(backing: SongBacking): EngineCommand[] {
+  const times = backing.beatTimes.slice(0, MAX_TRACK_BEATS);
+  return [{ type: 'trackClear', beats: times.length }, ...times.map((seconds, index): EngineCommand => ({ type: 'trackBeat', index, seconds }))];
+}
+
+/** How the chart lines up with its recording. */
+export interface SongBacking {
+  /** When each chart beat is heard, in seconds into the recording, plus the end of the last bar. */
+  beatTimes: number[];
+  /** The recording's length in seconds. */
+  seconds: number;
+  /** Where the desktop app saved the separated instruments, if it did. */
+  stemsDir?: string;
 }
 
 const TAGS: Record<string, SongSection | 'fill'> = {

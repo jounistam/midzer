@@ -17,6 +17,7 @@ pub mod melody;
 pub mod resample;
 pub mod stft;
 pub mod structure;
+pub mod track;
 #[cfg(target_arch = "wasm32")]
 mod ffi;
 
@@ -26,6 +27,8 @@ use serde::Serialize;
 pub use decode::{Decoded, decode};
 pub use melody::TimedNote;
 pub use resample::resample;
+pub use midzer_core::Track;
+pub use track::backing_track;
 
 /// The sample rate everything is analysed at.
 pub const RATE: u32 = 22_050;
@@ -123,6 +126,9 @@ pub struct Analysis {
     pub tuning_cents: f32,
     /// Time of each bar's downbeat in the recording, in seconds.
     pub bar_times: Vec<f32>,
+    /// The tempo map: the time of every beat of the bars, four per bar, plus
+    /// the end of the last bar, in seconds. Beats past the tracked ones keep the usual tempo.
+    pub beat_times: Vec<f32>,
     /// One chord per beat of every bar (four per bar); `None` is no chord.
     pub chords: Vec<Option<ChordOut>>,
     pub sections: Vec<SectionOut>,
@@ -181,7 +187,7 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
     let beat_seconds = intervals[intervals.len() / 2];
     let spread = intervals[intervals.len() * 9 / 10] / intervals[intervals.len() / 10];
     if spread > 1.15 {
-        warnings.push("The tempo changes during the recording; the song uses its usual tempo.".into());
+        warnings.push("The tempo changes during the recording: the band plays at its usual tempo, the recording keeps its own.".into());
     }
     progress(0.3, Step::Chords);
 
@@ -210,6 +216,7 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
     }
     let beat_at = |i: usize| beat_times.get(i).copied().unwrap_or_else(|| beat_times[beat_times.len() - 1] + (i + 1 - beat_times.len()) as f32 * beat_seconds);
     let bar_times: Vec<f32> = (0..bar_count).map(|b| beat_at(first + 4 * b)).collect();
+    let beat_times: Vec<f32> = (0..=bar_count * 4).map(|i| beat_at(first + i)).collect();
     let mut chord_slots = Vec::with_capacity(bar_count * 4);
     let mut bars = Vec::with_capacity(bar_count);
     for b in 0..bar_count {
@@ -287,6 +294,7 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
         key: KeyOut { tonic: key.tonic, minor: key.minor },
         tuning_cents: (tuning * 100.0).round(),
         bar_times,
+        beat_times,
         chords: chord_slots,
         sections,
         melody,

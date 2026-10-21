@@ -345,8 +345,8 @@ impl Band {
         self.play(out);
     }
 
-    #[cfg(test)]
-    fn bpm(&self) -> f32 {
+    /// The tempo the band plays at.
+    pub fn bpm(&self) -> f32 {
         self.bpm
     }
 
@@ -428,6 +428,11 @@ impl Band {
     pub fn set_click(&mut self, on: bool, out: &mut EventBuffer) {
         self.click = on;
         self.release_all(|_| true, 0, out);
+    }
+
+    /// The song chart, for a backing track that follows it.
+    pub fn song(&self) -> &SongPlayer {
+        &self.song
     }
 
     pub fn set_song(&mut self, on: bool) {

@@ -29,6 +29,7 @@ import {
   type NativeMidi,
   type SectionRequest,
   type TimedEvent,
+  type TrackSource,
 } from '@midzer/audio-web';
 import { create } from 'zustand';
 import { enqueue, flushLive, live, resetLive } from './live';
@@ -44,12 +45,15 @@ import {
   type KitTriggers,
 } from './drums/kit';
 import { pickProgression, progressionCommands } from './drums/progressions';
+import type { JudgedHit } from './drums/judging';
 import { COUNT_IN_OPTIONS, countInPieces, type CountInChoice } from './drums/stage';
 import { qwertyToNote } from './qwerty';
 import { isBuiltin, saveUserSong } from './songs/library';
+import { decodeRecording } from './songs/analyzeAudio';
 import { transcriptionMidi } from './songs/audio';
 import { Recorder } from './songs/recorder';
-import { chartCommands, newSongId, type Song } from './songs/song';
+import { loadRecording } from './songs/recordings';
+import { chartCommands, newSongId, trackCommands, type Song } from './songs/song';
 
 export type Screen = 'onboarding' | 'home' | 'jam' | 'songs' | 'song' | 'learn' | 'lesson';
 
@@ -62,6 +66,13 @@ export interface LoopRange {
   end: number;
 }
 export type AudioStatus = 'idle' | 'starting' | 'loading' | 'ready' | 'error';
+
+/** The open song's recording: being read, ready to play along with, or why not. */
+export type RecordingState =
+  | { status: 'none' }
+  | { status: 'loading' }
+  | { status: 'ready'; seconds: number; drumStem: boolean }
+  | { status: 'error'; message: string };
 
 export const BAND_CHANNELS: Record<BandPart, number> = {
   drums: DRUM_CHANNEL,
@@ -145,6 +156,14 @@ interface SessionState {
   kitTriggers: KitTriggers;
   /** The progression loop a drummer jams over, by id; the style's first if it has none such. */
   progression: string | null;
+  /** The open song's recording, if it was read from one. */
+  recording: RecordingState;
+  /** Songs with a recording play it instead of the band. */
+  playRecording: boolean;
+  /** The recording's drums are heard; only a separated drum stem can be muted. */
+  recordingDrums: boolean;
+  /** Hits judged against the recording in the current or last run; see `judgedHits`. */
+  judgedCount: number;
 }
 
 export const BAND_DRUMS_OPTIONS: { mode: BandDrums; label: string }[] = [
@@ -191,6 +210,8 @@ interface Prefs {
   bandDrums: BandDrums;
   kitTriggers: KitTriggers;
   progression: string | null;
+  playRecording: boolean;
+  recordingDrums: boolean;
 }
 
 function readPrefs(): Prefs {
@@ -208,6 +229,8 @@ function readPrefs(): Prefs {
     bandDrums: 'off',
     kitTriggers: {},
     progression: null,
+    playRecording: true,
+    recordingDrums: true,
   };
   try {
     const saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Partial<Prefs>;
@@ -224,17 +247,19 @@ function readPrefs(): Prefs {
     const bandDrums = BAND_DRUMS_OPTIONS.some((o) => o.mode === saved.bandDrums) ? saved.bandDrums! : defaults.bandDrums;
     const kitTriggers = parseKitTriggers(saved.kitTriggers);
     const progression = typeof saved.progression === 'string' ? saved.progression : null;
-    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression };
+    const playRecording = saved.playRecording !== false;
+    const recordingDrums = saved.recordingDrums !== false;
+    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums };
   } catch {
     return defaults;
   }
 }
 
 function savePrefs(): void {
-  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression } = get();
+  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums } = get();
   // With a song open the style belongs to the song; keep the Jam one.
   const style = get().song ? readPrefs().style : get().style;
-  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression };
+  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums };
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch {
@@ -300,6 +325,10 @@ export const useSession = create<SessionState>(() => ({
   bandDrums: prefs.bandDrums,
   kitTriggers: prefs.kitTriggers,
   progression: prefs.progression,
+  recording: { status: 'none' },
+  playRecording: prefs.playRecording,
+  recordingDrums: prefs.recordingDrums,
+  judgedCount: 0,
 }));
 
 const set = useSession.setState;
@@ -371,6 +400,7 @@ export async function startAudio(): Promise<void> {
     engine.send({ type: 'setSplit', note: split });
     recorder = new Recorder(engine.sampleRate);
     syncSong();
+    void loadSongRecording();
     syncJamHarmony();
     for (const [part, isMuted] of Object.entries(muted)) {
       if (isMuted) engine.send({ type: 'setMute', channel: BAND_CHANNELS[part as BandPart], muted: true });
@@ -413,7 +443,11 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
       setTimeout(() => set({ bar: event.bar, beat: event.beat }), delay);
       break;
     case 'transport':
-      if (event.playing) live.timing.reset();
+      if (event.playing) {
+        live.timing.reset();
+        judged = [];
+        set({ judgedCount: 0 });
+      }
       setTimeout(
         () =>
           set({
@@ -430,6 +464,10 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
       break;
     case 'countIn':
       set({ countInHits: event.hits });
+      break;
+    case 'judged':
+      judged.push({ ms: event.ms, piece: event.piece, sixteenth: event.sixteenth, bar: event.bar });
+      set({ judgedCount: judged.length });
       break;
     case 'songPosition':
       if (event.beat % 4 === 0) setTimeout(() => set({ songBar: event.beat / 4 }), delay);
@@ -807,10 +845,12 @@ function syncSong(): void {
 export function openSong(song: Song, notes: string[] = [], { screen = 'song' as Screen, speed = 1 } = {}): void {
   send({ type: 'stop' });
   send({ type: 'songWait', tick: null });
+  unloadRecording();
   set({ song, songDirty: false, songNotes: notes, songBar: null, songStartBar: 0, loop: null, screen, style: song.style });
   send({ type: 'setStyle', index: song.style });
   setTempo(song.bpm * speed);
   syncSong();
+  void loadSongRecording();
 }
 
 /** Leaves the song: back to following the player, with the Jam style and tempo. */
@@ -818,6 +858,7 @@ export function closeSong(screen: Screen = 'songs'): void {
   send({ type: 'stop' });
   send({ type: 'songWait', tick: null });
   send({ type: 'setSong', on: false });
+  unloadRecording();
   const { style } = readPrefs();
   set({ song: null, songDirty: false, songBar: null, loop: null, screen, style });
   send({ type: 'setStyle', index: style });
@@ -857,6 +898,75 @@ export function seekSong(bar: number): void {
 export function setLoop(loop: LoopRange | null): void {
   set({ loop });
   send({ type: 'songLoop', start: loop?.start ?? 0, end: loop?.end ?? 0 });
+}
+
+// ---- Playing along with a recording ----------------------------------------------
+
+/** Hits judged against the recording, in the order played. */
+let judged: JudgedHit[] = [];
+/** Counts loads, so one that finishes after the song changed is dropped. */
+let recordingRequest = 0;
+
+export function judgedHits(): readonly JudgedHit[] {
+  return judged;
+}
+
+/** Reads the open song's recording into the engine, with its tempo map, when it has one. */
+async function loadSongRecording(): Promise<void> {
+  const { song, screen } = get();
+  const request = ++recordingRequest;
+  const backing = song?.backing;
+  if (!engine || !song || !backing || screen !== 'song') return;
+  const current = () => request === recordingRequest;
+  set({ recording: { status: 'loading' } });
+  try {
+    const bytes = await loadRecording(song.id);
+    if (!bytes) throw new Error('The recording is no longer kept on this device. Import it again to play along with it.');
+    const source: TrackSource = isNativeHost()
+      ? { kind: 'file', bytes, stemsDir: backing.stemsDir ?? null }
+      : { kind: 'samples', main: await decodeRecording(bytes, engine.sampleRate), drums: null };
+    if (!current()) return;
+    const loaded = await engine.loadTrack(source);
+    if (!current()) {
+      // Closed meanwhile; a newer load replaces it anyway.
+      if (get().recording.status !== 'loading') void engine.loadTrack(null);
+      return;
+    }
+    for (const cmd of trackCommands(backing)) send(cmd);
+    send({ type: 'setTrackDrums', on: get().recordingDrums });
+    send({ type: 'setTrack', on: get().playRecording });
+    set({ recording: loaded ? { status: 'ready', ...loaded } : { status: 'none' } });
+  } catch (e) {
+    if (current()) set({ recording: { status: 'error', message: e instanceof Error ? e.message : String(e) } });
+  }
+}
+
+function unloadRecording(): void {
+  recordingRequest++;
+  send({ type: 'setTrack', on: false });
+  if (get().recording.status !== 'none') void engine?.loadTrack(null);
+  judged = [];
+  set({ recording: { status: 'none' }, judgedCount: 0 });
+}
+
+/** Whether songs with a recording play it (true) or the band (false). */
+export function setPlayRecording(on: boolean): void {
+  set({ playRecording: on });
+  savePrefs();
+  if (get().recording.status === 'ready') send({ type: 'setTrack', on });
+}
+
+/** Mutes or unmutes the recording's separated drums. */
+export function setRecordingDrums(on: boolean): void {
+  set({ recordingDrums: on });
+  savePrefs();
+  send({ type: 'setTrackDrums', on });
+}
+
+/** Whether the open song plays its recording right now. */
+export function playsRecording(): boolean {
+  const { recording, playRecording, screen } = get();
+  return screen === 'song' && recording.status === 'ready' && playRecording;
 }
 
 // ---- Recording ----------------------------------------------------------------

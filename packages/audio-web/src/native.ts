@@ -4,7 +4,7 @@
 // as the AudioWorklet, plus native MIDI, since desktop webviews lack Web MIDI.
 
 import { Channel, invoke } from '@tauri-apps/api/core';
-import type { EngineHandle, EventListener } from './engine';
+import type { EngineHandle, EventListener, TrackLoaded } from './engine';
 import { decodeEvent, encodeCommand, type EngineCommand } from './protocol';
 
 export { isNativeHost } from './engine';
@@ -128,6 +128,25 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
       } catch (e) {
         console.warn('midzer: SoundFont rejected', e);
         return false;
+      }
+    },
+    async loadTrack(source) {
+      if (!source) {
+        await invoke('track_unload');
+        return null;
+      }
+      if (source.kind !== 'file') throw new Error('The desktop engine decodes the file itself.');
+      if (source.stemsDir) {
+        try {
+          return await invoke<TrackLoaded>('track_load_stems', { dir: source.stemsDir });
+        } catch (e) {
+          console.warn('midzer: stems unavailable, playing the mix', e);
+        }
+      }
+      try {
+        return await invoke<TrackLoaded>('track_load', source.bytes);
+      } catch (e) {
+        throw new Error(String(e));
       }
     },
     async openMic() {

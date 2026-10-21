@@ -42,6 +42,10 @@ const Cmd = {
   SetBandDrums: 34,
   KitTrigger: 35,
   ControlChange: 36,
+  SetTrack: 37,
+  TrackClear: 38,
+  TrackBeat: 39,
+  SetTrackDrums: 40,
 } as const;
 
 /** Ticks per beat in song positions; mirrors `PPQ` in style.rs. */
@@ -195,7 +199,15 @@ export type EngineCommand =
   /** What a pad note or controller on the kit does; null clears it. */
   | { type: 'kitTrigger'; trigger: KitTrigger; action: KitAction | null }
   /** A MIDI controller change, for kit triggers such as a foot switch. */
-  | { type: 'controlChange'; cc: number; value: number };
+  | { type: 'controlChange'; cc: number; value: number }
+  /** Whether songs play their recording (see `EngineHandle.loadTrack`) instead of the band. */
+  | { type: 'setTrack'; on: boolean }
+  /** Empties the recording's tempo map and sets how many beat times follow. */
+  | { type: 'trackClear'; beats: number }
+  /** When song beat `index` is heard, in seconds into the recording. */
+  | { type: 'trackBeat'; index: number; seconds: number }
+  /** Whether the recording's separate drum stem is heard. */
+  | { type: 'setTrackDrums'; on: boolean };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -292,6 +304,14 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       ];
     case 'controlChange':
       return [Cmd.ControlChange, cmd.cc, cmd.value, 0];
+    case 'setTrack':
+      return [Cmd.SetTrack, cmd.on ? 1 : 0, 0, 0];
+    case 'trackClear':
+      return [Cmd.TrackClear, cmd.beats, 0, 0];
+    case 'trackBeat':
+      return [Cmd.TrackBeat, cmd.index, floatBits(cmd.seconds), 0];
+    case 'setTrackDrums':
+      return [Cmd.SetTrackDrums, cmd.on ? 1 : 0, 0, 0];
   }
 }
 
@@ -363,7 +383,9 @@ export type EngineEvent =
   /** A drummer's hit was this many ms off the band's grid; negative is early. */
   | { type: 'timing'; ms: number }
   /** Evenly spaced count-in hits so far; 0 when a count-in starts over. */
-  | { type: 'countIn'; hits: number };
+  | { type: 'countIn'; hits: number }
+  /** A drummer's hit on a backing track's grid: `ms` from sixteenth `sixteenth` (0..15) of song bar `bar`. */
+  | { type: 'judged'; ms: number; piece: DrumPiece; sixteenth: number; bar: number };
 
 /** An event plus the AudioContext frame at which it sounds. */
 export type TimedEvent = EngineEvent & { frame: number };
@@ -427,6 +449,10 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
       return { type: 'timing', ms: bitsFloat(a), frame };
     case 13:
       return { type: 'countIn', hits: a, frame };
+    case 14: {
+      const piece = DRUM_PIECES[b & 0xff]?.id;
+      return piece ? { type: 'judged', ms: bitsFloat(a), piece, sixteenth: (b >> 8) & 0xff, bar: b >>> 16, frame } : null;
+    }
     default:
       return null;
   }

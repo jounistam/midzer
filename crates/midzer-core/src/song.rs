@@ -85,6 +85,11 @@ impl SongPlayer {
         self.active && self.bars > 0
     }
 
+    /// The chart's length in bars.
+    pub fn bars(&self) -> u32 {
+        self.bars
+    }
+
     pub fn set_active(&mut self, on: bool) {
         self.active = on;
     }
@@ -203,7 +208,7 @@ impl SongPlayer {
     }
 
     /// The harmony in force on `beat`: its own slot or the last one before it.
-    fn chord_at(&self, beat: u32) -> Option<Chord> {
+    pub fn chord_at(&self, beat: u32) -> Option<Chord> {
         let last = beat.min((self.bars * BEATS).saturating_sub(1));
         (0..=last).rev().find_map(|b| self.slot(b).chord()).flatten()
     }

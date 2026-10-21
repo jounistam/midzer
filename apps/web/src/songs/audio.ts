@@ -7,7 +7,7 @@ import { NOTE_NAMES } from '@midzer/audio-web';
 import { formatChord } from './chords';
 import type { MelodyNote } from './melody';
 import { tempoEvent, writeSmf, type TrackEvents } from './smf';
-import { BEATS_PER_BAR, MAX_BARS, newSongId, type Bar, type Song, type SongSection } from './song';
+import { BEATS_PER_BAR, MAX_BARS, MAX_TRACK_BEATS, newSongId, type Bar, type Song, type SongSection } from './song';
 
 /** Mirrors `Analysis` in crates/midzer-analyze/src/lib.rs. */
 export interface AudioAnalysis {
@@ -18,6 +18,8 @@ export interface AudioAnalysis {
   key: { tonic: number; minor: boolean };
   tuningCents: number;
   barTimes: number[];
+  /** Every beat of the bars, plus the end of the last one. */
+  beatTimes: number[];
   /** Four per bar; null is no chord. */
   chords: ({ root: number; quality: number; bass: number } | null)[];
   sections: { bar: number; part: SongSection }[];
@@ -105,6 +107,10 @@ export function songFromAnalysis(a: AudioAnalysis, fallbackTitle: string): FromA
   if (a.artist?.trim()) song.artist = a.artist.trim();
   if (melody.length > 0) song.melody = melody;
   if (a.tracks.length > 0) song.transcription = a.tracks;
+  if (a.beatTimes.length >= 2) {
+    song.backing = { beatTimes: a.beatTimes.slice(0, Math.min(MAX_TRACK_BEATS, barCount * BEATS_PER_BAR + 1)), seconds: a.duration };
+    if (a.stemsDir) song.backing.stemsDir = a.stemsDir;
+  }
 
   const key = `${NOTE_NAMES[a.key.tonic]}${a.key.minor ? ' minor' : ' major'}`;
   const notes = [`Read from the recording: ${song.bpm} BPM, in ${key}. Check the chords and sections in the editor.`];

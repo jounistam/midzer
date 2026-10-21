@@ -1,4 +1,13 @@
-export { isNativeHost, startEngine, type EngineHandle, type EventListener, type MicOptions, type Transport } from './engine';
+export {
+  isNativeHost,
+  startEngine,
+  type EngineHandle,
+  type EventListener,
+  type MicOptions,
+  type TrackLoaded,
+  type TrackSource,
+  type Transport,
+} from './engine';
 export * from './channels';
 export { eventToMidi, isMidiSupported, listenToInputs, midiToCommand, requestMidi } from './midi';
 export {

@@ -33,4 +33,19 @@ describe('my songs', () => {
     await lib.deleteUserSong('b');
     expect((await lib.loadUserSongs()).map((s) => s.id)).toEqual(['a']);
   });
+
+  it('keeps a recording with its song and its tempo map, and deletes them together', async () => {
+    const lib = await import('./library');
+    const recordings = await import('./recordings');
+    const backing = { beatTimes: [0.5, 1, 1.5, 2, 2.5], seconds: 30, stemsDir: '/stems/1' };
+    await lib.saveUserSong({ ...song('rec'), source: 'audio', backing });
+    await lib.saveUserSong({ ...song('bad'), backing: { beatTimes: [1, 0.5], seconds: 30 } });
+    await recordings.saveRecording('rec', new Uint8Array([1, 2, 3]));
+    const list = await lib.loadUserSongs();
+    expect(list.find((s) => s.id === 'rec')!.backing).toEqual(backing);
+    expect(list.find((s) => s.id === 'bad')!.backing).toBeUndefined();
+    expect(await recordings.loadRecording('rec')).toEqual(new Uint8Array([1, 2, 3]));
+    await lib.deleteUserSong('rec');
+    expect(await recordings.loadRecording('rec')).toBeNull();
+  });
 });

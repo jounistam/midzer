@@ -95,7 +95,20 @@
   - Stage display (`DrummerStage`): big chord with the next change, section with where it goes and what to do ("Fill, then crash on the 1"), tempo with "following you", four beat dots, and a rushing/dragging meter. Each timekeeping hit reports its offset from the nearest sixteenth (triplet in shuffles) as a `Timing` event, latency-corrected and smoothed over the last hits; within 8 ms is "in the pocket". Stopped, it shows the count-in. Song screens show the meter too.
   - Calibration also takes taps from an e-kit or a MIDI keyboard.
   - Tests: Rust tests from scripted hit streams: the count-in with and without latency, follow up and down, rushed fills that don't pull the tempo (checked to fail when toms count), a fill with a crash before, on and after the 1, a fill without one, the choke, triggers, the drum layers and the timing report. Also detector unit tests, a song test for a chart getting shorter, and a drummer section in the no-allocation test. Vitest covers progressions, the stage helpers, kit controls and the protocol. A Playwright drummer flow uses a fake e-kit: progression picker, count-in at 120 BPM, timing meter, assigning a foot switch to Next section, A → B, choke stop, and the controls remembered after a reload.
-- **Next: M8** (any backing track). Mobile moves to M9.
+- **M8a backing tracks from files:** done (2026-10-22), apart from a hands-on pass.
+  - Tempo map: the analysis now returns `beatTimes`, the time of every chart beat plus the end of the last bar (past the tracked beats it keeps the usual tempo). Songs keep it as `backing` with the recording's length and, on desktop, the stems folder. The original file is stored in IndexedDB (`recordings`, DB version 2) under the song's id and deleted with the song.
+  - Engine (`backing.rs`): with `SetTrack` on, songs play the recording instead of the band. Beats, song positions, the chart's chords and the local tempo (per bar, in 0.5 BPM steps) come from the tempo map (`TrackClear`, `TrackBeat`), so a drifting recording stays on its grid. Play starts a bar early (from 0 at bar 1); seeks and loops jump on bar lines with a 256-frame cross-fade, as do starts and stops. It stops at the end of the recording. Section requests and count-ins don't apply; Start/stop on the kit and the cymbal choke do.
+  - The samples (interleaved stereo i16 at the output rate) are swapped in with `Engine::set_track`, which returns the old track to free off the audio thread. Both hosts mix it after the synth, following the master gain (unity at the default 0.6).
+  - Decoding: always the analysis's own symphonia decoder and resampler, so beat times match what is heard (no mp3 encoder-delay offset between browser and Rust decoders). Browser: in the analysis worker (`mza_track`), then moved to the worklet (`mz_alloc_samples`, `mz_load_track`). Desktop: `track_load` decodes natively; `track_load_stems` reads the saved stems, so the drum stem stays apart and `SetTrackDrums` mutes it.
+  - Judging: every drum hit while the recording plays is placed on its sixteenths, latency-corrected like the band's timing, as a `Judged` event (ms, piece, sixteenth, bar); timekeeping hits also feed the live meter. `drums/judging.ts` sums a run up: share within ±15 ms, average and spread (hits over 60 ms off are left out of averages), a 5 ms histogram over ±50 ms, on-time share per bar, and per part (kick, snare, hi-hat, ride, toms, crashes) with where it leans ("12 ms late on the backbeat").
+  - UI: song screens of recorded songs get "Play along with: Recording / Band" (remembered) and, with stems, "Drums in the recording". In recording mode the energy, tempo and band controls hide. Drummers see the live meter while playing and the timing report after Stop.
+  - Tests: Rust tests for the tempo-mapped beats with drift, chords and tempo, the lead-in bar and loop jumps, seeks, fades and the drum stem, judging (latency, pickup, past the map), an engine test that the band stays out and the drummer is judged, the track in the no-allocation test, decoding and resampling a WAV, and the analysis's tempo map following clicks that speed up from 100 to 112 BPM (every beat within 20 ms). Vitest for the protocol, the backing in songs and the library, and the judging summary. A Playwright flow imports a WAV as a drummer, plays it with pads, checks the meter and the report, switches to the band and back, and reopens it after a reload.
+- **Next: M8b** (live audio: loopback and tab capture, the live beat tracker). Mobile moves to M9.
+- Open from M8a:
+  - Nobody has played along with a real recording yet; the judging windows (±15 ms on time, 60 ms outliers) are guesses.
+  - The desktop parts (`track_load`, `track_load_stems`, the native mixer) were only type-checked here, not run: the desktop app still can't be linked on this machine.
+  - The tempo map is indexed by chart beat, so inserting or deleting bars in the editor shifts the chart against the recording. No slow-down for recordings (it would need time-stretching), and no recording in Learn.
+  - In the browser the decoded recording lives in wasm memory (about 50 MB for 4½ minutes at 48 kHz), which never shrinks; decoding and resampling there take a few seconds.
 - Open from M7:
   - Nobody has tried it with a real e-kit yet: the count-in, follow and fill thresholds are tuned on scripted hits only. The Roland map comes from its published default note chart and is unverified; the learn wizard is the fallback.
   - The kit's own open/closed hi-hat notes are trusted; the pedal position is only shown, not used.
@@ -105,7 +118,7 @@
 - Open from M6:
   - Only checked by eye on a few real songs (folk-rock, EDM pop and metal). Folk-rock and pop came out close; distorted metal is messy. Sevenths are under-detected on purpose. There is no meter detection (4/4 only) and no tempo map: the chart uses the median tempo.
   - The rough melody from the mix is often the wrong line. With stems, the vocal melody is plausible but unverified by ear.
-  - Playing along with the original recording, or with the stems (e.g. without vocals), isn't wired up; the stems are only saved.
+  - Playing along with the original recording, or without its drums, is wired up in M8a; other stem mixes (e.g. without vocals) aren't.
   - Stem separation runs on the CPU only; no GPU execution providers are configured.
 - Open from M5:
   - Nobody has tried the mic with a real guitar or voice yet. The gate, onset and chord thresholds need a hands-on pass, and there is no echo cancellation in the desktop app.
@@ -382,7 +395,7 @@ AudioWorklet thread:  midzer-wasm
   2. **M7b drummer mode (done):** band drums muted (or percussion/click), progression loops, count-in start, drum-tuned tempo follow, fill and crash detection driving the conductor, control from spare pads and foot switches, the stage display with the rushing/dragging meter. Figma frames for the display in direction A, if the MCP limit allows (not done).
   - **Later ideas, not planned yet:** Drum Learn (lanes per kit piece, lessons from the styles' own grooves and fills, channel 10 kept in MIDI imports), groove tools (timing per piece, tempo trainer, gap bars), an acoustic kit through the mic.
 - **M8 — Any backing track** (see "Backing tracks (M8)" above):
-  1. **M8a files:** a tempo map from the analysis, midzer playing the track (optionally without the drum stem), and judging against its beats.
+  1. **M8a files (done):** a tempo map from the analysis, midzer playing the track (optionally without the drum stem), and judging against its beats.
   2. **M8b live audio:** loopback and tab-audio capture, the live beat tracker with confidence, look-back judging, and calibration for the capture path.
 - **M9 — Mobile:**
   - Tauri 2 builds for iOS and Android.

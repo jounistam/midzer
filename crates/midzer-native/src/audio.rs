@@ -89,6 +89,8 @@ fn open_output(host: &cpal::Host) -> Result<(Arc<Shared>, Stream), String> {
         mic_open: AtomicBool::new(false),
         synth_in: ArrayQueue::new(1),
         synth_out: ArrayQueue::new(4),
+        track_in: ArrayQueue::new(1),
+        track_out: ArrayQueue::new(4),
         sample_rate: rate,
         epoch: Instant::now(),
         played_frame: AtomicU64::new(0),
@@ -189,11 +191,18 @@ impl Renderer {
             // Dropping frees memory; the forwarder thread does that.
             let _ = shared.synth_out.push(synth);
         }
+        if let Some(track) = shared.track_in.pop()
+            && let Some(old) = self.engine.set_track(track)
+        {
+            // Freed by the forwarder; if it is behind, freeing here beats keeping both.
+            let _ = shared.track_out.push(old);
+        }
         while let Some(words) = shared.commands.pop() {
             match Command::decode(words) {
-                Some(Command::SetGain { gain }) => {
+                Some(cmd @ Command::SetGain { gain }) => {
                     self.gain = gain;
                     self.synth.set_gain(gain);
+                    self.engine.handle(cmd);
                 }
                 Some(Command::SetKitSound { on }) => {
                     self.kit_sound = on;
@@ -228,6 +237,7 @@ impl Renderer {
                 // A full queue means the UI stalled; dropping beats blocking audio.
                 let _ = shared.events.push(timed.event.encode(frame));
             }
+            self.engine.mix_track(&mut self.left[..n], &mut self.right[..n]);
             self.engine.end_block();
             for (i, out) in chunk.chunks_mut(channels).enumerate() {
                 out[0] = self.left[i];

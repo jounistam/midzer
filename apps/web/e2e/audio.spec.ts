@@ -65,3 +65,60 @@ test('songs: a recording becomes a chart', async ({ page }) => {
   await expect(page.getByRole('button', { name: /^band take/ })).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test('songs: a drummer plays along with the recording and gets a timing report', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  await page.addInitScript(() => {
+    if (localStorage.getItem('midzer.onboarded')) return;
+    localStorage.setItem('midzer.onboarded', '1');
+    localStorage.setItem('midzer.prefs', JSON.stringify({ instrument: 'drums' }));
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Songs/ }).click();
+  const C = [48, 60, 64, 67];
+  const F = [41, 60, 65, 69];
+  await page.getByLabel('Import a recording, MIDI or ChordPro file').setInputFiles({ name: 'groove.wav', mimeType: 'audio/wav', buffer: recording(120, [C, F], 16) });
+  await expect(page.getByRole('heading', { name: 'groove' })).toBeVisible({ timeout: 30_000 });
+
+  // The recording replaces the band; its own tempo and the band's controls go.
+  await expect(page.getByText('The recording keeps its own tempo')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole('button', { name: 'Recording', pressed: true })).toBeVisible();
+  await expect(page.getByText('Energy')).toHaveCount(0);
+  await expect(page.getByText(/every hit is timed against the recording/)).toBeVisible();
+
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
+  await expect(page.getByText(/^Bar 2 of \d+$/)).toBeVisible({ timeout: 5_000 });
+  await expect(page.locator('.song-now .now-chord')).toHaveText(/^(C|F)$/);
+  // Kick and snare on the computer pads for a couple of seconds.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        for (let i = 0; i < 8; i++) {
+          setTimeout(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: i % 2 ? 'f' : 'v' })), i * 250);
+        }
+        setTimeout(resolve, 2200);
+      }),
+  );
+  await expect(page.getByTestId('timing')).toHaveText(/Rushing|Dragging|In the pocket/, { timeout: 3_000 });
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
+  const report = page.getByTestId('timing-report');
+  await expect(report).toBeVisible();
+  await expect(report.getByText(/within 15 ms, 8 hits/)).toBeVisible();
+  await expect(report.getByRole('rowheader', { name: 'Kick' })).toBeVisible();
+  await expect(report.getByRole('rowheader', { name: 'Snare' })).toBeVisible();
+  if (process.env.MIDZER_SHOTS) await page.screenshot({ path: `${process.env.MIDZER_SHOTS}/recording-report.png`, fullPage: true });
+
+  // The band instead, and back: the choice is remembered.
+  await page.getByRole('button', { name: 'Band', exact: true }).click();
+  await expect(page.getByText('Energy')).toBeVisible();
+  await page.getByRole('button', { name: 'Recording', exact: true }).click();
+
+  // The recording is kept with the song for next time.
+  await page.reload();
+  await page.getByRole('button', { name: /^Songs/ }).click();
+  await page.getByRole('button', { name: /^groove/ }).click();
+  await expect(page.getByText('The recording keeps its own tempo')).toBeVisible({ timeout: 30_000 });
+  expect(errors).toEqual([]);
+});

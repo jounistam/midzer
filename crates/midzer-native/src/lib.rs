@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crossbeam_queue::ArrayQueue;
-use midzer_core::{Command, WORDS_PER_EVENT};
+use midzer_core::{Command, Track, WORDS_PER_EVENT};
 use midzer_synth::Synth;
 
 pub use midi::{Port, Ports};
@@ -55,6 +55,9 @@ struct Shared {
     /// A freshly loaded synth for the audio thread, and old ones to drop elsewhere.
     synth_in: ArrayQueue<Box<Synth>>,
     synth_out: ArrayQueue<Box<Synth>>,
+    /// The same for backing tracks; `None` unloads it.
+    track_in: ArrayQueue<Option<Box<Track>>>,
+    track_out: ArrayQueue<Box<Track>>,
     sample_rate: u32,
     epoch: Instant,
     /// The first frame of the latest callback and when it plays, in ns since `epoch`.
@@ -145,6 +148,12 @@ impl NativeEngine {
         Ok(())
     }
 
+    /// Hands a recording (decoded at [`NativeEngine::sample_rate`]) to the
+    /// audio thread for songs to play, or unloads it with `None`.
+    pub fn load_track(&self, track: Option<Track>) {
+        self.shared.track_in.force_push(track.map(Box::new));
+    }
+
     /// Opens the default input device as the microphone.
     pub fn open_mic(&self) -> Result<(), String> {
         let (tx, rx) = mpsc::channel();
@@ -207,6 +216,7 @@ fn forward(shared: Arc<Shared>, midi: Arc<Mutex<midi::Midi>>, mut on_update: Upd
             on_update(Update::Input { words: std::mem::take(&mut inputs) });
         }
         while shared.synth_out.pop().is_some() {}
+        while shared.track_out.pop().is_some() {}
         std::thread::sleep(FORWARD_EVERY);
     }
 }

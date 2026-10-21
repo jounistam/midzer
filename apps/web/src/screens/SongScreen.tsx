@@ -4,6 +4,7 @@ import { BandMutes, EnergyControl, PlayButton, TakeButton, TempoControl } from '
 import { Keyboard } from '../components/Keyboard';
 import { KitView } from '../components/KitView';
 import { TimingBar } from '../components/DrummerStage';
+import { TimingReport } from '../components/TimingReport';
 import { TopBar } from '../components/TopBar';
 import {
   closeSong,
@@ -12,6 +13,8 @@ import {
   saveTranscription,
   seekSong,
   setLoop,
+  setPlayRecording,
+  setRecordingDrums,
   setTempo,
   useSession,
   type LoopRange,
@@ -35,6 +38,7 @@ export function SongScreen() {
   const split = useSession((s) => s.split);
   const drums = useSession((s) => s.instrument === 'drums');
   const notes = useSession((s) => s.songNotes);
+  const recording = useSession((s) => s.recording.status === 'ready' && s.playRecording);
   const [editing, setEditing] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
   if (!song) return null;
@@ -55,7 +59,7 @@ export function SongScreen() {
       <main className="jam-main">
         <div className="song-stage">
           <NowPlaying song={song} />
-          {drums && <DrumTiming />}
+          {drums && <DrumTiming recording={recording} />}
           {notes.length > 0 && (
             <p className="notice" role="status">
               {notes.join(' ')}
@@ -75,10 +79,15 @@ export function SongScreen() {
         </div>
         <aside className="panel control-panel">
           <PlayButton className="full" />
+          {song.backing && <RecordingControl />}
           <LoopControl song={song} selection={selection} />
-          <EnergyControl />
-          <TempoControl />
-          <BandMutes />
+          {!recording && (
+            <>
+              <EnergyControl />
+              <TempoControl />
+              <BandMutes />
+            </>
+          )}
           <TakeButton />
           {song.transcription && <TranscriptionButton tracks={song.transcription.length} />}
         </aside>
@@ -88,10 +97,58 @@ export function SongScreen() {
   );
 }
 
-/** How a drummer's hits sit against the band while the song plays. */
-function DrumTiming() {
+/** How a drummer's hits sit against the band, or against the recording with a report after each run. */
+function DrumTiming({ recording }: { recording: boolean }) {
   const playing = useSession((s) => s.playing);
+  if (recording) {
+    return <section className="panel song-timing">{playing ? <TimingBar against="the recording" /> : <TimingReport />}</section>;
+  }
   return <section className="panel song-timing">{playing ? <TimingBar /> : <p className="setting-note">Count in, or press Play: the band follows your tempo.</p>}</section>;
+}
+
+/** Songs read from a recording can play it instead of the band; on the desktop without its drums. */
+function RecordingControl() {
+  const recording = useSession((s) => s.recording);
+  const on = useSession((s) => s.playRecording);
+  const drums = useSession((s) => s.recordingDrums);
+  const audio = useSession((s) => s.audio);
+  return (
+    <div className="control-group">
+      <p className="label" id="play-along-label">
+        Play along with
+      </p>
+      <div className="segmented" role="group" aria-labelledby="play-along-label">
+        <button className={`seg ${on ? 'on' : ''}`} aria-pressed={on} onClick={() => setPlayRecording(true)}>
+          Recording
+        </button>
+        <button className={`seg ${!on ? 'on' : ''}`} aria-pressed={!on} onClick={() => setPlayRecording(false)}>
+          Band
+        </button>
+      </div>
+      {on && recording.status === 'loading' && (
+        <p className="setting-note" role="status">
+          Reading the recording…
+        </p>
+      )}
+      {on && recording.status === 'none' && audio !== 'ready' && <p className="setting-note">The recording loads once sound is on.</p>}
+      {on && recording.status === 'error' && (
+        <p className="status-line error" role="alert">
+          {recording.message}
+        </p>
+      )}
+      {on && recording.status === 'ready' && recording.drumStem && (
+        <button className={`toggle ${drums ? 'on' : ''}`} aria-pressed={drums} onClick={() => setRecordingDrums(!drums)}>
+          {drums ? 'Drums in the recording: on' : 'Drums in the recording: off'}
+        </button>
+      )}
+      {on && recording.status === 'ready' && (
+        <p className="setting-note">
+          The recording keeps its own tempo; the chart follows its beat.
+          {!recording.drumStem && ' Separate the instruments on import (desktop app) to play it without its drums.'}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function Chart(props: { song: Song; editing: boolean; selection: Selection | null; onSelect: (bar: number, extend: boolean) => void }) {

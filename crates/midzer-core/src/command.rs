@@ -80,6 +80,14 @@ pub enum Command {
     KitTrigger { trigger: Trigger, action: Option<KitAction> },
     /// A MIDI controller change, for kit triggers such as a foot switch.
     ControlChange { cc: u8, value: u8 },
+    /// Whether songs play their recording (see [`crate::Engine::set_track`]) instead of the band.
+    SetTrack { on: bool },
+    /// Empties the recording's tempo map and sets how many beat times follow.
+    TrackClear { beats: u16 },
+    /// When song beat `index` is heard, in seconds into the recording.
+    TrackBeat { index: u16, seconds: f32 },
+    /// Whether the recording's separate drum stem is heard.
+    SetTrackDrums { on: bool },
 }
 
 mod op {
@@ -119,6 +127,10 @@ mod op {
     pub const SET_BAND_DRUMS: u32 = 34;
     pub const KIT_TRIGGER: u32 = 35;
     pub const CONTROL_CHANGE: u32 = 36;
+    pub const SET_TRACK: u32 = 37;
+    pub const TRACK_CLEAR: u32 = 38;
+    pub const TRACK_BEAT: u32 = 39;
+    pub const SET_TRACK_DRUMS: u32 = 40;
 }
 
 /// MIDI channel 10, where e-kits and drum pads send.
@@ -241,6 +253,10 @@ impl Command {
                 [op::KIT_TRIGGER, kind, number, action.map_or(0, |a| index_of(&KitAction::ALL, a) + 1)]
             }
             Command::ControlChange { cc, value } => [op::CONTROL_CHANGE, cc as u32, value as u32, 0],
+            Command::SetTrack { on } => [op::SET_TRACK, on as u32, 0, 0],
+            Command::TrackClear { beats } => [op::TRACK_CLEAR, beats as u32, 0, 0],
+            Command::TrackBeat { index, seconds } => [op::TRACK_BEAT, index as u32, seconds.to_bits(), 0],
+            Command::SetTrackDrums { on } => [op::SET_TRACK_DRUMS, on as u32, 0, 0],
         }
     }
 
@@ -320,6 +336,10 @@ impl Command {
                 action: if c == 0 { None } else { Some(*KitAction::ALL.get(c as usize - 1)?) },
             }),
             op::CONTROL_CHANGE => Some(Command::ControlChange { cc: midi(a)?, value: midi(b)? }),
+            op::SET_TRACK => Some(Command::SetTrack { on: a != 0 }),
+            op::TRACK_CLEAR => Some(Command::TrackClear { beats: short(a)? }),
+            op::TRACK_BEAT => Some(Command::TrackBeat { index: short(a)?, seconds: float(b).filter(|s| *s >= 0.0)? }),
+            op::SET_TRACK_DRUMS => Some(Command::SetTrackDrums { on: a != 0 }),
             _ => None,
         }
     }
@@ -384,6 +404,10 @@ mod tests {
             Command::KitTrigger { trigger: Trigger::Control(64), action: Some(KitAction::StartStop) },
             Command::KitTrigger { trigger: Trigger::Control(127), action: None },
             Command::ControlChange { cc: 64, value: 127 },
+            Command::SetTrack { on: true },
+            Command::TrackClear { beats: 2049 },
+            Command::TrackBeat { index: 2048, seconds: 312.625 },
+            Command::SetTrackDrums { on: false },
         ] {
             assert_eq!(Command::decode(cmd.encode()), Some(cmd));
         }

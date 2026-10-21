@@ -16,6 +16,7 @@ function analysis(over: Partial<AudioAnalysis> = {}): AudioAnalysis {
     key: { tonic: 0, minor: false },
     tuningCents: 0,
     barTimes: [0.5, 3, 5.5],
+    beatTimes: Array.from({ length: 13 }, (_, i) => 0.5 + i * 0.625),
     chords: [null, C, C, C, Am, Am, G7B, G7B, C, C, C, C],
     sections: [
       { bar: 0, part: 'intro' },
@@ -52,6 +53,15 @@ describe('songs from recordings', () => {
     expect(song.bars[0]!.beats).toEqual(['C', '', 'N.C.', '']);
     expect(song.title).toBe('Tagged');
     expect(song.artist).toBe('Band');
+  });
+
+  it('keeps the tempo map and the stems to play along with the recording', () => {
+    const { song } = songFromAnalysis(analysis({ stemsDir: '/data/stems/1' }), 'file');
+    expect(song.backing?.beatTimes).toHaveLength(13);
+    expect(song.backing).toMatchObject({ seconds: 10, stemsDir: '/data/stems/1' });
+    expect(song.backing!.beatTimes[4]).toBeCloseTo(3);
+    // Too short a map to play along with.
+    expect(songFromAnalysis(analysis({ beatTimes: [0.5] }), 'file').song.backing).toBeUndefined();
   });
 
   it('exports the transcribed parts as MIDI on the beat grid', () => {

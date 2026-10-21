@@ -21,6 +21,19 @@ export interface MicOptions {
   echoCancellation: boolean;
 }
 
+/** A recording for songs to play instead of the band (the `setTrack` command). */
+export type TrackSource =
+  /** Already decoded at the engine's sample rate, as interleaved stereo (in the browser). */
+  | { kind: 'samples'; main: Int16Array; drums: Int16Array | null }
+  /** The file itself, or a song's saved stems with the drums apart, decoded natively (desktop). */
+  | { kind: 'file'; bytes: Uint8Array; stemsDir: string | null };
+
+export interface TrackLoaded {
+  seconds: number;
+  /** Whether the drums are a separate stem that `setTrackDrums` can mute. */
+  drumStem: boolean;
+}
+
 /** The engine running in an AudioWorklet (web) or a native audio thread (desktop). */
 export interface EngineHandle {
   readonly sampleRate: number;
@@ -33,6 +46,8 @@ export interface EngineHandle {
   onEvent(listener: EventListener): () => void;
   /** Loads an SF2 file; resolves false if it could not be parsed. */
   loadSoundFont(bytes: ArrayBuffer): Promise<boolean>;
+  /** Hands the engine a backing track (its sample arrays are moved), or frees it with null. Rejects if it can't be read. */
+  loadTrack(source: TrackSource | null): Promise<TrackLoaded | null>;
   /**
    * Feeds the microphone to the engine. Resolves a function that stops it;
    * rejects if there is no microphone or access is denied.
@@ -88,6 +103,7 @@ export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
   };
 
   let pendingSoundFont: ((ok: boolean) => void) | null = null;
+  let pendingTrack: ((frames: number) => void) | null = null;
   node.port.onmessage = (e: MessageEvent<PortMessage>) => {
     const msg = e.data;
     if (msg.type === 'events') {
@@ -96,6 +112,9 @@ export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
     } else if (msg.type === 'soundfontLoaded') {
       pendingSoundFont?.(msg.ok);
       pendingSoundFont = null;
+    } else if (msg.type === 'trackLoaded') {
+      pendingTrack?.(msg.frames);
+      pendingTrack = null;
     } else if (msg.type === 'overflow') {
       console.warn(`midzer: dropped ${msg.dropped} engine events (UI too slow)`);
     }
@@ -131,6 +150,21 @@ export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
         pendingSoundFont = resolve;
         node.port.postMessage({ type: 'soundfont', bytes } satisfies PortMessage, [bytes]);
       });
+    },
+    async loadTrack(source) {
+      if (source && source.kind !== 'samples') throw new Error('The browser engine takes decoded samples.');
+      // Moved, not copied: the arrays are unusable afterwards.
+      const own = (a: Int16Array | null | undefined) =>
+        !a ? null : a.byteOffset === 0 && a.byteLength === a.buffer.byteLength ? (a.buffer as ArrayBuffer) : a.slice().buffer;
+      const main = own(source?.main);
+      const drums = own(source?.drums);
+      const frames = await new Promise<number>((resolve) => {
+        pendingTrack?.(0);
+        pendingTrack = resolve;
+        const transfer = [main, drums].filter((b): b is ArrayBuffer => b !== null);
+        node.port.postMessage({ type: 'track', main, drums } satisfies PortMessage, transfer);
+      });
+      return source ? { seconds: frames / sampleRate, drumStem: source.drums !== null } : null;
     },
     async openMic({ echoCancellation }) {
       const stream = await navigator.mediaDevices.getUserMedia({

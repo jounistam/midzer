@@ -6,7 +6,8 @@ import { store } from '../storage/db';
 import type { AnalysedTrack } from './audio';
 import { BUILTIN_SONGS } from './builtin';
 import type { MelodyNote } from './melody';
-import { BEATS_PER_BAR, type Bar, type Song, type SongSection } from './song';
+import { deleteRecording } from './recordings';
+import { BEATS_PER_BAR, MAX_TRACK_BEATS, type Bar, type Song, type SongBacking, type SongSection } from './song';
 
 const LEGACY_KEY = 'midzer.songs';
 const MAX_MELODY_NOTES = 8192;
@@ -43,7 +44,17 @@ function sanitize(value: unknown): Song | null {
     melody: Array.isArray(s.melody) ? sanitizeMelody(s.melody) : undefined,
     source: s.source === 'chordpro' || s.source === 'midi' || s.source === 'audio' ? s.source : 'user',
     transcription: Array.isArray(s.transcription) ? sanitizeTracks(s.transcription) : undefined,
+    backing: sanitizeBacking(s.backing),
   };
+}
+
+function sanitizeBacking(value: unknown): SongBacking | undefined {
+  const { beatTimes, seconds, stemsDir } = (value ?? {}) as Partial<SongBacking>;
+  if (!Array.isArray(beatTimes) || typeof seconds !== 'number' || !(seconds > 0)) return undefined;
+  const times = beatTimes.slice(0, MAX_TRACK_BEATS);
+  // Beat times only ever move forward.
+  if (times.length < 2 || !times.every((t, i) => typeof t === 'number' && t >= 0 && (i === 0 || t > times[i - 1]!))) return undefined;
+  return typeof stemsDir === 'string' ? { beatTimes: times, seconds, stemsDir } : { beatTimes: times, seconds };
 }
 
 function sanitizeTracks(tracks: unknown[]): AnalysedTrack[] | undefined {
@@ -119,6 +130,7 @@ export async function saveUserSong(song: Song): Promise<boolean> {
 }
 
 export async function deleteUserSong(id: string): Promise<void> {
+  void deleteRecording(id);
   try {
     await songs.delete(id);
   } catch {

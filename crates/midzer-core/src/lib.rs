@@ -3,6 +3,7 @@
 //! Everything here must be safe to call from a real-time audio callback:
 //! no I/O, no locks, and no allocation after construction.
 
+mod backing;
 mod band;
 mod chord;
 mod command;
@@ -16,6 +17,7 @@ mod song;
 pub mod style;
 mod voicing;
 
+pub use backing::{MAX_TRACK_BEATS, Track};
 pub use band::BandDrums;
 pub use chord::{Chord, PitchSet, Quality, recognize as recognize_chord};
 pub use command::{Command, WORDS_PER_COMMAND};

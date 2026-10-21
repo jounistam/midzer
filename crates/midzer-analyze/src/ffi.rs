@@ -5,7 +5,7 @@
 
 use std::sync::Mutex;
 
-use crate::{Step, analyze_file};
+use crate::{Step, analyze_file, backing_track};
 
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
@@ -13,6 +13,7 @@ unsafe extern "C" {
 }
 
 static RESULT: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+static SAMPLES: Mutex<Vec<i16>> = Mutex::new(Vec::new());
 
 /// Allocates `len` bytes for the file; [`mza_analyze`] takes them over.
 #[unsafe(no_mangle)]
@@ -48,4 +49,32 @@ pub extern "C" fn mza_result_ptr() -> *const u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn mza_result_len() -> usize {
     RESULT.lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
+/// Decodes the `len` bytes at `ptr` (from [`mza_alloc`]) as a recording to
+/// play along with, at `rate`. Returns 1 when [`mza_samples_ptr`] holds it as
+/// interleaved stereo 16-bit samples, 0 when the result is an error message.
+///
+/// # Safety
+/// `ptr` must come from [`mza_alloc`] with the same `len`, filled by the caller.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mza_track(ptr: *mut u8, len: usize, rate: u32) -> u32 {
+    let bytes = unsafe { Vec::from_raw_parts(ptr, len, len) };
+    let (ok, samples, message) = match backing_track(bytes, rate) {
+        Ok(t) => (1, t.main, Vec::new()),
+        Err(e) => (0, Vec::new(), e.into_bytes()),
+    };
+    *SAMPLES.lock().unwrap_or_else(|e| e.into_inner()) = samples;
+    *RESULT.lock().unwrap_or_else(|e| e.into_inner()) = message;
+    ok
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mza_samples_ptr() -> *const i16 {
+    SAMPLES.lock().unwrap_or_else(|e| e.into_inner()).as_ptr()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mza_samples_len() -> usize {
+    SAMPLES.lock().unwrap_or_else(|e| e.into_inner()).len()
 }

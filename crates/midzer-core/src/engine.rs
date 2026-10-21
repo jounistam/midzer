@@ -1,3 +1,4 @@
+use crate::backing::{Backing, Track};
 use crate::band::{Band, BandDrums};
 use crate::chord::recognize;
 use crate::command::Command;
@@ -41,6 +42,8 @@ pub struct Engine {
     start_in: Option<(u64, f32)>,
     /// What the band's drums play for a drummer.
     band_drums: BandDrums,
+    /// A recording that plays songs instead of the band.
+    backing: Backing,
 }
 
 impl Engine {
@@ -62,11 +65,13 @@ impl Engine {
             count_in: CountInListener::default(),
             start_in: None,
             band_drums: BandDrums::Off,
+            backing: Backing::new(sample_rate),
         }
     }
 
     pub fn handle(&mut self, cmd: Command) {
         let drums = self.instrument == Instrument::Drums;
+        let track = self.backing.active();
         match cmd {
             Command::NoteOn { note, velocity } if drums => self.drum_note(note, velocity),
             Command::NoteOff { .. } if drums => {}
@@ -91,6 +96,7 @@ impl Engine {
                 }
                 self.update_keys_held();
             }
+            Command::Play if track => self.backing.play(self.band.bpm(), &mut self.events),
             Command::Play => {
                 self.start_in = None;
                 self.band.play(&mut self.events);
@@ -98,11 +104,17 @@ impl Engine {
             Command::Stop => {
                 self.start_in = None;
                 self.band.stop(&mut self.events);
+                if self.backing.is_playing() {
+                    self.backing.stop(0, &mut self.events);
+                    self.events.push(0, EngineEvent::Tempo { bpm: self.band.bpm() });
+                }
             }
             Command::SetTempo { bpm } => self.band.set_tempo(bpm),
             Command::SetSplit { note } => self.split = note,
             Command::SetMute { channel, muted } => self.band.set_muted(channel, muted, &mut self.events),
             Command::SetStyle { index } => self.band.set_style(index, &mut self.events),
+            // The recording has its own arrangement.
+            Command::Section { .. } if track => {}
             Command::Section { request } => self.band.request(request, &mut self.events),
             Command::SetFollow { on } => self.band.set_follow(on, &mut self.events),
             Command::SetEnergy { energy } => self.band.set_energy(energy, &mut self.events),
@@ -112,9 +124,15 @@ impl Engine {
             Command::SongClear { bars } => self.band.clear_song(bars as u32),
             Command::SongChord { beat, slot } => self.band.set_song_slot(beat as u32, slot),
             Command::SongMark { bar, mark } => self.band.set_song_mark(bar as u32, mark),
-            Command::SongLoop { start, end } => self.band.set_song_loop(start as u32, end as u32),
+            Command::SongLoop { start, end } => {
+                self.band.set_song_loop(start as u32, end as u32);
+                self.backing.set_loop(start as u32, end as u32);
+            }
             Command::SetSong { on } => self.band.set_song(on),
-            Command::SongSeek { bar } => self.band.seek_song(bar as u32),
+            Command::SongSeek { bar } => {
+                self.band.seek_song(bar as u32);
+                self.backing.seek(bar as u32);
+            }
             Command::SongWait { tick } => self.band.set_song_wait(tick),
             Command::SetListen { mode, gate_db } => {
                 let mut heard = HeardList::default();
@@ -156,10 +174,20 @@ impl Engine {
                     self.kit_action(action);
                 }
             }
+            Command::SetTrack { on } => {
+                if on != track {
+                    self.handle(Command::Stop);
+                    self.backing.set_active(on, &mut self.events);
+                }
+            }
+            Command::TrackClear { beats } => self.backing.clear_beats(beats as u32),
+            Command::TrackBeat { index, seconds } => self.backing.set_beat(index as u32, seconds),
+            Command::SetTrackDrums { on } => self.backing.set_drums(on),
             // Kits send their own open and closed hi-hat notes; the pedal is for the UI.
             Command::HiHatPedal { .. } => {}
-            // Mixing is the synth's job; the host routes these.
-            Command::SetGain { .. } | Command::SetKitSound { .. } => {}
+            // The synth's gain is the host's to set; the recording follows it.
+            Command::SetGain { gain } => self.backing.set_gain(gain),
+            Command::SetKitSound { .. } => {}
         }
     }
 
@@ -243,7 +271,10 @@ impl Engine {
     }
 
     fn kit_action(&mut self, action: KitAction) {
-        let playing = self.band.is_playing();
+        let playing = self.is_playing();
+        if self.backing.active() && action != KitAction::StartStop {
+            return;
+        }
         match action {
             KitAction::StartStop => self.handle(if playing { Command::Stop } else { Command::Play }),
             KitAction::NextSection => {
@@ -265,7 +296,10 @@ impl Engine {
         self.drum_gate[piece.index()] = self.gate_frames;
         self.events.push(0, EngineEvent::NoteOn { channel: PLAYER_DRUM_CHANNEL, key: piece.note(), velocity });
         self.band.note_played(velocity);
-        if self.instrument != Instrument::Drums {
+        if self.backing.active() {
+            // Judged against the recording; nothing to lead or count in.
+            self.backing.drum_hit(piece, velocity, self.band.latency_ms(), &mut self.events);
+        } else if self.instrument != Instrument::Drums {
             self.band.onset(0.0);
         } else if self.band.is_playing() {
             self.band.drum_hit(piece, velocity, &mut self.events);
@@ -321,6 +355,14 @@ impl Engine {
                 self.band.process(frames - delay as u32, &mut self.events);
                 self.events.shift_from(mark, delay as u32);
             }
+            None if self.backing.active() => {
+                let mark = self.events.len();
+                self.backing.process(frames, self.band.song(), &mut self.events);
+                if self.events.as_slice()[mark..].iter().any(|t| t.event == EngineEvent::Transport { playing: false }) {
+                    // The recording ended.
+                    self.events.push(frames - 1, EngineEvent::Tempo { bpm: self.band.bpm() });
+                }
+            }
             None => self.band.process(frames, &mut self.events),
         }
         self.now += frames as u64;
@@ -332,8 +374,25 @@ impl Engine {
         self.events.clear();
     }
 
+    /// Adds the backing track to this block's output; after [`Engine::process`]
+    /// and the synth, before [`Engine::end_block`].
+    pub fn mix_track(&mut self, left: &mut [f32], right: &mut [f32]) {
+        self.backing.mix(left, right);
+    }
+
+    /// Swaps in a decoded recording at the engine's rate, or none, and
+    /// returns the old one: free it off the audio thread where that matters.
+    pub fn set_track(&mut self, track: Option<Box<Track>>) -> Option<Box<Track>> {
+        let playing = self.backing.is_playing();
+        let old = self.backing.set_track(track, &mut self.events);
+        if playing {
+            self.events.push(0, EngineEvent::Tempo { bpm: self.band.bpm() });
+        }
+        old
+    }
+
     pub fn is_playing(&self) -> bool {
-        self.band.is_playing()
+        self.band.is_playing() || self.backing.is_playing()
     }
 
     pub fn chord(&self) -> Option<crate::chord::Chord> {
@@ -716,6 +775,42 @@ mod tests {
             events.iter().filter_map(|(_, e)| if let EngineEvent::Timing { ms } = e { Some(*ms) } else { None }).collect();
         assert_eq!(timings.len(), 1);
         assert!((timings[0] - 10.0).abs() < 2.7, "{timings:?}");
+    }
+
+    #[test]
+    fn songs_can_play_a_recording_that_judges_the_drummer() {
+        let mut engine = drummer();
+        engine.handle(Command::SetLatency { ms: 10.0 });
+        engine.handle(Command::SongClear { bars: 4 });
+        engine.handle(Command::SongChord { beat: 0, slot: crate::Slot::Chord(Chord::new(2, Quality::Minor)) });
+        engine.handle(Command::SetSong { on: true });
+        // 120 BPM from 0.5 s, in a 10 s recording.
+        engine.set_track(Some(Box::new(Track { main: vec![0; 2 * 480_000], drums: None })));
+        engine.handle(Command::TrackClear { beats: 17 });
+        for i in 0..17 {
+            engine.handle(Command::TrackBeat { index: i, seconds: 0.5 + 0.5 * i as f32 });
+        }
+        engine.handle(Command::SetTrack { on: true });
+        // Play, a fill request that the recording ignores, and a snare 6 ms
+        // late on beat 2 heard 10 ms after it is played.
+        let snare = 24_000 + 24_000 + 288 + 480;
+        let script = [(0, Command::Play), (100, Command::Section { request: Request::Fill }), (snare, hit(Piece::Snare, 100))];
+        let events = run_script(&mut engine, &mut 0, 10.5, &script);
+        assert!(band_states(&events).iter().all(|(_, s)| !s.playing), "the band stays out");
+        assert!(!events.iter().any(|(_, e)| matches!(e, EngineEvent::NoteOn { channel: 0..=9, .. })));
+        let beats: Vec<_> = events.iter().filter_map(|(f, e)| if let EngineEvent::SongPosition { beat } = e { Some((*f, *beat)) } else { None }).collect();
+        assert_eq!(beats.len(), 16);
+        assert_eq!(beats[0], (24_000, 0));
+        assert_eq!(chord_events(&events.iter().map(|(f, e)| Timed { frame: *f as u32, event: *e }).collect::<Vec<_>>()), [Some(Chord::new(2, Quality::Minor))]);
+        let judged: Vec<_> = events.iter().filter_map(|(_, e)| if let EngineEvent::Judged { ms, piece, sixteenth, bar } = e { Some((*ms, *piece, *sixteenth, *bar)) } else { None }).collect();
+        assert_eq!(judged.len(), 1);
+        let (ms, piece, sixteenth, bar) = judged[0];
+        assert_eq!((piece, sixteenth, bar), (Piece::Snare, 4, 0));
+        // The hit is seen at the start of its block, up to 128 frames early.
+        assert!(ms <= 6.01 && ms > 6.0 - 128.0 / 48.0, "{ms}");
+        assert!(events.iter().any(|(_, e)| matches!(e, EngineEvent::Timing { .. })));
+        assert!(!engine.is_playing(), "stopped at the end of the recording");
+        assert!(events.iter().any(|(_, e)| *e == EngineEvent::Transport { playing: false }));
     }
 
     #[test]

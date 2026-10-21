@@ -95,7 +95,7 @@ function CountIn() {
 const METER_MS = 40;
 
 /** Rushing or dragging against the band's grid, smoothed over the last hits. */
-export function TimingBar() {
+export function TimingBar({ against = 'the band' }: { against?: string }) {
   const needle = useRef<HTMLDivElement>(null);
   const label = useRef<HTMLParagraphElement>(null);
   useEffect(() => {
@@ -119,7 +119,7 @@ export function TimingBar() {
   }, []);
   return (
     <div className="timing">
-      <div className="timing-track" role="meter" aria-label="Timing against the band">
+      <div className="timing-track" role="meter" aria-label={`Timing against ${against}`}>
         <span className="timing-end">Rushing</span>
         <div className="timing-pocket" />
         <div className="timing-needle" ref={needle} />

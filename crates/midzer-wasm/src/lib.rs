@@ -5,7 +5,7 @@
 //! real-time path needs. The worklet reads buffers directly from linear memory
 //! via the pointers returned below.
 
-use midzer_core::{Command, Engine, MAX_EVENTS_PER_BLOCK, WORDS_PER_EVENT};
+use midzer_core::{Command, Engine, MAX_EVENTS_PER_BLOCK, Track, WORDS_PER_EVENT};
 use midzer_synth::Synth;
 
 /// Frames per render quantum in the Web Audio API.
@@ -37,7 +37,10 @@ impl Host {
     /// Applies an encoded command; returns false if it was invalid.
     pub fn command(&mut self, words: [u32; 4]) -> bool {
         match Command::decode(words) {
-            Some(Command::SetGain { gain }) => self.synth.set_gain(gain),
+            Some(cmd @ Command::SetGain { gain }) => {
+                self.synth.set_gain(gain);
+                self.engine.handle(cmd);
+            }
             Some(Command::SetKitSound { on }) => self.synth.set_kit_sound(on),
             Some(cmd) => self.engine.handle(cmd),
             None => return false,
@@ -63,8 +66,14 @@ impl Host {
             *slot = timed.event.encode(timed.frame);
         }
         let count = events.len();
+        self.engine.mix_track(&mut self.left[..frames], &mut self.right[..frames]);
         self.engine.end_block();
         count
+    }
+
+    /// Plays `track` (at this host's rate) in songs while track mode is on; `None` frees it.
+    pub fn set_track(&mut self, track: Option<Track>) {
+        drop(self.engine.set_track(track.map(Box::new)));
     }
 
     pub fn load_soundfont(&mut self, bytes: &[u8]) -> bool {
@@ -101,6 +110,28 @@ pub extern "C" fn mz_alloc(len: usize) -> *mut u8 {
     let ptr = buf.as_mut_ptr();
     std::mem::forget(buf);
     ptr
+}
+
+/// Allocates `len` 16-bit samples for a recording, see [`mz_load_track`].
+#[unsafe(no_mangle)]
+pub extern "C" fn mz_alloc_samples(len: usize) -> *mut i16 {
+    let mut buf = Vec::<i16>::with_capacity(len);
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf);
+    ptr
+}
+
+/// Takes over a recording: `len` interleaved stereo samples at `main`, and
+/// as many of the drum stem at `drums` unless it is null. Both come from
+/// [`mz_alloc_samples`] and must not be used afterwards. A zero `len` unloads it.
+///
+/// # Safety
+/// `host` must be live; the pointers must come from [`mz_alloc_samples`] with `len`, filled by the caller.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mz_load_track(host: *mut Host, main: *mut i16, drums: *mut i16, len: usize) {
+    let take = |ptr: *mut i16| (!ptr.is_null()).then(|| unsafe { Vec::from_raw_parts(ptr, len, len) });
+    let track = (len > 0).then(|| Track { main: take(main).unwrap_or_default(), drums: take(drums) });
+    unsafe { (*host).set_track(track) }
 }
 
 /// # Safety

@@ -1,5 +1,6 @@
 use crate::chord::{Chord, Quality};
 use crate::conductor::Section;
+use crate::drums::Piece;
 
 /// Number of `u32` words in an encoded event.
 pub const WORDS_PER_EVENT: usize = 4;
@@ -42,6 +43,9 @@ pub enum EngineEvent {
     Timing { ms: f32 },
     /// Evenly spaced count-in hits heard so far; 0 when a count-in starts over.
     CountIn { hits: u8 },
+    /// A drummer's hit placed on a backing track's grid: `ms` from sixteenth
+    /// `sixteenth` (0..16) of song bar `bar`.
+    Judged { ms: f32, piece: Piece, sixteenth: u8, bar: u16 },
 }
 
 /// What the band is doing, for the UI.
@@ -80,6 +84,7 @@ mod op {
     pub const TEMPO: u32 = 11;
     pub const TIMING: u32 = 12;
     pub const COUNT_IN: u32 = 13;
+    pub const JUDGED: u32 = 14;
 }
 
 const NO_CHORD: u32 = 0xff;
@@ -112,6 +117,9 @@ impl EngineEvent {
             EngineEvent::Tempo { bpm } => [op::TEMPO, bpm.to_bits(), 0, frame],
             EngineEvent::Timing { ms } => [op::TIMING, ms.to_bits(), 0, frame],
             EngineEvent::CountIn { hits } => [op::COUNT_IN, hits as u32, 0, frame],
+            EngineEvent::Judged { ms, piece, sixteenth, bar } => {
+                [op::JUDGED, ms.to_bits(), piece.index() as u32 | (sixteenth as u32) << 8 | (bar as u32) << 16, frame]
+            }
             EngineEvent::Band(s) => {
                 let section = Section::ALL.iter().position(|x| *x == s.section).unwrap_or(0) as u32;
                 let flags = s.playing as u32
@@ -152,6 +160,12 @@ impl EngineEvent {
             op::TEMPO => EngineEvent::Tempo { bpm: f32::from_bits(a) },
             op::TIMING => EngineEvent::Timing { ms: f32::from_bits(a) },
             op::COUNT_IN => EngineEvent::CountIn { hits: byte(a) },
+            op::JUDGED => EngineEvent::Judged {
+                ms: f32::from_bits(a),
+                piece: Piece::from_index((b & 0xff) as usize)?,
+                sixteenth: byte(b >> 8),
+                bar: (b >> 16) as u16,
+            },
             op::BAND => {
                 let flags = byte(b >> 8);
                 let next_style = byte(a >> 8);
@@ -337,6 +351,7 @@ mod tests {
             EngineEvent::Tempo { bpm: 88.25 },
             EngineEvent::Timing { ms: -12.5 },
             EngineEvent::CountIn { hits: 3 },
+            EngineEvent::Judged { ms: -12.5, piece: Piece::China, sixteenth: 15, bar: 511 },
         ] {
             assert_eq!(EngineEvent::decode(event.encode(42)), Some((event, 42)));
         }

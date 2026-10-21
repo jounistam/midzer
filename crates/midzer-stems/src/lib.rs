@@ -135,3 +135,26 @@ pub fn transcribe_file(bytes: Vec<u8>, options: &Options, progress: Progress) ->
     }
     Ok(analysis)
 }
+
+/// A song's recording to play along with, from its saved stems at `rate`:
+/// everything but the drums, and the drum stem apart so it can be muted.
+pub fn backing_from_stems(dir: &Path, rate: u32) -> Result<midzer_analyze::Track, String> {
+    let read = |name: &str| -> Result<(Vec<f32>, Vec<f32>), String> {
+        let path = dir.join(format!("{name}.wav"));
+        let bytes = std::fs::read(&path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
+        midzer_analyze::track::decode_at(bytes, rate)
+    };
+    let (drum_l, drum_r) = read(demucs::STEMS[0])?;
+    let len = drum_l.len();
+    let (mut left, mut right) = (vec![0.0f32; len], vec![0.0f32; len]);
+    for name in &demucs::STEMS[1..] {
+        let (l, r) = read(name)?;
+        for (out, x) in left.iter_mut().zip(&l).chain(right.iter_mut().zip(&r)) {
+            *out += x;
+        }
+    }
+    Ok(midzer_analyze::Track {
+        main: midzer_analyze::track::interleave(&left, &right, len),
+        drums: Some(midzer_analyze::track::interleave(&drum_l, &drum_r, len)),
+    })
+}

@@ -20,6 +20,9 @@ export type PortMessage =
   | { type: 'command'; words: number[] }
   | { type: 'soundfont'; bytes: ArrayBuffer }
   | { type: 'soundfontLoaded'; ok: boolean }
+  /** Interleaved stereo 16-bit samples at the context's rate; null frees the track. */
+  | { type: 'track'; main: ArrayBuffer | null; drums: ArrayBuffer | null }
+  | { type: 'trackLoaded'; frames: number }
   | { type: 'events'; words: Uint32Array }
   | { type: 'overflow'; dropped: number };
 
@@ -27,6 +30,8 @@ interface MidzerExports {
   memory: WebAssembly.Memory;
   mz_create(sampleRate: number): number;
   mz_alloc(len: number): number;
+  mz_alloc_samples(len: number): number;
+  mz_load_track(host: number, main: number, drums: number, len: number): void;
   mz_free(ptr: number, len: number): void;
   mz_load_soundfont(host: number, ptr: number, len: number): number;
   mz_left_ptr(host: number): number;
@@ -78,6 +83,20 @@ class MidzerProcessor extends AudioWorkletProcessor {
       wasm.mz_free(ptr, len);
       this.refreshViews();
       this.port.postMessage({ type: 'soundfontLoaded', ok } satisfies PortMessage);
+    } else if (msg.type === 'track') {
+      // Copying a few minutes of audio blocks this thread briefly; it happens while stopped.
+      const len = msg.main ? msg.main.byteLength / 2 : 0;
+      const copy = (bytes: ArrayBuffer | null) => {
+        if (!bytes || len === 0) return 0;
+        const ptr = wasm.mz_alloc_samples(len);
+        new Int16Array(wasm.memory.buffer, ptr, len).set(new Int16Array(bytes, 0, len));
+        return ptr;
+      };
+      const main = copy(msg.main);
+      const drums = copy(msg.drums);
+      wasm.mz_load_track(host, main, drums, len);
+      this.refreshViews();
+      this.port.postMessage({ type: 'trackLoaded', frames: len / 2 } satisfies PortMessage);
     }
   }
 
