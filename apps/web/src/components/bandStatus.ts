@@ -43,6 +43,7 @@ export function sectionLine(band: BandState): string {
       return `${style} · Waiting for you`;
     default:
       if (band.endingPending) return `${style} · ${v} → Ending`;
+      if (band.cued) return `${style} · ${v} → ${next} on a crash`;
       return band.fillPending ? `${style} · ${v} → ${next === v ? 'Fill' : next}` : `${style} · ${v}`;
   }
 }

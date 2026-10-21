@@ -24,6 +24,7 @@ export function midiToCommand(data: ArrayLike<number>): EngineCommand | null {
   if (kind === 0xb0 && d1 === HI_HAT_CC) return { type: 'hiHatPedal', value: d2 };
   // All Sound Off / All Notes Off
   if (kind === 0xb0 && (d1 === 120 || d1 === 123)) return { type: 'allNotesOff' };
+  if (kind === 0xb0 && d1 < 120) return { type: 'controlChange', cc: d1, value: d2 };
   return null;
 }
 

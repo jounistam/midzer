@@ -1,5 +1,6 @@
 import { ChordDisplay } from '../components/ChordDisplay';
 import { ControlPanel } from '../components/ControlPanel';
+import { DrummerStage } from '../components/DrummerStage';
 import { Keyboard } from '../components/Keyboard';
 import { KitView } from '../components/KitView';
 import { TopBar } from '../components/TopBar';
@@ -14,14 +15,18 @@ export function Jam() {
       <TopBar title="Jam" onBack={() => goTo('home')} />
       <main className="jam-main">
         <div className="jam-stage">
-          <div className="panel">
-            <ChordDisplay />
-          </div>
+          {drums ? (
+            <DrummerStage />
+          ) : (
+            <div className="panel">
+              <ChordDisplay />
+            </div>
+          )}
           <LoadingStatus />
         </div>
-        <ControlPanel />
+        <ControlPanel drummer={drums} />
       </main>
-      {drums ? <KitView /> : <Keyboard split={split} />}
+      {drums ? <KitView height={170} /> : <Keyboard split={split} />}
     </div>
   );
 }

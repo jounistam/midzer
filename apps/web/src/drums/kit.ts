@@ -1,7 +1,7 @@
 // The drummer's kit on the UI side: names, computer-keyboard pads, note maps
 // for common e-kits, and the commands that load a map into the engine.
 
-import { DRUM_PIECES, type DrumPiece, type EngineCommand } from '@midzer/audio-web';
+import { DRUM_PIECES, KIT_ACTIONS, type DrumPiece, type EngineCommand, type KitAction, type KitTrigger } from '@midzer/audio-web';
 
 export interface PieceInfo {
   label: string;
@@ -100,4 +100,59 @@ export function parseKitSetup(value: unknown): KitSetup {
   }
   if (KIT_PRESETS.some((p) => p.id === v?.preset)) return { preset: v!.preset as KitPresetId };
   return { preset: 'gm' };
+}
+
+// ---- Kit controls -------------------------------------------------------------
+
+export const KIT_ACTION_INFO: Record<KitAction, { label: string; hint: string }> = {
+  nextSection: { label: 'Next section', hint: 'A → B → C, with a fill into it' },
+  fill: { label: 'Fill', hint: 'The band fills to the end of the bar' },
+  ending: { label: 'Ending', hint: 'The band ends on the next bar' },
+  startStop: { label: 'Start / stop', hint: 'Starts the band at once, or stops it' },
+};
+
+/** Which pad or pedal sets off each action. */
+export type KitTriggers = Partial<Record<KitAction, KitTrigger>>;
+
+export function triggerLabel(trigger: KitTrigger): string {
+  return trigger.kind === 'note' ? `Pad · note ${trigger.number}` : `Pedal or switch · CC ${trigger.number}`;
+}
+
+const sameTrigger = (a: KitTrigger | undefined, b: KitTrigger) => a?.kind === b.kind && a.number === b.number;
+
+/**
+ * Assigns `trigger` to `action` (null clears it). A trigger does one thing,
+ * so another action using it loses it. Returns the new assignments and the
+ * engine commands that make the change.
+ */
+export function assignTrigger(triggers: KitTriggers, action: KitAction, trigger: KitTrigger | null): { triggers: KitTriggers; commands: EngineCommand[] } {
+  const next: KitTriggers = { ...triggers };
+  const commands: EngineCommand[] = [];
+  const old = next[action];
+  if (old) commands.push({ type: 'kitTrigger', trigger: old, action: null });
+  delete next[action];
+  if (trigger) {
+    for (const other of KIT_ACTIONS) if (sameTrigger(next[other], trigger)) delete next[other];
+    next[action] = trigger;
+    commands.push({ type: 'kitTrigger', trigger, action });
+  }
+  return { triggers: next, commands };
+}
+
+export function triggerCommands(triggers: KitTriggers): EngineCommand[] {
+  return KIT_ACTIONS.flatMap((action) => {
+    const trigger = triggers[action];
+    return trigger ? [{ type: 'kitTrigger', trigger, action } as const] : [];
+  });
+}
+
+export function parseKitTriggers(value: unknown): KitTriggers {
+  const out: KitTriggers = {};
+  if (!value || typeof value !== 'object') return out;
+  for (const action of KIT_ACTIONS) {
+    const t = (value as Record<string, { kind?: unknown; number?: unknown } | undefined>)[action];
+    const n = Number(t?.number);
+    if ((t?.kind === 'note' || t?.kind === 'control') && Number.isInteger(n) && n >= 0 && n < 128) out[action] = { kind: t.kind, number: n };
+  }
+  return out;
 }

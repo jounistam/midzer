@@ -1,6 +1,6 @@
 import { DRUM_PIECES } from '@midzer/audio-web';
 import { describe, expect, it } from 'vitest';
-import { KIT_PRESETS, kitCommands, kitMap, parseKitSetup, PIECE_INFO, PIECES, qwertyToPiece } from './kit';
+import { assignTrigger, KIT_PRESETS, kitCommands, kitMap, parseKitSetup, parseKitTriggers, PIECE_INFO, PIECES, qwertyToPiece, triggerCommands, triggerLabel } from './kit';
 import { layoutKit, pieceAt } from './kitLayout';
 
 describe('kit', () => {
@@ -70,5 +70,31 @@ describe('kit layout', () => {
     const snare = at('snare');
     expect(pieceAt(pads, snare.x, snare.y)).toBe('snare');
     expect(pieceAt(pads, 1, 1)).toBeNull();
+  });
+});
+
+describe('kit controls', () => {
+  it('gives each pad or pedal one action', () => {
+    const pad = { kind: 'note', number: 60 } as const;
+    const pedal = { kind: 'control', number: 64 } as const;
+    let { triggers, commands } = assignTrigger({}, 'nextSection', pad);
+    expect(commands).toEqual([{ type: 'kitTrigger', trigger: pad, action: 'nextSection' }]);
+    ({ triggers, commands } = assignTrigger(triggers, 'fill', pad));
+    expect(triggers).toEqual({ fill: pad });
+    ({ triggers, commands } = assignTrigger(triggers, 'fill', pedal));
+    expect(commands).toEqual([
+      { type: 'kitTrigger', trigger: pad, action: null },
+      { type: 'kitTrigger', trigger: pedal, action: 'fill' },
+    ]);
+    expect(triggerCommands(triggers)).toEqual([{ type: 'kitTrigger', trigger: pedal, action: 'fill' }]);
+    expect(assignTrigger(triggers, 'fill', null).triggers).toEqual({});
+    expect(triggerLabel(pedal)).toBe('Pedal or switch · CC 64');
+  });
+
+  it('reads saved controls, dropping junk', () => {
+    expect(parseKitTriggers({ fill: { kind: 'note', number: 60 }, ending: { kind: 'x', number: 1 }, startStop: { kind: 'control', number: 300 } })).toEqual({
+      fill: { kind: 'note', number: 60 },
+    });
+    expect(parseKitTriggers('nope')).toEqual({});
   });
 });

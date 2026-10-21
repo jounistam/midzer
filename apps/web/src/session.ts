@@ -14,6 +14,7 @@ import {
   requestMidi,
   startEngine,
   STYLES,
+  type BandDrums,
   type BandPart,
   type BandState,
   type ChordInfo,
@@ -22,6 +23,8 @@ import {
   type EngineHandle,
   type IdleMode,
   type Instrument,
+  type KitAction,
+  type KitTrigger,
   type ListenMode,
   type NativeMidi,
   type SectionRequest,
@@ -29,7 +32,19 @@ import {
 } from '@midzer/audio-web';
 import { create } from 'zustand';
 import { enqueue, flushLive, live, resetLive } from './live';
-import { kitCommands, kitMap, parseKitSetup, qwertyToPiece, type KitSetup } from './drums/kit';
+import {
+  assignTrigger,
+  kitCommands,
+  kitMap,
+  parseKitSetup,
+  parseKitTriggers,
+  qwertyToPiece,
+  triggerCommands,
+  type KitSetup,
+  type KitTriggers,
+} from './drums/kit';
+import { pickProgression, progressionCommands } from './drums/progressions';
+import { COUNT_IN_OPTIONS, countInPieces, type CountInChoice } from './drums/stage';
 import { qwertyToNote } from './qwerty';
 import { isBuiltin, saveUserSong } from './songs/library';
 import { transcriptionMidi } from './songs/audio';
@@ -120,7 +135,24 @@ interface SessionState {
   kit: KitSetup;
   /** The built-in synth sounds the player's drums; off when the kit's own module does. */
   kitSound: boolean;
+  /** Which pieces count the band in for a drummer. */
+  countIn: CountInChoice;
+  /** Even count-in hits heard so far, 0–4. */
+  countInHits: number;
+  /** What the band's own drums play for a drummer. */
+  bandDrums: BandDrums;
+  /** Pads and pedals on the kit that control the band. */
+  kitTriggers: KitTriggers;
+  /** The progression loop a drummer jams over, by id; the style's first if it has none such. */
+  progression: string | null;
 }
+
+export const BAND_DRUMS_OPTIONS: { mode: BandDrums; label: string }[] = [
+  { mode: 'off', label: 'Off' },
+  { mode: 'percussion', label: 'Shaker' },
+  { mode: 'click', label: 'Click' },
+  { mode: 'full', label: 'Full kit' },
+];
 
 export const LISTEN_OPTIONS: { mode: ListenMode; label: string; hint: string }[] = [
   { mode: 'off', label: 'Off', hint: '' },
@@ -155,6 +187,10 @@ interface Prefs {
   instrument: Instrument;
   kit: KitSetup;
   kitSound: boolean;
+  countIn: CountInChoice;
+  bandDrums: BandDrums;
+  kitTriggers: KitTriggers;
+  progression: string | null;
 }
 
 function readPrefs(): Prefs {
@@ -168,6 +204,10 @@ function readPrefs(): Prefs {
     instrument: 'keys',
     kit: { preset: 'gm' },
     kitSound: false,
+    countIn: 'hiHat',
+    bandDrums: 'off',
+    kitTriggers: {},
+    progression: null,
   };
   try {
     const saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Partial<Prefs>;
@@ -180,15 +220,21 @@ function readPrefs(): Prefs {
     const instrument = saved.instrument === 'drums' ? 'drums' : 'keys';
     const kit = parseKitSetup(saved.kit);
     const kitSound = saved.kitSound === true;
-    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound };
+    const countIn = COUNT_IN_OPTIONS.some((o) => o.choice === saved.countIn) ? saved.countIn! : defaults.countIn;
+    const bandDrums = BAND_DRUMS_OPTIONS.some((o) => o.mode === saved.bandDrums) ? saved.bandDrums! : defaults.bandDrums;
+    const kitTriggers = parseKitTriggers(saved.kitTriggers);
+    const progression = typeof saved.progression === 'string' ? saved.progression : null;
+    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression };
   } catch {
     return defaults;
   }
 }
 
 function savePrefs(): void {
-  const { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound } = get();
-  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound };
+  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression } = get();
+  // With a song open the style belongs to the song; keep the Jam one.
+  const style = get().song ? readPrefs().style : get().style;
+  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression };
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch {
@@ -228,6 +274,7 @@ export const useSession = create<SessionState>(() => ({
     introPending: false,
     endingPending: false,
     follow: true,
+    cued: false,
     energy: 0.4,
   },
   idleMode: prefs.idleMode,
@@ -248,6 +295,11 @@ export const useSession = create<SessionState>(() => ({
   instrument: prefs.instrument,
   kit: prefs.kit,
   kitSound: prefs.kitSound,
+  countIn: prefs.countIn,
+  countInHits: 0,
+  bandDrums: prefs.bandDrums,
+  kitTriggers: prefs.kitTriggers,
+  progression: prefs.progression,
 }));
 
 const set = useSession.setState;
@@ -265,6 +317,7 @@ export function goTo(screen: Screen): void {
   const from = get().screen;
   if (SONG_SCREENS.includes(from) && screen !== from) closeSong(screen);
   else set({ screen });
+  syncJamHarmony();
 }
 
 export function setOnboardingStep(step: 0 | 1 | 2): void {
@@ -278,6 +331,7 @@ export function finishOnboarding(): void {
     // Private mode etc.: onboarding just shows again next time.
   }
   set({ screen: 'jam' });
+  syncJamHarmony();
 }
 
 // ---- Engine -----------------------------------------------------------------
@@ -300,11 +354,14 @@ export async function startAudio(): Promise<void> {
       engine = await startEngine('/wasm/midzer.wasm');
     }
     engine.onEvent(onEngineEvent);
-    const { bpm, volume, split, muted, style, idleMode, tempoFollow, instrument, kit, kitSound } = get();
+    const { bpm, volume, split, muted, style, idleMode, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers } = get();
     set({ outputLatencyMs: engine.outputLatencyMs });
+    engine.send({ type: 'setBandDrums', mode: bandDrums });
     engine.send({ type: 'setInstrument', instrument });
     for (const cmd of kitCommands(kitMap(kit))) engine.send(cmd);
+    for (const cmd of triggerCommands(kitTriggers)) engine.send(cmd);
     engine.send({ type: 'setKitSound', on: kitSound });
+    engine.send({ type: 'setCountIn', pieces: countInPieces(countIn) });
     engine.send({ type: 'setStyle', index: style });
     engine.send({ type: 'setTempoFollow', on: tempoFollow });
     engine.send({ type: 'setIdleMode', mode: idleMode });
@@ -314,6 +371,7 @@ export async function startAudio(): Promise<void> {
     engine.send({ type: 'setSplit', note: split });
     recorder = new Recorder(engine.sampleRate);
     syncSong();
+    syncJamHarmony();
     for (const [part, isMuted] of Object.entries(muted)) {
       if (isMuted) engine.send({ type: 'setMute', channel: BAND_CHANNELS[part as BandPart], muted: true });
     }
@@ -355,15 +413,23 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
       setTimeout(() => set({ bar: event.bar, beat: event.beat }), delay);
       break;
     case 'transport':
+      if (event.playing) live.timing.reset();
       setTimeout(
         () =>
           set({
             playing: event.playing,
             hasTake: recorder?.hasTake ?? false,
+            countInHits: 0,
             ...(event.playing ? {} : { songBar: null }),
           }),
         delay,
       );
+      break;
+    case 'timing':
+      live.timing.push(event.ms);
+      break;
+    case 'countIn':
+      set({ countInHits: event.hits });
       break;
     case 'songPosition':
       if (event.beat % 4 === 0) setTimeout(() => set({ songBar: event.beat / 4 }), delay);
@@ -430,8 +496,19 @@ function notifyInput(cmd: EngineCommand): void {
     for (const listener of drumInputListeners) listener(cmd.note, cmd.velocity);
   } else if (cmd.type === 'hiHatPedal') {
     live.hiHat = cmd.value;
+  } else if (cmd.type === 'controlChange') {
+    for (const listener of controlListeners) listener(cmd.cc, cmd.value);
   }
   if (!drums) notifyPlayer(cmd);
+}
+
+type ControlListener = (cc: number, value: number) => void;
+const controlListeners = new Set<ControlListener>();
+
+/** Calls `listener` with each MIDI controller change from a device. Returns an unsubscribe function. */
+export function onControlChange(listener: ControlListener): () => void {
+  controlListeners.add(listener);
+  return () => controlListeners.delete(listener);
 }
 
 type BeatListener = (bar: number, beat: number, timeMs: number) => void;
@@ -510,6 +587,7 @@ export function setStyle(index: number): void {
   }
   savePrefs();
   if (!playing) setTempo(style.bpm);
+  syncJamHarmony();
 }
 
 /** Intro, A/B/C, fill or ending. Choosing a variation stops following the player. */
@@ -581,10 +659,61 @@ export function setTempoFollow(on: boolean): void {
 // ---- Drums --------------------------------------------------------------------
 
 export function setInstrument(instrument: Instrument): void {
-  set({ instrument });
+  set({ instrument, countInHits: 0 });
   savePrefs();
   send({ type: 'setInstrument', instrument });
   resetLive();
+  syncJamHarmony();
+}
+
+/** Which pieces count the band in. */
+export function setCountIn(countIn: CountInChoice): void {
+  set({ countIn, countInHits: 0 });
+  savePrefs();
+  send({ type: 'setCountIn', pieces: countInPieces(countIn) });
+}
+
+/** What the band's own drums play while the player drums. */
+export function setBandDrums(mode: BandDrums): void {
+  set({ bandDrums: mode });
+  savePrefs();
+  send({ type: 'setBandDrums', mode });
+}
+
+/** Sets which pad or pedal does `action`; null clears it. */
+export function setKitTrigger(action: KitAction, trigger: KitTrigger | null): void {
+  const { triggers, commands } = assignTrigger(get().kitTriggers, action, trigger);
+  set({ kitTriggers: triggers });
+  savePrefs();
+  for (const cmd of commands) send(cmd);
+}
+
+/** The progression loop a drummer jams over in the current style. */
+export function currentProgression() {
+  return pickProgression(get().style, get().progression);
+}
+
+export function setProgression(id: string): void {
+  set({ progression: id });
+  savePrefs();
+  syncJamHarmony();
+}
+
+/**
+ * Drums form no chords, so in Jam a drummer plays over a progression loop
+ * through song mode; a keyboardist's own chords set the harmony. A song
+ * screen loads its own chart.
+ */
+function syncJamHarmony(): void {
+  const { screen, instrument, song, playing } = get();
+  if (song) return;
+  if (screen === 'jam' && instrument === 'drums') {
+    for (const cmd of progressionCommands(currentProgression())) send(cmd);
+    if (!playing) send({ type: 'songSeek', bar: 0 });
+    send({ type: 'setSong', on: true });
+  } else {
+    send({ type: 'setSong', on: false });
+  }
 }
 
 /** Uses a preset or a learned note map for the e-kit. */
@@ -693,6 +822,7 @@ export function closeSong(screen: Screen = 'songs'): void {
   set({ song: null, songDirty: false, songBar: null, loop: null, screen, style });
   send({ type: 'setStyle', index: style });
   setTempo(STYLES[style]!.bpm);
+  syncJamHarmony();
 }
 
 /** Changes the open song; the band hears the new chart from the next beat. */

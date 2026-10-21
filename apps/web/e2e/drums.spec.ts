@@ -116,3 +116,90 @@ test('a drummer: onboarding, computer pads, an e-kit and learning its notes', as
 
   expect(errors).toEqual([]);
 });
+
+test('a drummer leads the band: count-in, kit controls and a choke', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  await fakeKit(page);
+  await page.addInitScript(() => {
+    // Only on the first load, so a reload keeps what the test changed.
+    if (localStorage.getItem('midzer.onboarded')) return;
+    localStorage.setItem('midzer.onboarded', '1');
+    localStorage.setItem('midzer.prefs', JSON.stringify({ instrument: 'drums' }));
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Jam' }).click();
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeEnabled({ timeout: 30_000 });
+  const stage = page.locator('.drum-stage');
+  await expect(stage.getByText('Count in on the hi-hat: four even hits')).toBeVisible();
+  await expect(stage.locator('.stage-chord .stage-big')).toHaveText('C');
+
+  // The chords come from a progression loop.
+  await page.getByLabel('Chords').selectOption({ label: 'Minor turn · vi–IV–I–V in C' });
+  await expect(stage.locator('.stage-chord .stage-big')).toHaveText('Am');
+  await expect(stage.getByText('Next F')).toBeVisible();
+  if (SHOTS) {
+    await page.screenshot({ path: `${SHOTS}/drums-3-count-in.png` });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: `${SHOTS}/drums-3-phone.png`, fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 900 });
+  }
+
+  // Four even hi-hats at 120 BPM start the band at that tempo. Timers can
+  // run late on a loaded machine, so a ragged count-in is tried again.
+  const stop = page.getByRole('button', { name: 'Stop', exact: true });
+  for (let attempt = 0; attempt < 3 && !(await stop.isVisible()); attempt++) {
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          [0, 500, 1000, 1500].forEach((t, i) =>
+            setTimeout(() => {
+              window.kitSend([0x99, 42, 80]);
+              if (i === 3) resolve();
+            }, t),
+          ),
+        ),
+    );
+    await stop.waitFor({ timeout: 2_500 }).catch(() => page.waitForTimeout(2_100));
+  }
+  await expect(stop).toBeVisible();
+  const bpm = Number(await stage.locator('.stage-tempo .stage-big').textContent());
+  expect(bpm).toBeGreaterThanOrEqual(115);
+  expect(bpm).toBeLessThanOrEqual(125);
+  await expect(stage.getByText('BPM · following you')).toBeVisible();
+
+  // Every timekeeping hit moves the timing meter.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        [36, 42, 38, 42, 36, 42].forEach((note, i) => setTimeout(() => window.kitSend([0x99, note, 100]), i * 250));
+        setTimeout(resolve, 1400);
+      }),
+  );
+  await expect(page.getByTestId('timing')).toHaveText(/Rushing|Dragging|In the pocket/, { timeout: 3_000 });
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/drums-3-stage.png` });
+
+  // A foot switch set to "next section" takes the band from A to B.
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Assign Next section' }).click();
+  // The snare plays a drum, so it isn't taken; the switch is.
+  await page.evaluate(() => [[0x99, 38, 100], [0xb9, 64, 127]].forEach(window.kitSend));
+  await expect(page.getByText('Pedal or switch · CC 64')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => [[0xb9, 64, 0], [0xb9, 64, 127]].forEach(window.kitSend));
+  await expect(page.getByTestId('stage-section')).toHaveText(/^B$/, { timeout: 6_000 });
+
+  // Grabbing the crash stops the band.
+  await page.evaluate(() => window.kitSend([0xa9, 49, 127]));
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
+
+  // The controls are remembered.
+  await page.reload();
+  await page.getByRole('button', { name: 'Jam' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByText('Pedal or switch · CC 64')).toBeVisible();
+
+  expect(errors).toEqual([]);
+});

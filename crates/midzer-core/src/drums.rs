@@ -67,6 +67,25 @@ impl Piece {
         Self::ALL.get(index).copied()
     }
 
+    /// Cymbals, which a drummer can grab to choke.
+    pub fn is_cymbal(self) -> bool {
+        matches!(self, Piece::Crash | Piece::Crash2 | Piece::Ride | Piece::RideBell | Piece::Splash | Piece::China)
+    }
+
+    /// Accent cymbals: what marks the 1 after a fill.
+    pub fn is_crash(self) -> bool {
+        matches!(self, Piece::Crash | Piece::Crash2 | Piece::Splash | Piece::China)
+    }
+
+    pub fn is_tom(self) -> bool {
+        matches!(self, Piece::Tom1 | Piece::Tom2 | Piece::Tom3 | Piece::Tom4)
+    }
+
+    /// A bit per piece, for sets of pieces.
+    pub fn bit(self) -> u32 {
+        1 << self.index()
+    }
+
     /// The General MIDI drum key the piece sounds and is reported as.
     pub fn note(self) -> u8 {
         match self {
@@ -88,6 +107,65 @@ impl Piece {
             Piece::Splash => 55,
             Piece::China => 52,
         }
+    }
+}
+
+/// What a spare pad or a foot switch on the kit can do to the band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KitAction {
+    /// The next variation (A, B, C, then A again), with a fill into it.
+    NextSection,
+    Fill,
+    Ending,
+    /// Starts the band at once, or stops it.
+    StartStop,
+}
+
+impl KitAction {
+    pub const ALL: [KitAction; 4] = [KitAction::NextSection, KitAction::Fill, KitAction::Ending, KitAction::StartStop];
+}
+
+/// What sets off a [`KitAction`]: a note from a pad, or a controller such as
+/// a foot switch, which fires when it goes from below 64 to 64 or above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    Note(u8),
+    Control(u8),
+}
+
+/// The kit's trigger assignments. A note assigned here plays no piece.
+#[derive(Debug, Clone)]
+pub struct Triggers {
+    notes: [Option<KitAction>; 128],
+    controls: [Option<KitAction>; 128],
+    /// Whether each controller is at 64 or above.
+    down: [bool; 128],
+}
+
+impl Default for Triggers {
+    fn default() -> Self {
+        Self { notes: [None; 128], controls: [None; 128], down: [false; 128] }
+    }
+}
+
+impl Triggers {
+    pub fn set(&mut self, trigger: Trigger, action: Option<KitAction>) {
+        match trigger {
+            Trigger::Note(n) if n < 128 => self.notes[n as usize] = action,
+            Trigger::Control(c) if c < 128 => self.controls[c as usize] = action,
+            _ => {}
+        }
+    }
+
+    pub fn note(&self, note: u8) -> Option<KitAction> {
+        self.notes.get(note as usize).copied().flatten()
+    }
+
+    /// The action a controller change fires, on its rising edge only.
+    pub fn control(&mut self, cc: u8, value: u8) -> Option<KitAction> {
+        let down = self.down.get_mut(cc as usize)?;
+        let was = std::mem::replace(down, value >= 64);
+        if *down && !was { self.controls[cc as usize] } else { None }
     }
 }
 
@@ -135,6 +213,22 @@ mod tests {
             assert!(Piece::ALL.iter().filter(|p| p.note() == piece.note()).count() == 1, "{piece:?}");
         }
         assert_eq!(Piece::from_index(Piece::COUNT), None);
+    }
+
+    #[test]
+    fn triggers_fire_on_notes_and_rising_controllers() {
+        let mut t = Triggers::default();
+        t.set(Trigger::Note(60), Some(KitAction::Fill));
+        t.set(Trigger::Control(64), Some(KitAction::NextSection));
+        assert_eq!(t.note(60), Some(KitAction::Fill));
+        assert_eq!(t.note(61), None);
+        assert_eq!(t.control(64, 127), Some(KitAction::NextSection));
+        assert_eq!(t.control(64, 100), None, "still held");
+        assert_eq!(t.control(64, 0), None);
+        assert_eq!(t.control(64, 90), Some(KitAction::NextSection));
+        assert_eq!(t.control(65, 127), None);
+        t.set(Trigger::Note(60), None);
+        assert_eq!(t.note(60), None);
     }
 
     #[test]

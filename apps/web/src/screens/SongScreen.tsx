@@ -3,6 +3,7 @@ import { ChartView, type Selection } from '../components/ChartView';
 import { BandMutes, EnergyControl, PlayButton, TakeButton, TempoControl } from '../components/ControlPanel';
 import { Keyboard } from '../components/Keyboard';
 import { KitView } from '../components/KitView';
+import { TimingBar } from '../components/DrummerStage';
 import { TopBar } from '../components/TopBar';
 import {
   closeSong,
@@ -54,6 +55,7 @@ export function SongScreen() {
       <main className="jam-main">
         <div className="song-stage">
           <NowPlaying song={song} />
+          {drums && <DrumTiming />}
           {notes.length > 0 && (
             <p className="notice" role="status">
               {notes.join(' ')}
@@ -84,6 +86,12 @@ export function SongScreen() {
       {drums ? <KitView /> : <Keyboard split={split} />}
     </div>
   );
+}
+
+/** How a drummer's hits sit against the band while the song plays. */
+function DrumTiming() {
+  const playing = useSession((s) => s.playing);
+  return <section className="panel song-timing">{playing ? <TimingBar /> : <p className="setting-note">Count in, or press Play: the band follows your tempo.</p>}</section>;
 }
 
 function Chart(props: { song: Song; editing: boolean; selection: Selection | null; onSelect: (bar: number, extend: boolean) => void }) {

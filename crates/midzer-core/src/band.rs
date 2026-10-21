@@ -3,9 +3,14 @@
 
 use crate::chord::Chord;
 use crate::conductor::{Conductor, IdleMode, Request, Section};
+use crate::drummer::{FillDetector, keeps_time, time_weight};
+use crate::drums::Piece;
 use crate::event::{BandState, DRUM_CHANNEL, EngineEvent, EventBuffer};
 use crate::song::{Slot, SongPlayer};
-use crate::style::{BEATS_PER_BAR, CRASH, Hit, PPQ, Part, PartKind, Pattern, Step, Style, TICKS_PER_BAR, WOOD_BLOCK, styles};
+use crate::style::{
+    BEATS_PER_BAR, CRASH, HAT, Hit, OPEN_HAT, PPQ, Part, PartKind, Pattern, RIDE, SHAKER, SIDE_STICK, SNARE, Step, Style, TAMBOURINE,
+    TICKS_PER_BAR, WOOD_BLOCK, styles,
+};
 use crate::voicing::{Voicing, bass_note, voice_near};
 
 const MAX_SOUNDING: usize = 64;
@@ -15,10 +20,20 @@ const KEYS_HOME: f32 = 64.0;
 const PAD_HOME: f32 = 60.0;
 /// Human slack on top of the measured latency when latching a late chord.
 const LATE_SLACK_MS: f32 = 60.0;
-/// Tempo follow: how far the band may drift from the set tempo, and what counts
-/// as one attack (a chord's notes come within this many seconds).
-const TEMPO_FOLLOW_RANGE: f32 = 0.15;
+/// Tempo follow: what counts as one attack (a chord's notes come within this
+/// many seconds).
 const ONSET_MERGE_S: f64 = 0.05;
+/// How far the band may drift from the set tempo, and how fast it moves.
+#[derive(Clone, Copy)]
+struct FollowProfile {
+    range: f32,
+    gain: f32,
+}
+const KEYS_FOLLOW: FollowProfile = FollowProfile { range: 0.15, gain: 0.3 };
+/// A drummer owns the time: a wider range and a quicker response.
+const DRUMS_FOLLOW: FollowProfile = FollowProfile { range: 0.25, gain: 0.45 };
+/// A crash this close to a bar line counts as on its 1.
+const CRASH_WINDOW: f64 = PPQ as f64 / 4.0;
 /// Tempo follow reports a new tempo to the UI once it moved this much.
 const TEMPO_REPORT_STEP: f32 = 0.5;
 
@@ -35,6 +50,22 @@ struct TempoFollow {
     /// Smoothed timing error in beats; negative when the player is early.
     phase: f32,
     reported_bpm: f32,
+}
+
+/// What the band's own drums play.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BandDrums {
+    #[default]
+    Full,
+    Off,
+    /// Shaker and tambourine along the style's groove.
+    Percussion,
+    /// A wood block on every beat.
+    Click,
+}
+
+impl BandDrums {
+    pub const ALL: [BandDrums; 4] = [BandDrums::Full, BandDrums::Off, BandDrums::Percussion, BandDrums::Click];
 }
 
 #[derive(Clone, Copy, Default)]
@@ -87,6 +118,15 @@ pub struct Band {
     /// The band tick of the song beat playing, and that song beat.
     song_beat: Option<(f64, u32)>,
     tempo: TempoFollow,
+    /// A drummer leads: tempo follow is always on and tuned for drums, and
+    /// fills move the band on.
+    drummer: bool,
+    drum_layer: BandDrums,
+    fills: FillDetector,
+    /// The band tick the drummer's last crash was meant for.
+    last_crash: Option<f64>,
+    /// While a fill is cued: the latest band tick a crash still takes it.
+    cue_deadline: Option<f64>,
 }
 
 /// Converts song positions within the current block to frame offsets.
@@ -142,6 +182,11 @@ impl Band {
             hold: None,
             song_beat: None,
             tempo: TempoFollow { base_bpm: style.default_bpm, player_bpm: style.default_bpm, reported_bpm: style.default_bpm, ..TempoFollow::default() },
+            drummer: false,
+            drum_layer: BandDrums::Full,
+            fills: FillDetector::default(),
+            last_crash: None,
+            cue_deadline: None,
         }
     }
 
@@ -182,20 +227,53 @@ impl Band {
         }
     }
 
+    /// A drummer leads the band, or no longer does. Without the tempo follow
+    /// setting the band goes back to the set tempo.
+    pub fn set_drummer(&mut self, on: bool, out: &mut EventBuffer) {
+        if on == self.drummer {
+            return;
+        }
+        self.drummer = on;
+        self.conductor.set_drummer(on);
+        self.fills.reset();
+        if !on && !self.tempo.on {
+            self.set_tempo_follow(false, out);
+        }
+        self.publish(0, out);
+    }
+
+    pub fn set_drum_layer(&mut self, layer: BandDrums, out: &mut EventBuffer) {
+        if layer != self.drum_layer {
+            self.drum_layer = layer;
+            self.release_all(|ch| ch == DRUM_CHANNEL, 0, out);
+        }
+    }
+
     /// The player attacked a note or strum, `late_ms` after it was played on
     /// top of the usual latency. With tempo follow on, attacks near the
     /// eighth-note grid pull the tempo towards the player's.
     pub fn onset(&mut self, late_ms: f32) {
-        if !self.tempo.on || !self.playing || self.hold.is_some() || self.click {
+        self.follow_onset(late_ms, (1.0, 1.0));
+    }
+
+    /// Tempo follow from one attack, weighted by how much it tells about the
+    /// tempo: `weight.0` on a beat, `weight.1` between beats.
+    fn follow_onset(&mut self, late_ms: f32, weight: (f32, f32)) {
+        if !(self.tempo.on || self.drummer) || !self.playing || self.hold.is_some() || self.click {
             return;
         }
+        let profile = if self.drummer { DRUMS_FOLLOW } else { KEYS_FOLLOW };
         let late_s = ((self.latency_ms + late_ms) / 1000.0) as f64;
         let seconds = self.frame as f64 / self.sample_rate as f64 - late_s;
         let tick = self.clock(1).tick_at(self.frame) - late_s * self.ticks_per_second();
         let grid = PPQ as f64 / 2.0;
         let nearest = (tick / grid).round() * grid;
         let error = tick - nearest;
+        let w = if nearest % PPQ as f64 == 0.0 { weight.0 } else { weight.1 };
         let t = &mut self.tempo;
+        if w <= 0.0 {
+            return;
+        }
         if let Some((last_s, _)) = t.last
             && seconds - last_s < ONSET_MERGE_S
         {
@@ -204,23 +282,67 @@ impl Band {
         if error.abs() > grid * 0.3 {
             return;
         }
+        let gain = profile.gain * w;
         if let Some((last_s, last_tick)) = t.last {
             let beats = (nearest - last_tick) / PPQ as f64;
             let dt = seconds - last_s;
             if beats >= 0.5 && (0.15..=2.5).contains(&dt) {
                 let heard = (60.0 * beats / dt) as f32;
                 if (heard / self.bpm - 1.0).abs() < 0.25 {
-                    t.player_bpm += 0.3 * (heard - t.player_bpm);
+                    t.player_bpm += gain * (heard - t.player_bpm);
                 }
             }
         }
         t.last = Some((seconds, nearest));
-        t.phase += 0.3 * ((error / PPQ as f64) as f32 - t.phase);
+        t.phase += gain * ((error / PPQ as f64) as f32 - t.phase);
         // Match the player's tempo, a little faster while they are ahead.
         let target = t.player_bpm * (1.0 - 0.5 * t.phase);
-        let (lo, hi) = (t.base_bpm * (1.0 - TEMPO_FOLLOW_RANGE), t.base_bpm * (1.0 + TEMPO_FOLLOW_RANGE));
-        let bpm = (self.bpm + 0.5 * (target - self.bpm)).clamp(lo, hi);
+        let (lo, hi) = (t.base_bpm * (1.0 - profile.range), t.base_bpm * (1.0 + profile.range));
+        let bpm = (self.bpm + 0.5 * w * (target - self.bpm)).clamp(lo, hi);
         self.retime(bpm);
+    }
+
+    /// The drummer hit `piece`. Reports how far off the band's grid it was,
+    /// listens for fills and the crash that confirms one, and follows the tempo.
+    pub fn drum_hit(&mut self, piece: Piece, velocity: u8, out: &mut EventBuffer) {
+        if !self.playing || self.hold.is_some() || self.click {
+            return;
+        }
+        let clock = self.clock(1);
+        let now = clock.tick_at(self.frame);
+        let tick = now - self.latency_ms as f64 / 1000.0 * self.ticks_per_second();
+        if keeps_time(piece, velocity) {
+            // Sixteenths, or triplets in a shuffle.
+            let grid = PPQ as f64 / if self.style.swung() { 3.0 } else { 4.0 };
+            let error = tick - (tick / grid).round() * grid;
+            out.push(0, EngineEvent::Timing { ms: (error / self.ticks_per_second() * 1000.0) as f32 });
+        }
+        let bar = (tick / TICKS_PER_BAR as f64).floor();
+        // In a song the chart has the sections; a fill there is only a fill.
+        if self.fills.hit(piece, velocity, bar as i64, tick - bar * TICKS_PER_BAR as f64) && !self.song.active() {
+            self.conductor.cue_next();
+            self.publish(0, out);
+        }
+        if piece.is_crash() {
+            self.last_crash = Some(tick);
+            if self.conductor.cued() && self.cue_deadline.is_some_and(|d| tick <= d) {
+                // Just after the 1: the band changes now.
+                self.cue_deadline = None;
+                self.conductor.take_cue();
+                self.restrike(now, &clock, out);
+                self.publish(0, out);
+            }
+        }
+        let weight = if self.fills.in_fill(bar as i64) { (0.0, 0.0) } else { time_weight(piece, velocity) };
+        self.follow_onset(0.0, weight);
+    }
+
+    /// Starts the band at `bpm`, from a count-in.
+    pub fn start_counted(&mut self, bpm: f32, out: &mut EventBuffer) {
+        self.set_tempo(bpm);
+        self.tempo.reported_bpm = self.bpm;
+        out.push(0, EngineEvent::Tempo { bpm: self.bpm });
+        self.play(out);
     }
 
     #[cfg(test)]
@@ -254,7 +376,9 @@ impl Band {
 
     /// Switches style now while stopped, or on the next bar line while playing.
     pub fn set_style(&mut self, index: u8, out: &mut EventBuffer) {
-        let Some(style) = styles().get(index as usize) else { return };
+        let Some(style) = styles().get(index as usize) else {
+            return;
+        };
         if self.playing {
             self.pending_style = (index != self.style_index).then_some(index);
         } else {
@@ -290,6 +414,15 @@ impl Band {
 
     pub fn set_latency(&mut self, ms: f32) {
         self.latency_ms = ms.clamp(0.0, 500.0);
+    }
+
+    pub fn latency_ms(&self) -> f32 {
+        self.latency_ms
+    }
+
+    /// The variation a "next section" control moves to.
+    pub fn next_section(&self) -> u8 {
+        self.conductor.following_variation()
     }
 
     pub fn set_click(&mut self, on: bool, out: &mut EventBuffer) {
@@ -384,6 +517,9 @@ impl Band {
         self.song_beat = None;
         self.tempo.last = None;
         self.tempo.phase = 0.0;
+        self.fills.reset();
+        self.last_crash = None;
+        self.cue_deadline = None;
         let mut intro = intro;
         if self.song.active() {
             let (song_intro, variation) = self.song.start();
@@ -508,10 +644,13 @@ impl Band {
             out.push(frame, EngineEvent::Tempo { bpm: self.bpm });
         }
 
+        let velocity = if beat_in_bar == 0 { 120 } else { 90 };
         if self.click {
-            let velocity = if beat_in_bar == 0 { 120 } else { 90 };
             self.note_on(DRUM_CHANNEL, WOOD_BLOCK, velocity, tick, tick + PPQ as f64 / 4.0, frame, out);
             return;
+        }
+        if self.drum_layer == BandDrums::Click && self.muted & (1 << DRUM_CHANNEL) == 0 {
+            self.note_on(DRUM_CHANNEL, WOOD_BLOCK, self.scale(velocity), tick, tick + PPQ as f64 / 4.0, frame, out);
         }
 
         let before = self.conductor.section();
@@ -543,7 +682,8 @@ impl Band {
                 self.conductor.request(request, true);
             }
         }
-        if cue.crash && self.muted & (1 << DRUM_CHANNEL) == 0 {
+        self.check_cue(beat_in_bar, tick);
+        if cue.crash && self.drum_layer == BandDrums::Full && self.muted & (1 << DRUM_CHANNEL) == 0 {
             self.note_on(DRUM_CHANNEL, CRASH, self.scale(110), tick, tick + PPQ as f64, frame, out);
         }
 
@@ -553,13 +693,34 @@ impl Band {
         self.publish(frame, out);
     }
 
-    /// Applies the pending chord at `tick`: cuts the harmony that no longer
-    /// fits and re-strikes notes the pattern still holds at that point.
-    /// Steps starting exactly at `tick` are left to the regular schedule.
+    /// A cued fill on the 1: a crash just before the bar line takes it now;
+    /// otherwise one may still come a little after it, until the next beat.
+    fn check_cue(&mut self, beat_in_bar: u8, tick: f64) {
+        if !self.conductor.cued() {
+            self.cue_deadline = None;
+        } else if beat_in_bar == 0 {
+            if self.last_crash.is_some_and(|t| t >= tick - CRASH_WINDOW && t <= tick) {
+                self.conductor.take_cue();
+            } else {
+                self.cue_deadline = Some(tick + CRASH_WINDOW);
+            }
+        } else if self.cue_deadline.take().is_some() {
+            self.conductor.drop_cue();
+        }
+    }
+
+    /// Applies the pending chord at `tick`.
     fn change_chord(&mut self, tick: f64, clock: &BlockClock, out: &mut EventBuffer) {
         self.chord = self.pending;
+        out.push(clock.frame(tick), EngineEvent::ChordChanged(self.chord));
+        self.restrike(tick, clock, out);
+    }
+
+    /// Cuts the harmony at `tick` and re-strikes the notes the patterns still
+    /// hold there, for a new chord or variation. Steps starting exactly at
+    /// `tick` are left to the regular schedule.
+    fn restrike(&mut self, tick: f64, clock: &BlockClock, out: &mut EventBuffer) {
         let frame = clock.frame(tick);
-        out.push(frame, EngineEvent::ChordChanged(self.chord));
         let style = self.style;
         let harmonic = |ch: u8| style.parts.iter().any(|p| p.kind != PartKind::Drums && p.channel == ch);
         self.release_all(harmonic, frame, out);
@@ -567,7 +728,9 @@ impl Band {
         let bar = (tick / TICKS_PER_BAR as f64).floor();
         let bar_tick = bar * TICKS_PER_BAR as f64;
         for part in style.parts.iter().filter(|p| p.kind != PartKind::Drums) {
-            let Some(pattern) = self.pattern(part) else { continue };
+            let Some(pattern) = self.pattern(part) else {
+                continue;
+            };
             for step in pattern.bar(bar as u64) {
                 let (on, off) = (bar_tick + step.tick as f64, bar_tick + (step.tick + step.dur) as f64);
                 if on < tick && off > tick + 1.0 {
@@ -598,7 +761,9 @@ impl Band {
         for bar in first_bar..last_bar {
             let bar_tick = (bar * TICKS_PER_BAR as u64) as f64;
             for part in &style.parts {
-                let Some(pattern) = self.pattern(part) else { continue };
+                let Some(pattern) = self.pattern(part) else {
+                    continue;
+                };
                 for step in pattern.bar(bar) {
                     let tick = bar_tick + step.tick as f64;
                     if tick >= from && tick < to {
@@ -633,7 +798,11 @@ impl Band {
         let frame = clock.frame(tick);
         let velocity = self.scale(step.velocity);
         match (step.hit, self.chord) {
-            (Hit::Drum(key), _) => self.note_on(part.channel, key, velocity, tick, off_tick, frame, out),
+            (Hit::Drum(key), _) => {
+                if let Some((key, velocity)) = self.layer_drum(key, velocity) {
+                    self.note_on(part.channel, key, velocity, tick, off_tick, frame, out);
+                }
+            }
             (Hit::Bass(tone), Some(chord)) => {
                 let key = bass_note(&chord, tone);
                 self.note_on(part.channel, key, velocity, tick, off_tick, frame, out);
@@ -657,6 +826,26 @@ impl Band {
             }
             // Harmonic parts wait for the first chord.
             (_, None) => {}
+        }
+    }
+
+    /// What the band's drum layer plays for a drum step of the style.
+    fn layer_drum(&self, key: u8, velocity: u8) -> Option<(u8, u8)> {
+        /// The GM pedal hi-hat, rim shot and ride bell.
+        const PEDAL_HAT: u8 = 44;
+        const RIM: u8 = 40;
+        const RIDE_BELL: u8 = 53;
+        match self.drum_layer {
+            BandDrums::Full => Some((key, velocity)),
+            BandDrums::Off | BandDrums::Click => None,
+            BandDrums::Percussion => {
+                let key = match key {
+                    HAT | OPEN_HAT | PEDAL_HAT | RIDE | RIDE_BELL | SHAKER => SHAKER,
+                    SNARE | RIM | SIDE_STICK | TAMBOURINE => TAMBOURINE,
+                    _ => return None,
+                };
+                Some((key, (velocity as u16 * 3 / 4).max(1) as u8))
+            }
         }
     }
 
@@ -721,6 +910,7 @@ impl Band {
             intro_pending: c.intro_pending(),
             ending_pending: c.ending_pending(),
             follow: c.follows(),
+            cued: c.cued(),
             energy: (c.energy() * 255.0).round() as u8,
         }
     }

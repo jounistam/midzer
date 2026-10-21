@@ -48,6 +48,16 @@ describe('encodeCommand', () => {
     expect(encodeCommand({ type: 'setKitSound', on: true })).toEqual([32, 1, 0, 0]);
   });
 
+  it('encodes drummer mode like command.rs', () => {
+    expect(encodeCommand({ type: 'setCountIn', pieces: ['hiHatClosed', 'sideStick'] })).toEqual([33, (1 << 4) | (1 << 3), 0, 0]);
+    expect(encodeCommand({ type: 'setCountIn', pieces: [] })).toEqual([33, 0, 0, 0]);
+    expect(encodeCommand({ type: 'setBandDrums', mode: 'percussion' })).toEqual([34, 2, 0, 0]);
+    expect(encodeCommand({ type: 'kitTrigger', trigger: { kind: 'note', number: 60 }, action: 'nextSection' })).toEqual([35, 0, 60, 1]);
+    expect(encodeCommand({ type: 'kitTrigger', trigger: { kind: 'control', number: 64 }, action: 'startStop' })).toEqual([35, 1, 64, 4]);
+    expect(encodeCommand({ type: 'kitTrigger', trigger: { kind: 'control', number: 64 }, action: null })).toEqual([35, 1, 64, 0]);
+    expect(encodeCommand({ type: 'controlChange', cc: 64, value: 127 })).toEqual([36, 64, 127, 0]);
+  });
+
   it('knows each piece by its General MIDI key', () => {
     expect(DRUM_PIECES).toHaveLength(17);
     expect(new Set(DRUM_PIECES.map((p) => p.note)).size).toBe(17);
@@ -98,9 +108,17 @@ describe('decodeEvent', () => {
         introPending: true,
         endingPending: true,
         follow: true,
+        cued: false,
         energy: 200 / 255,
       },
     });
+    expect(decodeEvent(7, a, b | (32 << 8), 5)).toMatchObject({ state: { cued: true } });
+  });
+
+  it('decodes drummer events', () => {
+    const [, bits] = encodeCommand({ type: 'setTempo', bpm: -12.5 });
+    expect(decodeEvent(12, bits, 0, 1)).toEqual({ type: 'timing', ms: -12.5, frame: 1 });
+    expect(decodeEvent(13, 3, 0, 2)).toEqual({ type: 'countIn', hits: 3, frame: 2 });
   });
 
   it('decodes song positions', () => {
@@ -145,7 +163,8 @@ describe('midiToCommand', () => {
 
   it('maps all-notes-off and ignores the rest', () => {
     expect(midiToCommand([0xb0, 123, 0])).toEqual({ type: 'allNotesOff' });
-    expect(midiToCommand([0xb0, 7, 100])).toBeNull();
+    expect(midiToCommand([0xb0, 7, 100])).toEqual({ type: 'controlChange', cc: 7, value: 100 });
+    expect(midiToCommand([0xb0, 121, 0])).toBeNull();
     expect(midiToCommand([0xf8])).toBeNull(); // clock
   });
 });

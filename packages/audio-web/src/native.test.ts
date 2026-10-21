@@ -18,6 +18,7 @@ describe('native host', () => {
       { type: 'drumNote', note: 38, velocity: 120 },
       { type: 'hiHatPedal', value: 90 },
       { type: 'drumChoke', note: 49 },
+      { type: 'controlChange', cc: 64, value: 127 },
     ] as const) {
       const [op, a, b] = encodeCommand(cmd);
       expect(decodeInputCommand(op, a, b)).toEqual(cmd);

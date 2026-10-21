@@ -5,6 +5,7 @@
 // latency), so they are queued and applied at their `timeMs`.
 
 import { DRUM_PIECES, MIC_CHANNEL, partOfChannel, type TimedEvent } from '@midzer/audio-web';
+import { TimingMeter } from './drums/stage';
 
 const PIECE_OF_NOTE = new Map<number, number>(DRUM_PIECES.map((p, i) => [p.note, i]));
 
@@ -21,6 +22,8 @@ export const live = {
   drumVelocity: new Uint8Array(DRUM_PIECES.length),
   /** The hi-hat pedal (MIDI CC 4) as the kit last sent it, -1 before it has. */
   hiHat: -1,
+  /** How far a drummer's hits land off the band's grid, smoothed. */
+  timing: new TimingMeter(),
   /** Microphone loudness 0..1 and the note it hears (-1 none), for the meter. */
   mic: { level: 0, key: -1 },
   /** Bumped on every change so renderers can skip unchanged frames. */

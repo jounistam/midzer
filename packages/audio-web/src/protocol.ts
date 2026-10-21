@@ -38,6 +38,10 @@ const Cmd = {
   HiHatPedal: 30,
   DrumChoke: 31,
   SetKitSound: 32,
+  SetCountIn: 33,
+  SetBandDrums: 34,
+  KitTrigger: 35,
+  ControlChange: 36,
 } as const;
 
 /** Ticks per beat in song positions; mirrors `PPQ` in style.rs. */
@@ -97,6 +101,22 @@ export const DRUM_PIECES = [
 ] as const;
 export type DrumPiece = (typeof DRUM_PIECES)[number]['id'];
 const PIECE_INDEX = new Map<DrumPiece, number>(DRUM_PIECES.map((p, i) => [p.id, i]));
+
+/** What the band's own drums play for a drummer; mirrors `BandDrums::ALL` in band.rs. */
+export type BandDrums = 'full' | 'off' | 'percussion' | 'click';
+const BAND_DRUMS: readonly BandDrums[] = ['full', 'off', 'percussion', 'click'];
+
+/** What a spare pad or foot switch does; mirrors `KitAction::ALL` in drums.rs. */
+export type KitAction = 'nextSection' | 'fill' | 'ending' | 'startStop';
+export const KIT_ACTIONS: readonly KitAction[] = ['nextSection', 'fill', 'ending', 'startStop'];
+
+/** A pad note or a MIDI controller (a foot switch) on the kit; mirrors `Trigger` in drums.rs. */
+export type KitTrigger = { kind: 'note'; number: number } | { kind: 'control'; number: number };
+
+/** A set of pieces as the engine's bit set (`Piece::bit`). */
+export function pieceBits(pieces: readonly DrumPiece[]): number {
+  return pieces.reduce((bits, p) => bits | (1 << PIECE_INDEX.get(p)!), 0);
+}
 
 /** The piece a player drum event's key stands for. */
 export function pieceOfNote(note: number): DrumPiece | null {
@@ -167,7 +187,15 @@ export type EngineCommand =
   /** A cymbal grabbed to stop it ringing. */
   | { type: 'drumChoke'; note: number }
   /** Whether the built-in synth sounds the player's drums. */
-  | { type: 'setKitSound'; on: boolean };
+  | { type: 'setKitSound'; on: boolean }
+  /** Drummer mode: four even hits on one of these pieces count the band in; empty turns it off. */
+  | { type: 'setCountIn'; pieces: DrumPiece[] }
+  /** What the band's own drums play when the player plays drums. */
+  | { type: 'setBandDrums'; mode: BandDrums }
+  /** What a pad note or controller on the kit does; null clears it. */
+  | { type: 'kitTrigger'; trigger: KitTrigger; action: KitAction | null }
+  /** A MIDI controller change, for kit triggers such as a foot switch. */
+  | { type: 'controlChange'; cc: number; value: number };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -251,6 +279,19 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.DrumChoke, cmd.note, 0, 0];
     case 'setKitSound':
       return [Cmd.SetKitSound, cmd.on ? 1 : 0, 0, 0];
+    case 'setCountIn':
+      return [Cmd.SetCountIn, pieceBits(cmd.pieces), 0, 0];
+    case 'setBandDrums':
+      return [Cmd.SetBandDrums, BAND_DRUMS.indexOf(cmd.mode), 0, 0];
+    case 'kitTrigger':
+      return [
+        Cmd.KitTrigger,
+        cmd.trigger.kind === 'note' ? 0 : 1,
+        cmd.trigger.number,
+        cmd.action === null ? 0 : KIT_ACTIONS.indexOf(cmd.action) + 1,
+      ];
+    case 'controlChange':
+      return [Cmd.ControlChange, cmd.cc, cmd.value, 0];
   }
 }
 
@@ -297,6 +338,8 @@ export interface BandState {
   introPending: boolean;
   endingPending: boolean;
   follow: boolean;
+  /** The drummer filled into `nextVariation`; a crash on the 1 takes it. */
+  cued: boolean;
   /** 0..1 */
   energy: number;
 }
@@ -316,7 +359,11 @@ export type EngineEvent =
   /** Microphone loudness 0..1 (over -80..0 dBFS) and the note it hears, a few times a second. */
   | { type: 'input'; level: number; key: number | null }
   /** Tempo follow moved the tempo, or turning it off restored it. */
-  | { type: 'tempo'; bpm: number };
+  | { type: 'tempo'; bpm: number }
+  /** A drummer's hit was this many ms off the band's grid; negative is early. */
+  | { type: 'timing'; ms: number }
+  /** Evenly spaced count-in hits so far; 0 when a count-in starts over. */
+  | { type: 'countIn'; hits: number };
 
 /** An event plus the AudioContext frame at which it sounds. */
 export type TimedEvent = EngineEvent & { frame: number };
@@ -363,6 +410,7 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
         endingPending: (flags & 4) !== 0,
         follow: (flags & 8) !== 0,
         introPending: (flags & 16) !== 0,
+        cued: (flags & 32) !== 0,
         energy: ((b >> 16) & 0xff) / 255,
       };
       return { type: 'band', state, frame };
@@ -375,6 +423,10 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
       return { type: 'input', level: a / 255, key: b === NO_KEY ? null : b, frame };
     case 11:
       return { type: 'tempo', bpm: bitsFloat(a), frame };
+    case 12:
+      return { type: 'timing', ms: bitsFloat(a), frame };
+    case 13:
+      return { type: 'countIn', hits: a, frame };
     default:
       return null;
   }

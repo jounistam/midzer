@@ -4,7 +4,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use midzer_core::{Chord, Command, IdleMode, Instrument, ListenMode, Piece, Quality, Request, Slot};
+use midzer_core::{BandDrums, Chord, Command, IdleMode, Instrument, KitAction, ListenMode, Piece, Quality, Request, Slot, Trigger};
 use midzer_wasm::{BLOCK_FRAMES, Host};
 
 struct CountingAlloc;
@@ -153,6 +153,46 @@ fn playing_band_renders_without_allocating() {
     }
     command(&mut host, Command::Stop);
     host.process(BLOCK_FRAMES);
+
+    // Drummer mode: a count-in, then a groove with fills and crashes over
+    // each drum layer, kit triggers and a choke that stops the band.
+    command(&mut host, Command::SetCountIn { pieces: Piece::HiHatClosed.bit() });
+    command(&mut host, Command::KitTrigger { trigger: Trigger::Note(60), action: Some(KitAction::NextSection) });
+    command(&mut host, Command::KitTrigger { trigger: Trigger::Control(64), action: Some(KitAction::Fill) });
+    for layer in [BandDrums::Off, BandDrums::Percussion, BandDrums::Click] {
+        command(&mut host, Command::SetBandDrums { mode: layer });
+        // 120 BPM: 187.5 blocks a beat, so a hit every 94 blocks is an eighth.
+        for block in 0..400usize {
+            if block % 188 == 0 {
+                command(&mut host, Command::DrumHit { piece: Piece::HiHatClosed, velocity: 80 });
+            }
+            events += host.process(BLOCK_FRAMES);
+        }
+        for block in 0..6000usize {
+            let eighth = block / 94;
+            if block % 94 == 0 {
+                let in_bar = eighth % 8;
+                let fill = eighth / 8 % 4 == 3 && in_bar >= 4;
+                let piece = match in_bar {
+                    _ if fill => Piece::Tom2,
+                    0 if eighth % 32 == 0 => Piece::Crash,
+                    0 | 4 => Piece::Kick,
+                    2 | 6 => Piece::Snare,
+                    _ => Piece::HiHatClosed,
+                };
+                command(&mut host, Command::DrumHit { piece, velocity: 100 });
+            }
+            match block {
+                1000 => command(&mut host, Command::DrumNote { note: 60, velocity: 100 }),
+                2000 => command(&mut host, Command::ControlChange { cc: 64, value: 127 }),
+                2010 => command(&mut host, Command::ControlChange { cc: 64, value: 0 }),
+                _ => {}
+            }
+            events += host.process(BLOCK_FRAMES);
+        }
+        command(&mut host, Command::DrumChoke { note: 49 });
+        host.process(BLOCK_FRAMES);
+    }
     COUNTING.store(false, Ordering::Relaxed);
 
     assert!(events > 1000, "band produced only {events} events");

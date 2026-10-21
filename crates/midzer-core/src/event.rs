@@ -38,6 +38,10 @@ pub enum EngineEvent {
     Input { level: u8, key: Option<u8> },
     /// Tempo follow moved the tempo, or turning it off restored it.
     Tempo { bpm: f32 },
+    /// A drummer's hit was this many ms off the band's grid; negative is early.
+    Timing { ms: f32 },
+    /// Evenly spaced count-in hits heard so far; 0 when a count-in starts over.
+    CountIn { hits: u8 },
 }
 
 /// What the band is doing, for the UI.
@@ -56,6 +60,8 @@ pub struct BandState {
     pub intro_pending: bool,
     pub ending_pending: bool,
     pub follow: bool,
+    /// The drummer filled into `next_variation`; a crash on the 1 takes it.
+    pub cued: bool,
     /// 0..=255.
     pub energy: u8,
 }
@@ -72,6 +78,8 @@ mod op {
     pub const HOLD: u32 = 9;
     pub const INPUT: u32 = 10;
     pub const TEMPO: u32 = 11;
+    pub const TIMING: u32 = 12;
+    pub const COUNT_IN: u32 = 13;
 }
 
 const NO_CHORD: u32 = 0xff;
@@ -102,13 +110,16 @@ impl EngineEvent {
             EngineEvent::Hold { holding, tick } => [op::HOLD, holding as u32, tick, frame],
             EngineEvent::Input { level, key } => [op::INPUT, level as u32, key.map_or(NO_KEY, u32::from), frame],
             EngineEvent::Tempo { bpm } => [op::TEMPO, bpm.to_bits(), 0, frame],
+            EngineEvent::Timing { ms } => [op::TIMING, ms.to_bits(), 0, frame],
+            EngineEvent::CountIn { hits } => [op::COUNT_IN, hits as u32, 0, frame],
             EngineEvent::Band(s) => {
                 let section = Section::ALL.iter().position(|x| *x == s.section).unwrap_or(0) as u32;
                 let flags = s.playing as u32
                     | (s.fill_pending as u32) << 1
                     | (s.ending_pending as u32) << 2
                     | (s.follow as u32) << 3
-                    | (s.intro_pending as u32) << 4;
+                    | (s.intro_pending as u32) << 4
+                    | (s.cued as u32) << 5;
                 [
                     op::BAND,
                     s.style as u32 | (s.next_style.unwrap_or(0xff) as u32) << 8 | section << 16 | (s.variation as u32) << 24,
@@ -139,6 +150,8 @@ impl EngineEvent {
             op::HOLD => EngineEvent::Hold { holding: a != 0, tick: b },
             op::INPUT => EngineEvent::Input { level: byte(a), key: (b != NO_KEY).then_some(byte(b)) },
             op::TEMPO => EngineEvent::Tempo { bpm: f32::from_bits(a) },
+            op::TIMING => EngineEvent::Timing { ms: f32::from_bits(a) },
+            op::COUNT_IN => EngineEvent::CountIn { hits: byte(a) },
             op::BAND => {
                 let flags = byte(b >> 8);
                 let next_style = byte(a >> 8);
@@ -153,6 +166,7 @@ impl EngineEvent {
                     ending_pending: flags & 4 != 0,
                     follow: flags & 8 != 0,
                     intro_pending: flags & 16 != 0,
+                    cued: flags & 32 != 0,
                     energy: byte(b >> 16),
                 })
             }
@@ -227,6 +241,21 @@ impl EventBuffer {
         self.len = 0;
     }
 
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Moves the events from `index` on `by` frames later.
+    pub fn shift_from(&mut self, index: usize, by: u32) {
+        for t in self.events[index.min(self.len)..self.len].iter_mut() {
+            t.frame += by;
+        }
+    }
+
     /// Sorts by frame without allocating.
     pub fn sort(&mut self) {
         self.events[..self.len].sort_unstable_by_key(|t| (t.frame, t.event.order()));
@@ -288,6 +317,7 @@ mod tests {
             intro_pending: false,
             ending_pending: true,
             follow: false,
+            cued: true,
             energy: 77,
         };
         for event in [
@@ -305,6 +335,8 @@ mod tests {
             EngineEvent::Input { level: 9, key: None },
             EngineEvent::Input { level: 9, key: Some(0) },
             EngineEvent::Tempo { bpm: 88.25 },
+            EngineEvent::Timing { ms: -12.5 },
+            EngineEvent::CountIn { hits: 3 },
         ] {
             assert_eq!(EngineEvent::decode(event.encode(42)), Some((event, 42)));
         }
@@ -340,6 +372,7 @@ mod tests {
             intro_pending: true,
             ending_pending: true,
             follow: true,
+            cued: false,
             energy: 200,
         };
         let [opcode, a, b, frame] = EngineEvent::Band(state).encode(5);

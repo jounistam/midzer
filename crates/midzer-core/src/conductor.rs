@@ -85,6 +85,11 @@ pub struct Conductor {
     /// A song is playing: the band never rests or ends because the player
     /// went quiet.
     song: bool,
+    /// A drummer leads: following sets only the energy, and the variation is
+    /// theirs to change, with fills, kit controls or the pads.
+    drummer: bool,
+    /// The drummer filled into the next variation; a crash on the 1 takes it.
+    cued: bool,
 }
 
 impl Default for Conductor {
@@ -108,6 +113,8 @@ impl Default for Conductor {
             bars_in_variation: 0,
             started: false,
             song: false,
+            drummer: false,
+            cued: false,
         }
     }
 }
@@ -146,6 +153,16 @@ impl Conductor {
         self.pending_ending
     }
 
+    /// The drummer filled into [`Conductor::next_variation`], which a crash takes.
+    pub fn cued(&self) -> bool {
+        self.cued
+    }
+
+    /// The variation after the current one, for the drummer's next section.
+    pub fn following_variation(&self) -> u8 {
+        (self.variation + 1) % crate::style::VARIATIONS as u8
+    }
+
     /// Note velocities are scaled by this, so energy is heard in every part.
     pub fn velocity_scale(&self) -> f32 {
         0.8 + 0.4 * self.energy
@@ -165,6 +182,7 @@ impl Conductor {
         self.idle_beats = 0;
         self.bars_in_variation = 0;
         self.started = false;
+        self.cued = false;
     }
 
     /// Handles a request. `playing` tells whether the band is running.
@@ -175,7 +193,8 @@ impl Conductor {
         match request {
             Request::Variation(v) => {
                 let v = v.min(crate::style::VARIATIONS as u8 - 1);
-                self.follow = false;
+                self.follow &= self.drummer;
+                self.cued = false;
                 self.next_variation = v;
                 if !playing {
                     self.variation = v;
@@ -213,6 +232,33 @@ impl Conductor {
         self.song = on;
     }
 
+    pub fn set_drummer(&mut self, on: bool) {
+        self.drummer = on;
+        self.drop_cue();
+    }
+
+    /// The drummer played a fill: the next variation waits for a crash on the 1.
+    pub fn cue_next(&mut self) {
+        if self.section == Section::Main && !self.pending_ending && !self.pending_intro {
+            self.next_variation = self.following_variation();
+            self.cued = true;
+        }
+    }
+
+    /// The crash came: the cued variation plays from now.
+    pub fn take_cue(&mut self) {
+        if std::mem::take(&mut self.cued) {
+            self.enter_variation();
+        }
+    }
+
+    /// No crash on the 1: the band stays where it is.
+    pub fn drop_cue(&mut self) {
+        if std::mem::take(&mut self.cued) {
+            self.next_variation = self.variation;
+        }
+    }
+
     pub fn note_played(&mut self, velocity: u8) {
         self.beat_notes += 1;
         self.beat_velocity += velocity as u32;
@@ -222,7 +268,8 @@ impl Conductor {
     /// Advances to `beat` (0 is the downbeat). `keys_held` tells whether the
     /// player is holding any key, which counts as playing.
     pub fn on_beat(&mut self, beat: u8, keys_held: bool) -> Cue {
-        let active = self.beat_notes > 0 || keys_held || self.song;
+        // A drummer who stops is stopping, even in a song.
+        let active = self.beat_notes > 0 || keys_held || (self.song && !self.drummer);
         self.update_energy(keys_held);
         if active || !self.heard_player {
             self.idle_beats = 0;
@@ -258,6 +305,10 @@ impl Conductor {
             }
         }
 
+        if self.section != Section::Main {
+            self.drop_cue();
+        }
+
         // The band comes back in as soon as the player does.
         if self.section == Section::Rest && active {
             self.section = Section::Main;
@@ -275,7 +326,7 @@ impl Conductor {
                 if self.idle_mode == IdleMode::Rest && self.idle_beats + 2 >= IDLE_BARS * BEATS_PER_BAR {
                     self.section = Section::Fill;
                     self.after_fill = Section::Rest;
-                } else if self.follow && target != self.variation && self.bars_in_variation >= MIN_BARS_PER_VARIATION {
+                } else if self.follow && !self.drummer && target != self.variation && self.bars_in_variation >= MIN_BARS_PER_VARIATION {
                     self.next_variation = target;
                     self.section = Section::Fill;
                 }
@@ -303,7 +354,9 @@ impl Conductor {
         }
         if notes > 0 {
             let touch = velocity as f32 / notes as f32 / 127.0;
-            let density = notes.min(6) as f32 / 6.0;
+            // Drummers play many more hits per beat than keyboardists play notes.
+            let busy = if self.drummer { 12 } else { 6 };
+            let density = notes.min(busy) as f32 / busy as f32;
             let target = 0.7 * touch + 0.3 * density;
             self.energy += (target - self.energy) * 0.35;
         } else if !keys_held && self.heard_player {
@@ -488,6 +541,58 @@ mod tests {
         run(&mut c, 1, chord_each_bar(80));
         let beats = run(&mut c, 6, |_, _| {});
         assert!(beats.iter().all(|b| b.0 == Section::Main));
+    }
+
+    #[test]
+    fn a_drummer_picks_the_variation_and_energy_still_follows() {
+        let mut c = Conductor::default();
+        c.set_drummer(true);
+        c.start(false);
+        let beats = run(&mut c, 12, |c, _| {
+            for _ in 0..8 {
+                c.note_played(127);
+            }
+        });
+        assert!(beats.iter().all(|b| b.1 == 0), "hard playing alone changes nothing");
+        assert!(c.energy() > 0.8);
+        c.request(Request::Variation(1), true);
+        assert!(c.follows(), "pads keep energy following for drummers");
+    }
+
+    #[test]
+    fn a_cued_fill_waits_for_the_crash() {
+        let mut c = Conductor::default();
+        c.set_drummer(true);
+        c.start(false);
+        c.on_beat(0, true);
+        c.cue_next();
+        assert!(c.cued());
+        assert_eq!((c.variation(), c.next_variation()), (0, 1));
+        c.take_cue();
+        assert_eq!((c.variation(), c.next_variation(), c.cued()), (1, 1, false));
+        c.cue_next();
+        assert_eq!(c.next_variation(), 2);
+        c.drop_cue();
+        assert_eq!((c.variation(), c.next_variation(), c.cued()), (1, 1, false));
+        c.request(Request::Variation(2), true);
+        c.on_beat(1, true);
+        c.on_beat(2, true);
+        c.on_beat(3, true);
+        c.on_beat(0, true);
+        assert_eq!(c.variation(), 2);
+        c.cue_next();
+        assert_eq!(c.next_variation(), 0, "C goes round to A");
+    }
+
+    #[test]
+    fn a_drummer_who_stops_in_a_song_rests_the_band() {
+        let mut c = Conductor::default();
+        c.set_song(true);
+        c.set_drummer(true);
+        c.start(false);
+        run(&mut c, 1, chord_each_bar(80));
+        let beats = run(&mut c, 4, |_, _| {});
+        assert_eq!(beats.last().unwrap().0, Section::Rest);
     }
 
     #[test]

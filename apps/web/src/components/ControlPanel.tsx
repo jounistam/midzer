@@ -1,9 +1,13 @@
 import type { BandPart, SectionRequest } from '@midzer/audio-web';
 import type { CSSProperties } from 'react';
 import { padState } from './bandStatus';
+import { pickProgression, progressionsFor } from '../drums/progressions';
 import {
+  BAND_DRUMS_OPTIONS,
   requestSection,
   saveTake,
+  setBandDrums,
+  setProgression,
   setEnergy,
   setFollow,
   setTempo,
@@ -178,11 +182,50 @@ export function TakeButton() {
   );
 }
 
-export function ControlPanel() {
+/** The chords a drummer plays over: a loop picked from the style's progressions. */
+export function ProgressionPicker() {
+  const style = useSession((s) => s.style);
+  const current = useSession((s) => pickProgression(s.style, s.progression));
+  return (
+    <label className="control-group">
+      <span className="label">Chords</span>
+      <select value={current.id} onChange={(e) => setProgression(e.target.value)} aria-label="Chords">
+        {progressionsFor(style).map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name} · {p.hint}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/** What the band's own drums play while the player drums. */
+export function BandDrumsControl() {
+  const mode = useSession((s) => s.bandDrums);
+  return (
+    <div className="control-group">
+      <p className="label" id="band-drums-label">
+        Band drums
+      </p>
+      <div className="segmented" role="group" aria-labelledby="band-drums-label">
+        {BAND_DRUMS_OPTIONS.map((o) => (
+          <button key={o.mode} className={`seg ${mode === o.mode ? 'on' : ''}`} aria-pressed={mode === o.mode} onClick={() => setBandDrums(o.mode)}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function ControlPanel({ drummer = false }: { drummer?: boolean }) {
   return (
     <aside className="panel control-panel">
       <PlayButton className="full" />
+      {drummer && <ProgressionPicker />}
       <SectionPads />
+      {drummer && <BandDrumsControl />}
       <EnergyControl />
       <TempoControl />
       <BandMutes />

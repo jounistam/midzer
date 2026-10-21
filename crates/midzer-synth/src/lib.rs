@@ -100,7 +100,9 @@ fn apply(synth: &mut Synthesizer, event: &EngineEvent, kit_sound: bool) {
         | EngineEvent::SongPosition { .. }
         | EngineEvent::Hold { .. }
         | EngineEvent::Input { .. }
-        | EngineEvent::Tempo { .. } => {}
+        | EngineEvent::Tempo { .. }
+        | EngineEvent::Timing { .. }
+        | EngineEvent::CountIn { .. } => {}
     }
 }
 

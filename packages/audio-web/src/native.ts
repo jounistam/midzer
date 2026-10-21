@@ -55,6 +55,8 @@ export function decodeInputCommand(op: number, a: number, b: number): EngineComm
       return { type: 'hiHatPedal', value: a };
     case 31:
       return { type: 'drumChoke', note: a };
+    case 36:
+      return { type: 'controlChange', cc: a, value: b };
     default:
       return null;
   }

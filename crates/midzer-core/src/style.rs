@@ -112,6 +112,13 @@ pub struct Style {
     pub parts: Vec<Part>,
 }
 
+impl Style {
+    /// Whether the grooves are shuffled: drum steps off the sixteenth grid.
+    pub fn swung(&self) -> bool {
+        self.parts.iter().filter(|p| p.kind == PartKind::Drums).flat_map(|p| p.main[0].steps.iter()).any(|s| s.tick % (PPQ / 4) != 0)
+    }
+}
+
 /// The built-in styles. Order is part of the protocol: the UI selects by index
 /// (see `STYLES` in packages/audio-web/src/protocol.ts).
 pub fn styles() -> &'static [Style] {

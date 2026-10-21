@@ -1,16 +1,21 @@
-import { NOTE_NAMES, type Instrument } from '@midzer/audio-web';
-import { KIT_PRESETS, type KitPresetId } from '../drums/kit';
+import { KIT_ACTIONS, NOTE_NAMES, type Instrument, type KitAction } from '@midzer/audio-web';
+import { KIT_ACTION_INFO, KIT_PRESETS, kitMap, triggerLabel, type KitPresetId } from '../drums/kit';
+import { COUNT_IN_OPTIONS } from '../drums/stage';
 import { useEffect, useRef, useState } from 'react';
 import { live } from '../live';
 import {
   IDLE_OPTIONS,
   LISTEN_OPTIONS,
+  onControlChange,
+  onDrumInput,
   playerLatencyMs,
+  setCountIn,
   setHeadphones,
   setIdleMode,
   setInstrument,
   setKit,
   setKitSound,
+  setKitTrigger,
   setListenMode,
   setMicGate,
   setMidiOutput,
@@ -119,19 +124,29 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
-        <div className="setting">
-          <span>
-            Follow my tempo
-            <small>The band speeds up and slows down with you.</small>
-          </span>
-          <button
-            className={`toggle ${s.tempoFollow ? 'on' : ''}`}
-            aria-pressed={s.tempoFollow}
-            onClick={() => setTempoFollow(!s.tempoFollow)}
-          >
-            {s.tempoFollow ? 'On' : 'Off'}
-          </button>
-        </div>
+        {s.instrument === 'drums' ? (
+          <div className="setting">
+            <span>
+              Follow my tempo
+              <small>Always on for drummers: you keep the time, fills don't pull it.</small>
+            </span>
+            <span className="value">On</span>
+          </div>
+        ) : (
+          <div className="setting">
+            <span>
+              Follow my tempo
+              <small>The band speeds up and slows down with you.</small>
+            </span>
+            <button
+              className={`toggle ${s.tempoFollow ? 'on' : ''}`}
+              aria-pressed={s.tempoFollow}
+              onClick={() => setTempoFollow(!s.tempoFollow)}
+            >
+              {s.tempoFollow ? 'On' : 'Off'}
+            </button>
+          </div>
+        )}
 
         <MicSettings />
 
@@ -193,6 +208,7 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
 function KitSettings({ onLearn }: { onLearn: () => void }) {
   const kit = useSession((s) => s.kit);
   const kitSound = useSession((s) => s.kitSound);
+  const countIn = useSession((s) => s.countIn);
   return (
     <section className="mic-settings" aria-labelledby="kit-label">
       <h3 className="label" id="kit-label">
@@ -233,7 +249,77 @@ function KitSettings({ onLearn }: { onLearn: () => void }) {
           {kitSound ? 'On' : 'Off'}
         </button>
       </div>
+      <div className="setting">
+        <span>
+          Count-in
+          <small>Four even hits start the band on the next 1, at your tempo.</small>
+        </span>
+        <div className="segmented" role="group" aria-label="Count-in">
+          {COUNT_IN_OPTIONS.map((o) => (
+            <button key={o.choice} className={`seg ${countIn === o.choice ? 'on' : ''}`} aria-pressed={countIn === o.choice} onClick={() => setCountIn(o.choice)}>
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <KitControls />
     </section>
+  );
+}
+
+/**
+ * Spare pads and foot switches that control the band. "Assign" waits for
+ * the next pad hit or pedal press. Grabbing a cymbal always stops the band.
+ */
+function KitControls() {
+  const triggers = useSession((s) => s.kitTriggers);
+  const kit = useSession((s) => s.kit);
+  const [learning, setLearning] = useState<KitAction | null>(null);
+
+  useEffect(() => {
+    if (!learning) return;
+    const done = (trigger: Parameters<typeof setKitTrigger>[1]) => {
+      setKitTrigger(learning, trigger);
+      setLearning(null);
+    };
+    // Only spare pads: a note that plays a drum keeps playing it.
+    const map = kitMap(kit);
+    const offNote = onDrumInput((note) => map[note] === undefined && done({ kind: 'note', number: note }));
+    const offControl = onControlChange((cc, value) => value >= 64 && done({ kind: 'control', number: cc }));
+    return () => {
+      offNote();
+      offControl();
+    };
+  }, [learning, kit]);
+
+  return (
+    <div className="kit-controls" aria-labelledby="kit-controls-label">
+      <p className="setting-note" id="kit-controls-label">
+        <strong>Kit controls.</strong> Give spare pads or a foot switch a job. Grabbing a cymbal stops the band.
+      </p>
+      {KIT_ACTIONS.map((action) => {
+        const trigger = triggers[action];
+        const info = KIT_ACTION_INFO[action];
+        return (
+          <div className="setting" key={action}>
+            <span>
+              {info.label}
+              <small>{learning === action ? 'Hit a spare pad or press a pedal…' : trigger ? triggerLabel(trigger) : info.hint}</small>
+            </span>
+            <div className="setting-buttons">
+              <button className="btn btn-secondary" onClick={() => setLearning(learning === action ? null : action)} aria-label={`Assign ${info.label}`}>
+                {learning === action ? 'Cancel' : 'Assign'}
+              </button>
+              {trigger && (
+                <button className="btn btn-ghost" onClick={() => setKitTrigger(action, null)} aria-label={`Clear ${info.label}`}>
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

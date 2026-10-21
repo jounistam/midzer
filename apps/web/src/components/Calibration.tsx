@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { onBeat, setCalibrationClick, setTapOffset, useSession } from '../session';
+import { onBeat, onDrumInput, onPlayerNote, setCalibrationClick, setTapOffset, useSession } from '../session';
 import { tapOffset } from './calibrate';
 
 const TAPS_NEEDED = 8;
@@ -64,6 +64,16 @@ export function Calibration({ onClose }: { onClose: () => void }) {
     };
   });
 
+  // A MIDI keyboard or an e-kit taps too: drummers calibrate on the kit.
+  useEffect(() => {
+    const offDrums = onDrumInput(() => tap(performance.now()));
+    const offKeys = onPlayerNote((_note, on, timeMs) => on && tap(timeMs));
+    return () => {
+      offDrums();
+      offKeys();
+    };
+  });
+
   const restart = () => {
     setTaps([]);
     setResult(null);
@@ -77,7 +87,7 @@ export function Calibration({ onClose }: { onClose: () => void }) {
         {phase === 'intro' && (
           <>
             <p className="lead">
-              You'll hear a click on every beat. Tap any key, or the pad below, right with the clicks — {TAPS_NEEDED} times.
+              You'll hear a click on every beat. Tap any key, a drum or the pad below, right with the clicks — {TAPS_NEEDED} times.
               The band then knows when you mean a beat, even with a slow sound card.
             </p>
             {saved !== null && <p className="setting-note">Current calibration: {saved} ms</p>}

@@ -165,8 +165,11 @@ impl SongPlayer {
         };
 
         self.next_beat = beat + 1;
+        // At the loop's end, or past it after the chart got shorter, the next
+        // bar starts the loop again.
         if let Some((start, end)) = self.loop_bars
-            && self.next_beat == end * BEATS
+            && self.next_beat.is_multiple_of(BEATS)
+            && self.next_beat >= end * BEATS
         {
             self.next_beat = start * BEATS;
             self.jumped = true;
@@ -186,7 +189,7 @@ impl SongPlayer {
     /// The bar after `bar`, following the loop; `None` past the last bar.
     fn following(&self, bar: u32) -> Option<u32> {
         match self.loop_bars {
-            Some((start, end)) if bar + 1 == end => Some(start),
+            Some((start, end)) if bar + 1 >= end => Some(start),
             _ => (bar + 1 < self.bars).then_some(bar + 1),
         }
     }
@@ -230,6 +233,21 @@ mod tests {
 
     fn beats(s: &mut SongPlayer, n: u32) -> Vec<SongBeat> {
         (0..n).map(|i| s.on_beat((i % BEATS) as u8)).collect()
+    }
+
+    #[test]
+    fn a_shorter_chart_loops_back_at_the_next_bar() {
+        let mut s = song();
+        s.clear(8);
+        s.set_loop(0, 8);
+        s.start();
+        beats(&mut s, 6 * 4 + 1);
+        // Reloaded as a two-bar loop in the middle of bar 6.
+        s.clear(2);
+        s.set_loop(0, 2);
+        let rest: Vec<_> = (1..8).map(|i| s.on_beat(i % 4)).collect();
+        assert!(rest.iter().all(|b| b.request != Some(Request::Ending)), "{rest:?}");
+        assert_eq!(rest[3].beat, 0, "back to the start on the bar line");
     }
 
     #[test]

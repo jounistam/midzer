@@ -1,6 +1,7 @@
+use crate::band::BandDrums;
 use crate::chord::{Chord, Quality};
 use crate::conductor::{IdleMode, Request};
-use crate::drums::{Instrument, Piece};
+use crate::drums::{Instrument, KitAction, Piece, Trigger};
 use crate::listen::ListenMode;
 use crate::song::Slot;
 
@@ -70,6 +71,15 @@ pub enum Command {
     DrumChoke { note: u8 },
     /// Whether the built-in synth sounds the player's drums; an e-kit's own module usually does.
     SetKitSound { on: bool },
+    /// Drummer mode: the pieces whose four even hits count the band in, as a
+    /// bit set of [`Piece::bit`]; 0 turns the count-in off.
+    SetCountIn { pieces: u32 },
+    /// What the band's own drums play when the player plays drums.
+    SetBandDrums { mode: BandDrums },
+    /// What a pad note or a controller on the kit does; `None` clears it.
+    KitTrigger { trigger: Trigger, action: Option<KitAction> },
+    /// A MIDI controller change, for kit triggers such as a foot switch.
+    ControlChange { cc: u8, value: u8 },
 }
 
 mod op {
@@ -105,6 +115,10 @@ mod op {
     pub const HI_HAT_PEDAL: u32 = 30;
     pub const DRUM_CHOKE: u32 = 31;
     pub const SET_KIT_SOUND: u32 = 32;
+    pub const SET_COUNT_IN: u32 = 33;
+    pub const SET_BAND_DRUMS: u32 = 34;
+    pub const KIT_TRIGGER: u32 = 35;
+    pub const CONTROL_CHANGE: u32 = 36;
 }
 
 /// MIDI channel 10, where e-kits and drum pads send.
@@ -163,6 +177,18 @@ fn slot_from(kind: u32, packed: u32) -> Option<Slot> {
 const IDLE_MODES: [IdleMode; 3] = [IdleMode::KeepPlaying, IdleMode::Rest, IdleMode::End];
 const INSTRUMENTS: [Instrument; 2] = [Instrument::Keys, Instrument::Drums];
 
+/// Triggers travel as `[kind, number]`, kind 0 a note and 1 a controller.
+fn trigger_words(trigger: Trigger) -> (u32, u32) {
+    match trigger {
+        Trigger::Note(n) => (0, n as u32),
+        Trigger::Control(c) => (1, c as u32),
+    }
+}
+
+fn index_of<T: PartialEq>(all: &[T], item: T) -> u32 {
+    all.iter().position(|x| *x == item).unwrap_or(0) as u32
+}
+
 impl Command {
     pub fn encode(self) -> [u32; WORDS_PER_COMMAND] {
         match self {
@@ -207,6 +233,14 @@ impl Command {
             Command::HiHatPedal { value } => [op::HI_HAT_PEDAL, value as u32, 0, 0],
             Command::DrumChoke { note } => [op::DRUM_CHOKE, note as u32, 0, 0],
             Command::SetKitSound { on } => [op::SET_KIT_SOUND, on as u32, 0, 0],
+            Command::SetCountIn { pieces } => [op::SET_COUNT_IN, pieces, 0, 0],
+            Command::SetBandDrums { mode } => [op::SET_BAND_DRUMS, index_of(&BandDrums::ALL, mode), 0, 0],
+            // Actions travel as index + 1, with 0 for none.
+            Command::KitTrigger { trigger, action } => {
+                let (kind, number) = trigger_words(trigger);
+                [op::KIT_TRIGGER, kind, number, action.map_or(0, |a| index_of(&KitAction::ALL, a) + 1)]
+            }
+            Command::ControlChange { cc, value } => [op::CONTROL_CHANGE, cc as u32, value as u32, 0],
         }
     }
 
@@ -225,6 +259,7 @@ impl Command {
             0xb0 if d1 == HI_HAT_CC => Some(Command::HiHatPedal { value: d2.min(127) }),
             // All Sound Off / All Notes Off
             0xb0 if d1 == 120 || d1 == 123 => Some(Command::AllNotesOff),
+            0xb0 if d1 < 120 => Some(Command::ControlChange { cc: d1, value: d2.min(127) }),
             _ => None,
         }
     }
@@ -274,6 +309,17 @@ impl Command {
             op::HI_HAT_PEDAL => Some(Command::HiHatPedal { value: midi(a)? }),
             op::DRUM_CHOKE => Some(Command::DrumChoke { note: midi(a)? }),
             op::SET_KIT_SOUND => Some(Command::SetKitSound { on: a != 0 }),
+            op::SET_COUNT_IN => Some(Command::SetCountIn { pieces: a & ((1 << Piece::COUNT) - 1) }),
+            op::SET_BAND_DRUMS => Some(Command::SetBandDrums { mode: *BandDrums::ALL.get(a as usize)? }),
+            op::KIT_TRIGGER => Some(Command::KitTrigger {
+                trigger: match a {
+                    0 => Trigger::Note(midi(b)?),
+                    1 => Trigger::Control(midi(b)?),
+                    _ => return None,
+                },
+                action: if c == 0 { None } else { Some(*KitAction::ALL.get(c as usize - 1)?) },
+            }),
+            op::CONTROL_CHANGE => Some(Command::ControlChange { cc: midi(a)?, value: midi(b)? }),
             _ => None,
         }
     }
@@ -330,6 +376,14 @@ mod tests {
             Command::HiHatPedal { value: 64 },
             Command::DrumChoke { note: 49 },
             Command::SetKitSound { on: true },
+            Command::SetCountIn { pieces: Piece::HiHatClosed.bit() | Piece::SideStick.bit() },
+            Command::SetCountIn { pieces: 0 },
+            Command::SetBandDrums { mode: BandDrums::Percussion },
+            Command::SetBandDrums { mode: BandDrums::Full },
+            Command::KitTrigger { trigger: Trigger::Note(60), action: Some(KitAction::NextSection) },
+            Command::KitTrigger { trigger: Trigger::Control(64), action: Some(KitAction::StartStop) },
+            Command::KitTrigger { trigger: Trigger::Control(127), action: None },
+            Command::ControlChange { cc: 64, value: 127 },
         ] {
             assert_eq!(Command::decode(cmd.encode()), Some(cmd));
         }
@@ -341,7 +395,8 @@ mod tests {
         assert_eq!(Command::from_midi(&[0x90, 60, 0]), Some(Command::NoteOff { note: 60 }));
         assert_eq!(Command::from_midi(&[0x80, 61, 30]), Some(Command::NoteOff { note: 61 }));
         assert_eq!(Command::from_midi(&[0xb0, 123, 0]), Some(Command::AllNotesOff));
-        assert_eq!(Command::from_midi(&[0xb0, 64, 127]), None);
+        assert_eq!(Command::from_midi(&[0xb0, 64, 127]), Some(Command::ControlChange { cc: 64, value: 127 }));
+        assert_eq!(Command::from_midi(&[0xb0, 121, 0]), None);
         // Channel 10 is drums: hits only, releases ignored.
         assert_eq!(Command::from_midi(&[0x99, 38, 120]), Some(Command::DrumNote { note: 38, velocity: 120 }));
         assert_eq!(Command::from_midi(&[0x89, 38, 0]), None);
@@ -370,5 +425,10 @@ mod tests {
         assert_eq!(Command::decode([op::DRUM_HIT, Piece::COUNT as u32, 100, 0]), None);
         assert_eq!(Command::decode([op::KIT_NOTE, 36, Piece::COUNT as u32 + 1, 0]), None);
         assert_eq!(Command::decode([op::SET_INSTRUMENT, 2, 0, 0]), None);
+        assert_eq!(Command::decode([op::SET_BAND_DRUMS, 4, 0, 0]), None);
+        assert_eq!(Command::decode([op::KIT_TRIGGER, 2, 60, 1]), None);
+        assert_eq!(Command::decode([op::KIT_TRIGGER, 0, 128, 1]), None);
+        assert_eq!(Command::decode([op::KIT_TRIGGER, 0, 60, 5]), None);
+        assert_eq!(Command::decode([op::CONTROL_CHANGE, 128, 0, 0]), None);
     }
 }

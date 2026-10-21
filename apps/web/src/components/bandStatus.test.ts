@@ -13,6 +13,7 @@ const band = (state: Partial<BandState>): BandState => ({
   introPending: false,
   endingPending: false,
   follow: true,
+  cued: false,
   energy: 0.4,
   ...state,
 });

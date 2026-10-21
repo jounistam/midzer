@@ -1,7 +1,9 @@
-use crate::band::Band;
+use crate::band::{Band, BandDrums};
 use crate::chord::recognize;
 use crate::command::Command;
-use crate::drums::{Instrument, Kit, Piece};
+use crate::conductor::Request;
+use crate::drummer::{CountIn, CountInListener};
+use crate::drums::{Instrument, Kit, KitAction, Piece, Triggers};
 use crate::event::{EngineEvent, EventBuffer, MIC_CHANNEL, PLAYER_DRUM_CHANNEL, Timed};
 use crate::listen::{Heard, HeardList, ListenMode, Listener};
 
@@ -30,6 +32,15 @@ pub struct Engine {
     /// Frames until each piece's last hit is released; 0 once it is.
     drum_gate: [u32; Piece::COUNT],
     gate_frames: u32,
+    sample_rate: f32,
+    /// Frames since the engine started, for timing hits while the band is stopped.
+    now: u64,
+    triggers: Triggers,
+    count_in: CountInListener,
+    /// A counted-in start: frames from the next block's start, and the tempo.
+    start_in: Option<(u64, f32)>,
+    /// What the band's drums play for a drummer.
+    band_drums: BandDrums,
 }
 
 impl Engine {
@@ -45,6 +56,12 @@ impl Engine {
             kit: Kit::default(),
             drum_gate: [0; Piece::COUNT],
             gate_frames: (sample_rate * DRUM_GATE_S) as u32,
+            sample_rate,
+            now: 0,
+            triggers: Triggers::default(),
+            count_in: CountInListener::default(),
+            start_in: None,
+            band_drums: BandDrums::Off,
         }
     }
 
@@ -74,8 +91,14 @@ impl Engine {
                 }
                 self.update_keys_held();
             }
-            Command::Play => self.band.play(&mut self.events),
-            Command::Stop => self.band.stop(&mut self.events),
+            Command::Play => {
+                self.start_in = None;
+                self.band.play(&mut self.events);
+            }
+            Command::Stop => {
+                self.start_in = None;
+                self.band.stop(&mut self.events);
+            }
             Command::SetTempo { bpm } => self.band.set_tempo(bpm),
             Command::SetSplit { note } => self.split = note,
             Command::SetMute { channel, muted } => self.band.set_muted(channel, muted, &mut self.events),
@@ -107,11 +130,30 @@ impl Engine {
                 if instrument != self.instrument {
                     self.handle(Command::AllNotesOff);
                     self.instrument = instrument;
+                    self.update_drummer();
                 }
             }
             Command::DrumChoke { note } => {
                 if let Some(piece) = self.kit.piece(note) {
                     self.release_drum(piece, 0);
+                    // Grabbing a cymbal stops the band dead.
+                    if drums && piece.is_cymbal() {
+                        self.handle(Command::Stop);
+                    }
+                }
+            }
+            Command::SetCountIn { pieces } => {
+                self.count_in.set_pieces(pieces);
+                self.events.push(0, EngineEvent::CountIn { hits: 0 });
+            }
+            Command::SetBandDrums { mode } => {
+                self.band_drums = mode;
+                self.update_drummer();
+            }
+            Command::KitTrigger { trigger, action } => self.triggers.set(trigger, action),
+            Command::ControlChange { cc, value } => {
+                if let Some(action) = self.triggers.control(cc, value) {
+                    self.kit_action(action);
                 }
             }
             // Kits send their own open and closed hi-hat notes; the pedal is for the UI.
@@ -183,13 +225,38 @@ impl Engine {
         self.band.set_keys_held(self.held.contains(&true) || self.listener.sounding());
     }
 
+    /// Drummer mode follows the instrument; the band's drum layer only applies to it.
+    fn update_drummer(&mut self) {
+        let drums = self.instrument == Instrument::Drums;
+        self.band.set_drummer(drums, &mut self.events);
+        self.band.set_drum_layer(if drums { self.band_drums } else { BandDrums::Full }, &mut self.events);
+        self.count_in.reset();
+        self.start_in = None;
+    }
+
     fn drum_note(&mut self, note: u8, velocity: u8) {
-        if let Some(piece) = self.kit.piece(note) {
+        if let Some(action) = self.triggers.note(note) {
+            self.kit_action(action);
+        } else if let Some(piece) = self.kit.piece(note) {
             self.drum_hit(piece, velocity);
         }
     }
 
-    /// Sounds a hit on [`PLAYER_DRUM_CHANNEL`] and counts it as playing.
+    fn kit_action(&mut self, action: KitAction) {
+        let playing = self.band.is_playing();
+        match action {
+            KitAction::StartStop => self.handle(if playing { Command::Stop } else { Command::Play }),
+            KitAction::NextSection => {
+                let request = Request::Variation(self.band.next_section());
+                self.band.request(request, &mut self.events);
+            }
+            KitAction::Fill => self.band.request(Request::Fill, &mut self.events),
+            KitAction::Ending => self.band.request(Request::Ending, &mut self.events),
+        }
+    }
+
+    /// Sounds a hit on [`PLAYER_DRUM_CHANNEL`] and counts it as playing. A
+    /// drummer's hits also count the band in and lead it.
     fn drum_hit(&mut self, piece: Piece, velocity: u8) {
         if velocity == 0 {
             return;
@@ -198,7 +265,29 @@ impl Engine {
         self.drum_gate[piece.index()] = self.gate_frames;
         self.events.push(0, EngineEvent::NoteOn { channel: PLAYER_DRUM_CHANNEL, key: piece.note(), velocity });
         self.band.note_played(velocity);
-        self.band.onset(0.0);
+        if self.instrument != Instrument::Drums {
+            self.band.onset(0.0);
+        } else if self.band.is_playing() {
+            self.band.drum_hit(piece, velocity, &mut self.events);
+        } else if self.start_in.is_none() {
+            self.count_in_hit(piece);
+        }
+    }
+
+    /// A hit while stopped: four even ones start the band on the next 1,
+    /// timed so the player hears it where they expect it.
+    fn count_in_hit(&mut self, piece: Piece) {
+        match self.count_in.hit(piece, self.now, self.sample_rate) {
+            CountIn::Ignored => {}
+            CountIn::Counting { hits } => self.events.push(0, EngineEvent::CountIn { hits }),
+            CountIn::Done { period, last } => {
+                self.events.push(0, EngineEvent::CountIn { hits: 4 });
+                let latency = self.band.latency_ms() as f64 / 1000.0 * self.sample_rate as f64;
+                let start = (last + period - latency).max(self.now as f64);
+                let bpm = 60.0 * self.sample_rate / period as f32;
+                self.start_in = Some((start as u64 - self.now, bpm));
+            }
+        }
     }
 
     fn release_drum(&mut self, piece: Piece, frame: u32) {
@@ -221,7 +310,20 @@ impl Engine {
     /// Schedules this block and returns all of its events, sorted by frame.
     pub fn process(&mut self, frames: u32) -> &[Timed] {
         self.release_drums(frames);
-        self.band.process(frames, &mut self.events);
+        match self.start_in {
+            Some((delay, bpm)) if delay >= frames as u64 => self.start_in = Some((delay - frames as u64, bpm)),
+            Some((delay, bpm)) => {
+                // The counted-in start falls inside this block: run the band
+                // from that frame on.
+                self.start_in = None;
+                let mark = self.events.len();
+                self.band.start_counted(bpm, &mut self.events);
+                self.band.process(frames - delay as u32, &mut self.events);
+                self.events.shift_from(mark, delay as u32);
+            }
+            None => self.band.process(frames, &mut self.events),
+        }
+        self.now += frames as u64;
         self.events.sort();
         self.events.as_slice()
     }
@@ -362,6 +464,258 @@ mod tests {
         assert_eq!(run_drums(&mut engine, 9_600), vec![(0, false, 49)], "choked, so no gate release later");
         engine.handle(Command::DrumHit { piece: Piece::Kick, velocity: 0 });
         assert!(run_drums(&mut engine, 128).is_empty());
+    }
+
+    /// Runs `seconds` of blocks from absolute frame `*at`, sending each
+    /// scripted command at the first block at or after its frame. Returns the
+    /// events with absolute frames.
+    fn run_script(engine: &mut Engine, at: &mut u64, seconds: f64, script: &[(u64, Command)]) -> Vec<(u64, EngineEvent)> {
+        let end = *at + (seconds * 48_000.0) as u64;
+        let mut next = script.partition_point(|(f, _)| *f < *at);
+        let mut out = Vec::new();
+        while *at < end {
+            while next < script.len() && script[next].0 < *at + 128 {
+                engine.handle(script[next].1);
+                next += 1;
+            }
+            out.extend(engine.process(128).iter().map(|t| (*at + t.frame as u64, t.event)));
+            engine.end_block();
+            *at += 128;
+        }
+        out
+    }
+
+    fn drummer() -> Engine {
+        let mut engine = Engine::new(48_000.0);
+        engine.handle(Command::SetInstrument { instrument: Instrument::Drums });
+        engine.handle(Command::SetLatency { ms: 0.0 });
+        engine.handle(Command::SetCountIn { pieces: Piece::HiHatClosed.bit() | Piece::SideStick.bit() });
+        engine
+    }
+
+    fn hit(piece: Piece, velocity: u8) -> Command {
+        Command::DrumHit { piece, velocity }
+    }
+
+    /// A rock groove from frame `from` for `bars` bars at `bpm`: kick on 1
+    /// and 3, snare on 2 and 4, closed hi-hat eighths.
+    fn groove(from: f64, bars: u32, bpm: f64) -> Vec<(u64, Command)> {
+        let beat = 48_000.0 * 60.0 / bpm;
+        let mut script = Vec::new();
+        for eighth in 0..bars * 8 {
+            let f = (from + eighth as f64 * beat / 2.0) as u64;
+            script.push((f, hit(Piece::HiHatClosed, 90)));
+            match eighth % 8 {
+                0 | 4 => script.push((f, hit(Piece::Kick, 100))),
+                2 | 6 => script.push((f, hit(Piece::Snare, 100))),
+                _ => {}
+            }
+        }
+        script
+    }
+
+    fn band_states(events: &[(u64, EngineEvent)]) -> Vec<(u64, crate::event::BandState)> {
+        events.iter().filter_map(|(f, e)| if let EngineEvent::Band(s) = e { Some((*f, *s)) } else { None }).collect()
+    }
+
+    fn tempo_of(events: &[(u64, EngineEvent)]) -> Option<f32> {
+        events.iter().rev().find_map(|(_, e)| if let EngineEvent::Tempo { bpm } = e { Some(*bpm) } else { None })
+    }
+
+    #[test]
+    fn four_even_hi_hats_count_the_band_in() {
+        for latency_ms in [0.0, 20.0] {
+            let mut engine = drummer();
+            engine.handle(Command::SetLatency { ms: latency_ms });
+            let mut at = 0;
+            // 112.5 BPM: a beat is 25 600 frames. A snare between doesn't count.
+            let mut script: Vec<_> = (0..4).map(|i| (1280 + i * 25_600, hit(Piece::HiHatClosed, 80))).collect();
+            script.insert(1, (9_000, hit(Piece::Snare, 100)));
+            let events = run_script(&mut engine, &mut at, 3.0, &script);
+            let counts: Vec<_> =
+                events.iter().filter_map(|(_, e)| if let EngineEvent::CountIn { hits } = e { Some(*hits) } else { None }).collect();
+            assert_eq!(counts, [0, 1, 2, 3, 4]);
+            let start = 1280 + 4 * 25_600 - (latency_ms as u64 * 48);
+            let first_beat = events.iter().find(|(_, e)| matches!(e, EngineEvent::Beat { bar: 0, beat: 0 })).unwrap().0;
+            assert_eq!(first_beat, start, "the band starts on the next 1, early by the latency");
+            assert!(events.contains(&(start, EngineEvent::Transport { playing: true })));
+            assert!((tempo_of(&events).unwrap() - 112.5).abs() < 0.01);
+            let second = events.iter().find(|(_, e)| matches!(e, EngineEvent::Beat { beat: 1, .. })).unwrap().0;
+            assert!((second as i64 - (start + 25_600) as i64).abs() <= 1);
+        }
+    }
+
+    #[test]
+    fn keys_players_and_play_skip_the_count_in() {
+        let mut engine = drummer();
+        engine.handle(Command::SetInstrument { instrument: Instrument::Keys });
+        let script: Vec<_> = (0..4).map(|i| (i * 25_600, Command::DrumNote { note: 42, velocity: 80 })).collect();
+        let events = run_script(&mut engine, &mut 0, 3.0, &script);
+        assert!(!events.iter().any(|(_, e)| matches!(e, EngineEvent::CountIn { hits: 1.. })));
+        assert!(!engine.is_playing());
+    }
+
+    #[test]
+    fn a_drummer_leads_the_tempo() {
+        for player in [128.0, 112.0] {
+            let mut engine = drummer();
+            engine.handle(Command::SetTempo { bpm: 120.0 });
+            engine.handle(Command::Play);
+            let mut at = 0;
+            // Starts on the band's beat, then keeps the player's tempo.
+            let events = run_script(&mut engine, &mut at, 12.0, &groove(0.0, 24, player));
+            let bpm = tempo_of(&events).unwrap();
+            assert!((bpm - player as f32).abs() < 2.0, "player {player}, band {bpm}");
+        }
+    }
+
+    #[test]
+    fn a_drummer_s_fills_do_not_pull_the_tempo() {
+        let mut engine = drummer();
+        engine.handle(Command::SetTempo { bpm: 120.0 });
+        engine.handle(Command::Play);
+        let beat = 24_000.0;
+        let mut script = Vec::new();
+        for phrase in 0..4 {
+            let from = phrase as f64 * 4.0 * 4.0 * beat;
+            script.extend(groove(from, 3, 120.0));
+            // Bar 4: two beats of groove, then a rushed fill: sixteenths 15 % fast, toms then snare.
+            script.extend(groove(from + 12.0 * beat, 1, 120.0).into_iter().filter(|(f, _)| (*f as f64) < from + 14.0 * beat));
+            for i in 0..8 {
+                let piece = if i < 4 { Piece::Tom1 } else { Piece::Snare };
+                script.push(((from + 14.0 * beat + i as f64 * beat / 4.0 / 1.15) as u64, hit(piece, 110)));
+            }
+        }
+        script.sort_by_key(|(f, _)| *f);
+        let events = run_script(&mut engine, &mut 0, 33.0, &script);
+        let tempos: Vec<_> =
+            events.iter().filter_map(|(_, e)| if let EngineEvent::Tempo { bpm } = e { Some(*bpm) } else { None }).collect();
+        assert!(tempos.iter().all(|bpm| (bpm - 120.0).abs() < 1.5), "{tempos:?}");
+    }
+
+    /// A drummer plays three bars of groove, a fill in bar 4 and then, if
+    /// `crash_at` is set, a crash that many frames from bar 5's 1.
+    fn fill_into_bar_five(crash_at: Option<i64>) -> Vec<(u64, EngineEvent)> {
+        let mut engine = drummer();
+        engine.handle(Command::SetTempo { bpm: 120.0 });
+        engine.handle(Command::Play);
+        let beat = 24_000.0;
+        let mut script = groove(0.0, 3, 120.0);
+        script.extend(groove(12.0 * beat, 1, 120.0).into_iter().filter(|(f, _)| (*f as f64) < 14.0 * beat));
+        for i in 0..8 {
+            script.push(((14.0 * beat + i as f64 * beat / 4.0) as u64, hit(Piece::Tom2, 110)));
+        }
+        if let Some(offset) = crash_at {
+            script.push((((16.0 * beat) as i64 + offset) as u64, hit(Piece::Crash, 120)));
+        }
+        script.extend(groove(16.0 * beat, 2, 120.0));
+        script.sort_by_key(|(f, _)| *f);
+        run_script(&mut engine, &mut 0, 9.0, &script)
+    }
+
+    #[test]
+    fn a_fill_and_a_crash_on_the_1_move_the_band_on() {
+        for offset in [-2_000, 0, 3_000] {
+            let events = fill_into_bar_five(Some(offset));
+            let states = band_states(&events);
+            let cued = states.iter().find(|(_, s)| s.cued).expect("the fill is heard");
+            assert!(cued.0 > 14 * 24_000 && cued.0 < 16 * 24_000, "cued at {}", cued.0);
+            assert_eq!(cued.1.next_variation, 1);
+            let (at, state) = states.iter().find(|(_, s)| s.variation == 1).expect("B comes in");
+            assert!(*at as i64 >= 16 * 24_000 && (*at as i64) <= 16 * 24_000 + offset.max(0) + 128, "crash {offset}: B at {at}");
+            assert!(!state.cued);
+            assert_eq!(states.last().unwrap().1.variation, 1, "and stays");
+        }
+    }
+
+    #[test]
+    fn without_a_crash_the_band_stays() {
+        let states = band_states(&fill_into_bar_five(None));
+        assert!(states.iter().any(|(_, s)| s.cued));
+        let last = states.last().unwrap().1;
+        assert_eq!((last.variation, last.next_variation, last.cued), (0, 0, false));
+    }
+
+    #[test]
+    fn grabbing_a_cymbal_stops_the_band() {
+        let mut engine = drummer();
+        engine.handle(Command::Play);
+        let events =
+            run_script(&mut engine, &mut 0, 0.5, &[(12_800, Command::DrumChoke { note: 42 }), (19_200, Command::DrumChoke { note: 49 })]);
+        let stop = events.iter().find(|(_, e)| *e == EngineEvent::Transport { playing: false }).unwrap();
+        assert_eq!(stop.0, 19_200, "the hi-hat isn't a cymbal to grab");
+        assert!(!engine.is_playing());
+    }
+
+    #[test]
+    fn kit_triggers_control_the_band() {
+        use crate::drums::Trigger;
+        let mut engine = drummer();
+        engine.handle(Command::KitTrigger { trigger: Trigger::Note(60), action: Some(KitAction::StartStop) });
+        engine.handle(Command::KitTrigger { trigger: Trigger::Control(64), action: Some(KitAction::NextSection) });
+        engine.handle(Command::KitTrigger { trigger: Trigger::Control(65), action: Some(KitAction::Ending) });
+        engine.handle(Command::NoteOn { note: 60, velocity: 100 });
+        assert!(drum_events(engine.process(128)).is_empty(), "a trigger pad plays no drum");
+        assert!(engine.is_playing());
+        engine.end_block();
+        engine.handle(Command::ControlChange { cc: 64, value: 127 });
+        let state = band_states(&engine.process(128).iter().map(|t| (0, t.event)).collect::<Vec<_>>()).last().unwrap().1;
+        assert_eq!((state.next_variation, state.fill_pending, state.follow), (1, true, true));
+        engine.end_block();
+        engine.handle(Command::ControlChange { cc: 65, value: 127 });
+        assert!(band_states(&engine.process(128).iter().map(|t| (0, t.event)).collect::<Vec<_>>()).last().unwrap().1.ending_pending);
+        engine.end_block();
+        engine.handle(Command::DrumNote { note: 60, velocity: 90 });
+        engine.process(128);
+        assert!(!engine.is_playing());
+    }
+
+    #[test]
+    fn a_drummer_s_band_drums_are_off_percussion_or_a_click() {
+        let keys = |events: &[(u64, EngineEvent)]| -> std::collections::BTreeSet<u8> {
+            events.iter().filter_map(|(_, e)| if let EngineEvent::NoteOn { channel: 9, key, .. } = e { Some(*key) } else { None }).collect()
+        };
+        for (mode, expected) in [
+            (None, vec![]),
+            (Some(BandDrums::Percussion), vec![54, 70]),
+            (Some(BandDrums::Click), vec![76]),
+            (Some(BandDrums::Full), vec![36, 38, 42, 49]),
+        ] {
+            let mut engine = drummer();
+            if let Some(mode) = mode {
+                engine.handle(Command::SetBandDrums { mode });
+            }
+            engine.handle(Command::SetTempo { bpm: 120.0 });
+            engine.handle(Command::Section { request: Request::Intro });
+            let events = run_script(&mut engine, &mut 0, 4.2, &[]);
+            let heard: Vec<_> = keys(&events).into_iter().collect();
+            if mode == Some(BandDrums::Full) {
+                assert!(expected.iter().all(|k| heard.contains(k)), "{heard:?}");
+            } else {
+                assert_eq!(heard, expected, "{mode:?}");
+            }
+            if mode == Some(BandDrums::Click) {
+                let clicks = events.iter().filter(|(_, e)| matches!(e, EngineEvent::NoteOn { channel: 9, .. })).count();
+                assert_eq!(clicks, 9, "one per beat");
+            }
+        }
+        let mut engine = drummer();
+        engine.handle(Command::SetInstrument { instrument: Instrument::Keys });
+        engine.handle(Command::Play);
+        assert!(keys(&run_script(&mut engine, &mut 0, 1.0, &[])).contains(&36), "keys players get the full band");
+    }
+
+    #[test]
+    fn a_drummer_s_hits_are_timed_against_the_grid() {
+        let mut engine = drummer();
+        engine.handle(Command::SetTempo { bpm: 120.0 });
+        engine.handle(Command::Play);
+        // 10 ms late on beat 2, then a crash, which isn't timed.
+        let events = run_script(&mut engine, &mut 0, 1.0, &[(24_000 + 480, hit(Piece::Snare, 100)), (36_000, hit(Piece::Crash, 100))]);
+        let timings: Vec<_> =
+            events.iter().filter_map(|(_, e)| if let EngineEvent::Timing { ms } = e { Some(*ms) } else { None }).collect();
+        assert_eq!(timings.len(), 1);
+        assert!((timings[0] - 10.0).abs() < 2.7, "{timings:?}");
     }
 
     #[test]
