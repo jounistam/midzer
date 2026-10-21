@@ -1,4 +1,4 @@
-// The song model shared by Songs (and later Learn): a chord chart in 4/4 with
+// The song model shared by Songs and Learn: a chord chart in 4/4 with
 // sections, plus a compact text notation for built-in songs and the editor.
 //
 // Chart notation: bars are separated by `|` or line breaks. A bar holds one, two or four
@@ -9,6 +9,7 @@
 
 import type { EngineCommand, SongMark } from '@midzer/audio-web';
 import { isNoChord, parseChord } from './chords';
+import type { MelodyNote } from './melody';
 
 export const BEATS_PER_BAR = 4;
 /** Mirrors `MAX_SONG_BARS` in song.rs. */
@@ -45,6 +46,8 @@ export interface Song {
   /** Index into STYLES. */
   style: number;
   bars: Bar[];
+  /** The tune, for Learn; from the song's notation or a MIDI file's melody track. */
+  melody?: MelodyNote[];
   source: SongSource;
 }
 

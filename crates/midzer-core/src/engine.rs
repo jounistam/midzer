@@ -64,6 +64,7 @@ impl Engine {
             Command::SongLoop { start, end } => self.band.set_song_loop(start as u32, end as u32),
             Command::SetSong { on } => self.band.set_song(on),
             Command::SongSeek { bar } => self.band.seek_song(bar as u32),
+            Command::SongWait { tick } => self.band.set_song_wait(tick),
             // Mixing is the synth's job; the host routes this one.
             Command::SetGain { .. } => {}
         }

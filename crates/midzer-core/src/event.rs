@@ -24,8 +24,10 @@ pub enum EngineEvent {
     Transport { playing: bool },
     /// Style, section and energy changed; sent at the beat where it is heard.
     Band(BandState),
-    /// A song bar starts; sent on every downbeat while a song plays.
-    SongPosition { bar: u32 },
+    /// A song beat starts; sent on every beat while a song plays.
+    SongPosition { beat: u32 },
+    /// The band stopped at song tick `tick` to wait for the player, or went on from there.
+    Hold { holding: bool, tick: u32 },
 }
 
 /// What the band is doing, for the UI.
@@ -57,6 +59,7 @@ mod op {
     pub const TRANSPORT: u32 = 6;
     pub const BAND: u32 = 7;
     pub const SONG_POSITION: u32 = 8;
+    pub const HOLD: u32 = 9;
 }
 
 const NO_CHORD: u32 = 0xff;
@@ -82,7 +85,8 @@ impl EngineEvent {
             ],
             EngineEvent::Beat { bar, beat } => [op::BEAT, bar, beat as u32, frame],
             EngineEvent::Transport { playing } => [op::TRANSPORT, playing as u32, 0, frame],
-            EngineEvent::SongPosition { bar } => [op::SONG_POSITION, bar, 0, frame],
+            EngineEvent::SongPosition { beat } => [op::SONG_POSITION, beat, 0, frame],
+            EngineEvent::Hold { holding, tick } => [op::HOLD, holding as u32, tick, frame],
             EngineEvent::Band(s) => {
                 let section = Section::ALL.iter().position(|x| *x == s.section).unwrap_or(0) as u32;
                 let flags = s.playing as u32

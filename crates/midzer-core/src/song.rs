@@ -37,6 +37,8 @@ impl Slot {
 /// What the song asks of the band on one beat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SongBeat {
+    /// The song beat being played.
+    pub beat: u32,
     /// The song bar, on downbeats only.
     pub bar: Option<u32>,
     /// The harmony from this beat on; `None` keeps the current one.
@@ -169,7 +171,16 @@ impl SongPlayer {
             self.next_beat = start * BEATS;
             self.jumped = true;
         }
-        SongBeat { bar: (beat_in_bar == 0).then_some(bar), chord, request }
+        SongBeat { beat, bar: (beat_in_bar == 0).then_some(bar), chord, request }
+    }
+
+    /// The song beat the next [`SongPlayer::on_beat`] call will play, taking a
+    /// queued jump into account.
+    pub fn upcoming(&self, beat_in_bar: u8) -> u32 {
+        match self.seek {
+            Some(bar) if beat_in_bar == 0 => bar * BEATS,
+            _ => self.next_beat,
+        }
     }
 
     /// The bar after `bar`, following the loop; `None` past the last bar.
@@ -278,8 +289,10 @@ mod tests {
         s.seek(2, true);
         assert_eq!(s.on_beat(2).bar, None);
         assert_eq!(s.on_beat(3).bar, None);
+        assert_eq!(s.upcoming(0), 8);
         let next = s.on_beat(0);
         assert_eq!((next.bar, next.chord), (Some(2), Some(Some(C))));
+        assert_eq!((next.beat, s.upcoming(1)), (8, 9));
     }
 
     #[test]

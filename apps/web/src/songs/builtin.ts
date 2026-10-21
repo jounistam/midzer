@@ -1,6 +1,7 @@
 // Built-in songs: common progressions (chord progressions are free to use)
 // and traditional tunes in the public domain. Style indices follow STYLES.
 
+import { melody } from './melody';
 import { songFromChart, type Song } from './song';
 
 const POP = 0;
@@ -10,8 +11,10 @@ const BOSSA = 3;
 const BALLAD = 4;
 const BLUES = 5;
 
-const song = (id: string, title: string, artist: string, bpm: number, style: number, chart: string): Song =>
-  songFromChart({ id: `builtin-${id}`, title, artist, bpm, style, source: 'builtin' }, chart);
+const song = (id: string, title: string, artist: string, bpm: number, style: number, chart: string, tune?: string): Song => {
+  const s = songFromChart({ id: `builtin-${id}`, title, artist, bpm, style, source: 'builtin' }, chart);
+  return tune ? { ...s, melody: melody(tune) } : s;
+};
 
 export const BUILTIN_SONGS: Song[] = [
   song(
@@ -116,5 +119,39 @@ export const BUILTIN_SONGS: Song[] = [
      [B] A7 | A7 | Em7 | Em7 | A7 | A7 | Em7 | [Fill] Em7 |
      [C] Cmaj7 | B7 | Em7 | Em7 |
      [Ending] Em7`,
+  ),
+  song(
+    'mary',
+    'Mary Had a Little Lamb',
+    'Traditional',
+    96,
+    POP,
+    `[Intro] C | [A] C | C | G | C | C | C | G | C | [Ending] C`,
+    `r:4 | E4 D C D | E E E:2 | D D D:2 | E G G:2 | E D C D | E E E E | D D E D | C:4`,
+  ),
+  song(
+    'twinkle',
+    'Twinkle, Twinkle, Little Star',
+    'Traditional',
+    92,
+    BALLAD,
+    `[Intro] C |
+     [A] C | F C | F C | G C | [B] C F | C G | C F | C G |
+     [A] C | F C | F C | G C | [Ending] C`,
+    `r:4 | C4 C G G | A A G:2 | F F E E | D D C:2 | G G F F | E E D:2 | G G F F | E E D:2 |
+     C C G G | A A G:2 | F F E E | D D C:2`,
+  ),
+  song(
+    'ode-to-joy',
+    'Ode to Joy',
+    'Ludwig van Beethoven, 1824',
+    104,
+    POP,
+    `[Intro] C |
+     [A] C | G | C | G | C | G | C | G C | [B] G | G C | G | C G | [A] C | G | C | G C |
+     [Ending] C`,
+    `r:4 | E4 E F G | G F E D | C C D E | E:1.5 D:0.5 D:2 | E E F G | G F E D | C C D E | D:1.5 C:0.5 C:2 |
+     D D E C | D E:0.5 F:0.5 E C | D E:0.5 F:0.5 E D | C D G3:2 |
+     E4 E F G | G F E D | C C D E | D:1.5 C:0.5 C:2`,
   ),
 ];

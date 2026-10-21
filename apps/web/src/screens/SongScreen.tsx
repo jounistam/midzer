@@ -143,7 +143,8 @@ function NowPlaying({ song }: { song: Song }) {
 function SongHeader({ song, editing, onEditing }: { song: Song; editing: boolean; onEditing: (on: boolean) => void }) {
   const dirty = useSession((s) => s.songDirty);
   const [saveNote, setSaveNote] = useState<string | null>(null);
-  const save = () => setSaveNote(saveSong() ? 'Saved to My songs' : 'Could not save: browser storage is full or blocked');
+  const save = () =>
+    void saveSong().then((ok) => setSaveNote(ok ? 'Saved to My songs' : 'Could not save: browser storage is full or blocked'));
   const update = (fields: Partial<Song>) => {
     setSaveNote(null);
     editSong({ ...song, ...fields });

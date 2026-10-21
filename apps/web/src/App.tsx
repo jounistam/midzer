@@ -1,6 +1,8 @@
 import { useEffect } from 'react';
 import { Home } from './screens/Home';
 import { Jam } from './screens/Jam';
+import { Learn } from './screens/Learn';
+import { Lesson } from './screens/Lesson';
 import { Onboarding } from './screens/Onboarding';
 import { Songs } from './screens/Songs';
 import { SongScreen } from './screens/SongScreen';
@@ -23,5 +25,9 @@ export function App() {
       return <Songs />;
     case 'song':
       return <SongScreen />;
+    case 'learn':
+      return <Learn />;
+    case 'lesson':
+      return <Lesson />;
   }
 }

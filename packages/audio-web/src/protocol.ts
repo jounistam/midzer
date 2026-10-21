@@ -28,7 +28,11 @@ const Cmd = {
   SongLoop: 20,
   SetSong: 21,
   SongSeek: 22,
+  SongWait: 23,
 } as const;
+
+/** Ticks per beat in song positions; mirrors `PPQ` in style.rs. */
+export const PPQ = 480;
 
 /** Built-in styles in engine order; mirrors `styles()` in crates/midzer-core/src/style.rs. */
 export const STYLES = [
@@ -93,7 +97,9 @@ export type EngineCommand =
   /** Whether the song chart, rather than the player, sets the harmony. */
   | { type: 'setSong'; on: boolean }
   /** Stopped: where the song starts. Playing: a jump on the next bar line. */
-  | { type: 'songSeek'; bar: number };
+  | { type: 'songSeek'; bar: number }
+  /** The band stops at song tick `tick` (PPQ per beat) until the wait moves; null clears it. */
+  | { type: 'songWait'; tick: number | null };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -152,6 +158,8 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.SetSong, cmd.on ? 1 : 0, 0, 0];
     case 'songSeek':
       return [Cmd.SongSeek, cmd.bar, 0, 0];
+    case 'songWait':
+      return cmd.tick === null ? [Cmd.SongWait, 0, 0, 0] : [Cmd.SongWait, 1, cmd.tick, 0];
   }
 }
 
@@ -209,8 +217,10 @@ export type EngineEvent =
   | { type: 'beat'; bar: number; beat: number }
   | { type: 'transport'; playing: boolean }
   | { type: 'band'; state: BandState }
-  /** A song bar starts; sent on every downbeat while a song plays. */
-  | { type: 'songPosition'; bar: number };
+  /** A song beat starts; sent on every beat while a song plays. */
+  | { type: 'songPosition'; beat: number }
+  /** The band stopped at song tick `tick` to wait for the player, or went on from there. */
+  | { type: 'hold'; holding: boolean; tick: number };
 
 /** An event plus the AudioContext frame at which it sounds. */
 export type TimedEvent = EngineEvent & { frame: number };
@@ -262,7 +272,9 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
       return { type: 'band', state, frame };
     }
     case 8:
-      return { type: 'songPosition', bar: a, frame };
+      return { type: 'songPosition', beat: a, frame };
+    case 9:
+      return { type: 'hold', holding: a !== 0, tick: b, frame };
     default:
       return null;
   }

@@ -6,9 +6,13 @@
 // reduced to a duration-weighted pitch-class profile and matched against
 // chord templates by cosine similarity, with a bonus when the lowest note is
 // the root.
+//
+// The melody, for Learn, is the highest mostly-single-note part: per track and
+// channel, the top line of its notes, quantized to sixteenths.
 
 import { QUALITY_INTERVALS } from '@midzer/audio-web';
 import { formatChord, Q } from './chords';
+import type { MelodyNote } from './melody';
 import { BEATS_PER_BAR, MAX_BARS, newSongId, type Bar, type Song } from './song';
 import { readSmf, type Smf, type SmfNote } from './smf';
 
@@ -19,9 +23,16 @@ const RARITY: Record<number, number> = { [Q.major]: 0, [Q.minor]: 0, [Q.dom7]: 0
 const BASS_BONUS = 0.08;
 /** Below this similarity a window counts as no clear chord and holds the one before. */
 const MIN_SCORE = 0.55;
+/** A melody part needs this many notes, mostly one at a time, above this average key. */
+const MELODY_MIN_NOTES = 8;
+const MELODY_MIN_SINGLE = 0.7;
+const MELODY_MIN_KEY = 55;
+const MAX_MELODY_NOTES = 8192;
 
 export interface MidiImportResult {
   song: Song;
+  /** Where the melody came from, if one was found. */
+  melodyFrom?: string;
   /** Things the user should know, e.g. a meter the chart can't show. */
   warnings: string[];
 }
@@ -78,7 +89,49 @@ export function importMidi(data: ArrayBuffer | Uint8Array, title: string): MidiI
     bars,
     source: 'midi',
   };
-  return { song, warnings };
+  const found = findMelody(smf, firstBar * barTicks, barCount * BEATS_PER_BAR);
+  if (found) song.melody = found.notes;
+  return { song, warnings, melodyFrom: found?.from };
+}
+
+/** The melody line in beats from `startTick`, cut at `beats`. */
+export function findMelody(smf: Smf, startTick: number, beats: number): { notes: MelodyNote[]; from: string } | null {
+  let best: { notes: SmfNote[]; from: string; pitch: number } | null = null;
+  for (const [t, track] of smf.tracks.entries()) {
+    const channels = new Set(track.notes.map((n) => n.channel));
+    for (const channel of channels) {
+      if (channel === DRUM_CHANNEL) continue;
+      const line = topLine(track.notes.filter((n) => n.channel === channel && n.duration > 0));
+      if (line.notes.length < MELODY_MIN_NOTES || line.single < MELODY_MIN_SINGLE) continue;
+      const pitch = line.notes.reduce((sum, n) => sum + n.key, 0) / line.notes.length;
+      if (pitch < MELODY_MIN_KEY || (best && best.pitch >= pitch)) continue;
+      const from = track.name || `track ${t + 1}`;
+      best = { notes: line.notes, from: channels.size > 1 ? `${from}, channel ${channel + 1}` : from, pitch };
+    }
+  }
+  if (!best) return null;
+  const { notes: line, from } = best;
+  const q = (ticks: number) => Math.round((ticks / smf.ppq) * 4) / 4;
+  const notes: MelodyNote[] = [];
+  for (const n of line) {
+    const at = q(n.tick - startTick);
+    if (at < 0 || at >= beats || notes.length >= MAX_MELODY_NOTES) continue;
+    const prev = notes[notes.length - 1];
+    if (prev && prev.at === at) continue; // two onsets fell on one sixteenth
+    if (prev && prev.at + prev.len > at) prev.len = at - prev.at;
+    notes.push({ at, len: Math.max(0.25, q(n.duration)), key: n.key });
+  }
+  return notes.length >= MELODY_MIN_NOTES ? { notes, from } : null;
+}
+
+/** The highest note of each onset, and the share of onsets that had only one note. */
+function topLine(notes: SmfNote[]): { notes: SmfNote[]; single: number } {
+  const byTick = new Map<number, SmfNote[]>();
+  for (const n of notes) byTick.set(n.tick, [...(byTick.get(n.tick) ?? []), n]);
+  const ticks = [...byTick.keys()].sort((a, b) => a - b);
+  const line = ticks.map((tick) => byTick.get(tick)!.reduce((hi, n) => (n.key > hi.key ? n : hi)));
+  const single = ticks.filter((tick) => byTick.get(tick)!.length === 1).length / Math.max(1, ticks.length);
+  return { notes: line, single };
 }
 
 function bpmOf(smf: Smf): number {

@@ -98,3 +98,37 @@ describe('importMidi', () => {
     expect(() => importMidi(writeSmf(96, [{ name: 'x', events: [] }]), 'x')).toThrow(/no notes/);
   });
 });
+
+describe('melody from MIDI', () => {
+  it('takes the top line of the highest single-note part, in beats from the first bar', () => {
+    const ppq = 96;
+    const chords: number[][] = [];
+    for (let bar = 1; bar <= 3; bar++) {
+      for (const key of [48, 52, 55]) chords.push([bar * ppq * 4, 0x90, key, 70], [(bar + 1) * ppq * 4 - 1, 0x80, key, 0]);
+    }
+    // A tune starting in bar 1: twelve quarter notes, the third one doubled a third below and a little late.
+    const tune = [64, 62, 60, 62, 64, 64, 64, 62, 62, 64, 67, 67];
+    const lead: number[][] = [];
+    tune.forEach((key, i) => {
+      const tick = ppq * 4 + i * ppq + (i === 2 ? 3 : 0);
+      lead.push([tick, 0x91, key, 90], [tick + ppq - 8, 0x81, key, 0]);
+      if (i === 2) lead.push([tick, 0x91, 57, 60], [tick + ppq - 8, 0x81, 57, 0]);
+    });
+    const file = writeSmf(ppq, [
+      { name: 'Chords', events: chords },
+      { name: 'Lead', events: lead },
+    ]);
+    const { song, melodyFrom } = importMidi(file, 'Tune');
+    expect(melodyFrom).toBe('Lead');
+    expect(song.melody?.map((n) => n.key)).toEqual(tune);
+    expect(song.melody?.slice(0, 3)).toEqual([
+      { at: 0, len: 1, key: 64 },
+      { at: 1, len: 1, key: 62 },
+      { at: 2, len: 1, key: 60 },
+    ]);
+  });
+
+  it('finds no melody in chords alone', () => {
+    expect(importMidi(chordFile([[48, 60, 64, 67], [45, 60, 64, 69]]), 'x').song.melody).toBeUndefined();
+  });
+});

@@ -1,10 +1,22 @@
-// The player's own songs, kept in localStorage next to the built-in ones.
+// The player's own songs, kept in IndexedDB next to the built-in ones. Songs
+// saved by earlier versions in localStorage move over on first load.
 
 import { STYLES } from '@midzer/audio-web';
+import { store } from '../storage/db';
 import { BUILTIN_SONGS } from './builtin';
+import type { MelodyNote } from './melody';
 import { BEATS_PER_BAR, type Bar, type Song, type SongSection } from './song';
 
-const KEY = 'midzer.songs';
+const LEGACY_KEY = 'midzer.songs';
+const MAX_MELODY_NOTES = 8192;
+
+interface Saved {
+  song: Song;
+  /** When the song was first saved; newest songs list first. */
+  savedAt: number;
+}
+
+const songs = store<Saved>('songs');
 const SECTIONS: SongSection[] = ['intro', 'A', 'B', 'C', 'ending'];
 
 /** Keeps only well-formed songs, so a damaged entry can't break the app. */
@@ -27,39 +39,77 @@ function sanitize(value: unknown): Song | null {
     bpm: typeof s.bpm === 'number' && s.bpm >= 40 && s.bpm <= 240 ? s.bpm : 100,
     style: Number.isInteger(s.style) && STYLES[s.style!] ? s.style! : 0,
     bars,
+    melody: Array.isArray(s.melody) ? sanitizeMelody(s.melody) : undefined,
     source: s.source === 'chordpro' || s.source === 'midi' ? s.source : 'user',
   };
 }
 
-export function loadUserSongs(): Song[] {
+function sanitizeMelody(notes: unknown[]): MelodyNote[] | undefined {
+  const ok = notes.slice(0, MAX_MELODY_NOTES).flatMap((n) => {
+    const { at, len, key } = (n ?? {}) as Partial<MelodyNote>;
+    const valid = typeof at === 'number' && at >= 0 && typeof len === 'number' && len > 0 && Number.isInteger(key) && key! >= 0 && key! < 128;
+    return valid ? [{ at, len, key: key! }] : [];
+  });
+  return ok.length ? ok : undefined;
+}
+
+let migrated: Promise<void> | null = null;
+
+/** Moves songs saved by earlier versions out of localStorage, once. */
+function migrate(): Promise<void> {
+  migrated ??= (async () => {
+    let legacy: unknown;
+    try {
+      legacy = JSON.parse(localStorage.getItem(LEGACY_KEY) ?? 'null');
+    } catch {
+      return;
+    }
+    if (!Array.isArray(legacy)) return;
+    // The old list was newest first.
+    const now = Date.now();
+    for (const [i, raw] of legacy.entries()) {
+      const song = sanitize(raw);
+      if (song && !(await songs.get(song.id))) await songs.put(song.id, { song, savedAt: now - i });
+    }
+    try {
+      localStorage.removeItem(LEGACY_KEY);
+    } catch {
+      // Stays; the songs are only copied again if missing.
+    }
+  })();
+  return migrated;
+}
+
+export async function loadUserSongs(): Promise<Song[]> {
   try {
-    const raw: unknown = JSON.parse(localStorage.getItem(KEY) ?? '[]');
-    return Array.isArray(raw) ? raw.flatMap((s) => sanitize(s) ?? []) : [];
+    await migrate();
+    const saved = await songs.all();
+    return saved
+      .sort((a, b) => b.savedAt - a.savedAt)
+      .flatMap((s) => sanitize(s.song) ?? []);
   } catch {
     return [];
   }
 }
 
-function store(songs: Song[]): boolean {
+/** Adds or replaces a song by id. Resolves false if it could not be stored. */
+export async function saveUserSong(song: Song): Promise<boolean> {
   try {
-    localStorage.setItem(KEY, JSON.stringify(songs));
+    await migrate();
+    const existing = await songs.get(song.id);
+    await songs.put(song.id, { song, savedAt: existing?.savedAt ?? Date.now() });
     return true;
   } catch {
     return false;
   }
 }
 
-/** Adds or replaces a song by id. Returns false if it could not be stored. */
-export function saveUserSong(song: Song): boolean {
-  const songs = loadUserSongs();
-  const i = songs.findIndex((s) => s.id === song.id);
-  if (i >= 0) songs[i] = song;
-  else songs.unshift(song);
-  return store(songs);
-}
-
-export function deleteUserSong(id: string): void {
-  store(loadUserSongs().filter((s) => s.id !== id));
+export async function deleteUserSong(id: string): Promise<void> {
+  try {
+    await songs.delete(id);
+  } catch {
+    // Nothing to do; it stays listed.
+  }
 }
 
 export function isBuiltin(song: Song): boolean {

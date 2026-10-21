@@ -6,11 +6,11 @@ An interactive backing band: play a MIDI keyboard (or your computer keyboard) an
 
 | Path | What |
 |---|---|
-| `crates/midzer-core` | Platform-independent Rust engine: chord recognition, styles, conductor (sections, energy, stop detection), song charts, band scheduler. No I/O, no allocation on the audio path. |
+| `crates/midzer-core` | Platform-independent Rust engine: chord recognition, styles, conductor (sections, energy, stop detection), song charts with wait points for Learn, band scheduler. No I/O, no allocation on the audio path. |
 | `crates/midzer-synth` | SoundFont playback of engine events (rustysynth). |
 | `crates/midzer-wasm` | Raw C-ABI wasm exports for the AudioWorklet; includes the no-allocation test. |
 | `packages/audio-web` | AudioWorklet host, lock-free record rings (SharedArrayBuffer), protocol mirror, Web MIDI. |
-| `apps/web` | React + Vite UI (design direction A), PixiJS keyboard, Playwright e2e. `src/songs` holds the song model, chart notation, ChordPro/MIDI import and MIDI export. |
+| `apps/web` | React + Vite UI (design direction A), PixiJS keyboard and falling notes, Playwright e2e. `src/songs` holds the song model, chart and melody notation, ChordPro/MIDI import and MIDI export; `src/learn` the targets, judge, lessons and progress; `src/storage` the IndexedDB stores. |
 
 ## Development
 
@@ -30,6 +30,8 @@ Computer-keyboard playing: `A W S E D F T G Y H U J K` is one octave from middle
 In Jam, the band follows how hard and how much you play ("Follow me"), or you drive it with the Intro / A / B / C / Fill / Ending pads. When you stop playing for two bars it rests until you come back (Settings can change that to an ending or to keep playing). Settings → Timing → Calibrate measures your latency by tapping along with a click.
 
 In Songs, the band plays a chord chart while you play on top: built-in songs, your own, or ones imported from MIDI or ChordPro files (drop them on the Songs page or paste chords). Click a bar to start there, shift-click to select bars to loop, and use Edit chart to change chords, sections and fills. In both Jam and Songs, everything from Play to Stop is recorded, and "Save last take as MIDI" downloads it with one track per part.
+
+In Learn, notes and chords fall onto the keyboard. With "Wait for me" on, the band stops at each one until you play it; with it off, the band keeps time and each note is graded by how close to the beat it lands. Lessons go from a first chord to melodies and both hands together, and each one opens once the one before has a star. Any song can be practised too, as melody, chords or both, at a slower speed or in a loop. Your songs and Learn progress are kept in the browser's IndexedDB.
 
 `pnpm demo [out.wav] [bpm] [style]` renders any style (0 Pop, 1 Rock, 2 Funk, 3 Bossa, 4 Ballad, 5 Blues) with an intro, a variation change and the ending.
 

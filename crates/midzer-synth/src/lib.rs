@@ -82,7 +82,8 @@ fn apply(synth: &mut Synthesizer, event: &EngineEvent) {
         | EngineEvent::Beat { .. }
         | EngineEvent::Transport { .. }
         | EngineEvent::Band(_)
-        | EngineEvent::SongPosition { .. } => {}
+        | EngineEvent::SongPosition { .. }
+        | EngineEvent::Hold { .. } => {}
     }
 }
 

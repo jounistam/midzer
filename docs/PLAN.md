@@ -34,11 +34,26 @@
   - Chart editor: edit per bar or as text; sections, fills, add/duplicate/delete bars; title, artist and tempo. Songs are saved to My songs in localStorage, and a built-in song is saved as a copy.
   - Every performance from Play to Stop is recorded. "Save last take as MIDI" writes a format-1 file with one track per part, on the band's beat grid, including tempo changes.
   - Tests: Rust song and band tests, song commands in the no-allocation test, Vitest for the parsers, SMF and recorder, and a Playwright songs flow.
-- **Next: M4** (learn).
+- **M4 learn:** done (2026-10-21).
+  - Wait mode lives in the engine (`SongWait`): the band stops at a song tick, on a beat or inside one, and holds the harmony (drums and bass stop) until the wait moves. It reports `Hold` events, and the song position now comes on every beat.
+  - Learn code is in `apps/web/src/learn`:
+    - Targets come from a song's melody, its chords, or both. Chords are asked for where they change and again on every bar, but not in the intro.
+    - A song clock built from the heard beat and hold events.
+    - The judge grades notes as perfect, good or ok against ±70/140/280 ms windows, after the calibrated tap offset. In wait mode, a target played cleanly is perfect, and one played after a wrong note is good. Chords count in any octave or inversion, and must be struck again for each target. Accuracy, streaks, and 1–3 stars.
+    - Falling notes in PixiJS (`NoteLanes`) on the keyboard's key layout. The next keys light up on the keyboard.
+  - Practice options: wait mode, speed 50–100 %, loop bars, melody in any octave (on by default without a MIDI device, since the computer keyboard has one octave), and the part to play for any song.
+  - A lesson path of ten lessons in three units (chords, first melodies, hands together). Each lesson opens once the one before has a star.
+  - Songs can have a melody (`Song.melody`, with a small notation in `songs/melody.ts`). Three public-domain tunes were added with melodies (Mary Had a Little Lamb, Twinkle, Ode to Joy). MIDI import keeps the top line of the highest mostly single-note part as the melody.
+  - Storage is IndexedDB (`storage/db.ts`), with a memory fallback. It holds My songs (moved over from localStorage on first load) and Learn progress (best stars, accuracy and streak per lesson or song part).
+  - Tests: Rust hold tests, waits in the no-allocation test, Vitest for targets, clock, judge, lanes, lessons, progress, the library migration and MIDI melodies, and a Playwright Learn flow.
+- **Next: M5** (desktop + mic).
+- Open from M4:
+  - Learn screens aren't in the Figma file; the Figma MCP call limit was hit again. They were built straight in direction A.
+  - Nobody has tried the lessons on a real MIDI keyboard yet. The timing windows and the any-octave default need a hands-on pass.
+  - No "listen first" guide: the band doesn't play the melody. Charts are still 4/4 only.
+  - A loop run isn't scored for stars.
 - Open from M3:
   - Charts are 4/4 only. 3/4 songs (and so a waltz style) need meter support in the engine.
-  - My songs live in localStorage. Moving them to IndexedDB is planned for M4, together with progress.
-  - MIDI import reads only chords. Keeping the melody for Learn is M4 work.
   - The song screens aren't in the Figma file yet. They were built straight in direction A.
 - Open from M2:
   - The styles need a listening pass on real speakers. Nobody has auditioned them yet; only levels and clipping were checked, with `pnpm demo`.

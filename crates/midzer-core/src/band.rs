@@ -59,6 +59,12 @@ pub struct Band {
     published: Option<BandState>,
     /// A chord chart that replaces the player's chords while active.
     song: SongPlayer,
+    /// A song tick where the band stops and waits for the player.
+    wait: Option<u32>,
+    /// While waiting: the band tick it stopped at and the song tick.
+    hold: Option<(f64, u32)>,
+    /// The band tick of the song beat playing, and that song beat.
+    song_beat: Option<(f64, u32)>,
 }
 
 /// Converts song positions within the current block to frame offsets.
@@ -110,6 +116,9 @@ impl Band {
             click: false,
             published: None,
             song: SongPlayer::default(),
+            wait: None,
+            hold: None,
+            song_beat: None,
         }
     }
 
@@ -228,6 +237,12 @@ impl Band {
         self.song.seek(bar, self.playing);
     }
 
+    /// Where the band stops and waits for the player, in song ticks; `None`
+    /// clears it. A wait that moves while the band holds lets it go on.
+    pub fn set_song_wait(&mut self, tick: Option<u32>) {
+        self.wait = tick;
+    }
+
     /// The player pressed a key; `keys_held` tells whether any key is down.
     pub fn note_played(&mut self, velocity: u8) {
         self.conductor.note_played(velocity);
@@ -276,6 +291,8 @@ impl Band {
         self.frame = 0;
         self.anchor_frame = 0;
         self.anchor_tick = 0.0;
+        self.hold = None;
+        self.song_beat = None;
         let mut intro = intro;
         if self.song.active() {
             let (song_intro, variation) = self.song.start();
@@ -299,6 +316,7 @@ impl Band {
             return;
         }
         self.playing = false;
+        self.hold = None;
         self.release_all(|_| true, frame, out);
         out.push(frame, EngineEvent::Transport { playing: false });
         if let Some(index) = self.pending_style.take() {
@@ -313,6 +331,14 @@ impl Band {
         if !self.playing || frames == 0 {
             return;
         }
+        if let Some((_, song_tick)) = self.hold {
+            if self.song.active() && self.wait == Some(song_tick) {
+                self.hold_block(frames);
+                return;
+            }
+            self.hold = None;
+            out.push(0, EngineEvent::Hold { holding: false, tick: song_tick });
+        }
         let clock = self.clock(frames);
         let start = clock.tick_at(self.frame);
         let end = clock.tick_at(self.frame + frames as u64);
@@ -324,9 +350,18 @@ impl Band {
         loop {
             let beat_tick = (beat * PPQ as u64) as f64;
             let seg_end = beat_tick.min(end);
+            if let Some(at) = self.wait_between(seg_start, seg_end) {
+                self.schedule_range(seg_start, at, &clock, out);
+                self.start_hold(at, &clock, frames, out);
+                return;
+            }
             self.schedule_range(seg_start, seg_end, &clock, out);
             if beat_tick >= end {
                 break;
+            }
+            if self.waits_on_beat(beat) {
+                self.start_hold(beat_tick, &clock, frames, out);
+                return;
             }
             self.on_beat(beat, beat_tick, &clock, out);
             if !self.playing {
@@ -336,6 +371,41 @@ impl Band {
             beat += 1;
         }
         self.frame += frames as u64;
+    }
+
+    /// A wait inside the song beat playing, as a band tick in `from..to`.
+    fn wait_between(&self, from: f64, to: f64) -> Option<f64> {
+        let wait = self.wait.filter(|_| self.song.active() && !self.click)?;
+        let (beat_tick, beat) = self.song_beat?;
+        let into = wait.checked_sub(beat * PPQ).filter(|t| *t > 0 && *t < PPQ)?;
+        let at = beat_tick + into as f64;
+        (at >= from && at < to).then_some(at)
+    }
+
+    /// Whether the band waits right at `beat`, before playing it.
+    fn waits_on_beat(&self, beat: u64) -> bool {
+        let beat_in_bar = (beat % BEATS_PER_BAR as u64) as u8;
+        self.song.active() && !self.click && self.wait == Some(self.song.upcoming(beat_in_bar) * PPQ)
+    }
+
+    /// Stops the clock at `tick` for the rest of the block and until the wait
+    /// moves. Drums and bass stop; the harmony rings on.
+    fn start_hold(&mut self, tick: f64, clock: &BlockClock, frames: u32, out: &mut EventBuffer) {
+        let song_tick = self.wait.unwrap_or(0);
+        let frame = clock.frame(tick);
+        let style = self.style;
+        let rhythm = |ch: u8| style.parts.iter().any(|p| p.channel == ch && matches!(p.kind, PartKind::Drums | PartKind::Bass));
+        self.release_all(rhythm, frame, out);
+        out.push(frame, EngineEvent::Hold { holding: true, tick: song_tick });
+        self.hold = Some((tick, song_tick));
+        self.anchor_tick = tick;
+        self.hold_block(frames);
+    }
+
+    /// Lets frames pass without moving the band's clock.
+    fn hold_block(&mut self, frames: u32) {
+        self.frame += frames as u64;
+        self.anchor_frame = self.frame;
     }
 
     fn on_beat(&mut self, beat: u64, tick: f64, clock: &BlockClock, out: &mut EventBuffer) {
@@ -369,9 +439,8 @@ impl Band {
         }
         if self.song.active() {
             let song = self.song.on_beat(beat_in_bar);
-            if let Some(bar) = song.bar {
-                out.push(frame, EngineEvent::SongPosition { bar });
-            }
+            self.song_beat = Some((tick, song.beat));
+            out.push(frame, EngineEvent::SongPosition { beat: song.beat });
             if let Some(chord) = song.chord {
                 self.pending = chord;
             }
@@ -824,7 +893,7 @@ mod tests {
 
         let bars: Vec<_> = events
             .iter()
-            .filter_map(|(f, e)| matches!(e, EngineEvent::SongPosition { .. }).then_some(*f))
+            .filter_map(|(f, e)| matches!(e, EngineEvent::SongPosition { beat } if beat % 4 == 0).then_some(*f))
             .collect();
         assert_eq!(bars, [0, 96_000, 192_000], "the ending bar follows the chart");
 
@@ -844,6 +913,75 @@ mod tests {
         let events = run(&mut band, 12.0, &mut frame);
         assert!(states(&events).iter().all(|(_, s)| s.section != Section::Rest && s.section != Section::Ending));
         assert!(band.is_playing());
+    }
+
+    fn holds(events: &[(u64, EngineEvent)]) -> Vec<(u64, bool, u32)> {
+        events
+            .iter()
+            .filter_map(|(f, e)| match e {
+                EngineEvent::Hold { holding, tick } => Some((*f, *holding, *tick)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn song_beats(events: &[(u64, EngineEvent)]) -> Vec<(u64, u32)> {
+        events
+            .iter()
+            .filter_map(|(f, e)| match e {
+                EngineEvent::SongPosition { beat } => Some((*f, *beat)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn waits_on_a_beat_until_the_wait_moves() {
+        let (mut band, mut frame) = song_band();
+        band.set_song_wait(Some(4 * PPQ));
+        let events = run(&mut band, 4.0, &mut frame);
+        assert_eq!(holds(&events), [(96_000, true, 4 * PPQ)]);
+        assert_eq!(song_beats(&events).last(), Some(&(72_000, 3)), "bar 1 is not played yet");
+        assert!(note_ons(&events, 9).iter().all(|(f, _)| *f < 96_000), "the drums stop");
+        assert!(band.is_playing());
+
+        band.set_song_wait(None);
+        let resume = frame;
+        let events = run(&mut band, 1.0, &mut frame);
+        assert_eq!(holds(&events), [(resume, false, 4 * PPQ)]);
+        assert_eq!(song_beats(&events)[0], (resume, 4));
+        let chord = events.iter().find(|(_, e)| matches!(e, EngineEvent::ChordChanged(_))).unwrap();
+        assert_eq!((chord.0, chord.1), (resume, EngineEvent::ChordChanged(Some(Chord::new(7, Quality::Major)))));
+        assert!(note_ons(&events, 9).iter().any(|(f, _)| *f == resume), "the band comes back in on the beat");
+    }
+
+    #[test]
+    fn waits_inside_a_beat() {
+        let (mut band, mut frame) = song_band();
+        band.set_song_wait(Some(2 * PPQ + PPQ / 2));
+        let events = run(&mut band, 3.0, &mut frame);
+        assert_eq!(holds(&events), [(60_000, true, 2 * PPQ + PPQ / 2)]);
+        band.set_song_wait(Some(6 * PPQ)); // the next note to wait for
+        let resume = frame;
+        let events = run(&mut band, 0.5, &mut frame);
+        assert_eq!(holds(&events)[0], (resume, false, 2 * PPQ + PPQ / 2));
+        assert_eq!(song_beats(&events)[0], (resume + 12_000, 3), "half a beat after going on");
+    }
+
+    #[test]
+    fn a_wait_already_passed_does_not_hold() {
+        let (mut band, mut frame) = song_band();
+        run(&mut band, 0.75, &mut frame);
+        band.set_song_wait(Some(PPQ));
+        let events = run(&mut band, 2.0, &mut frame);
+        assert!(holds(&events).is_empty());
+        let mut out = EventBuffer::default();
+        band.stop(&mut out);
+        band.set_song_wait(Some(0));
+        band.play(&mut out);
+        let events = run(&mut band, 1.0, &mut frame);
+        assert_eq!(holds(&events).len(), 1, "a new performance can wait right at its start");
+        assert!(song_beats(&events).is_empty());
     }
 
     #[test]

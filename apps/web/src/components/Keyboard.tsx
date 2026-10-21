@@ -14,8 +14,9 @@ interface KeyboardProps {
 }
 
 /**
- * GPU-drawn keyboard (PixiJS). Shows the player's keys in chord/melody colours
- * and the band's notes as a glow, and can be played with mouse or touch.
+ * GPU-drawn keyboard (PixiJS). Shows the player's keys in chord/melody colours,
+ * the band's notes as a glow and the keys Learn asks for next, and can be
+ * played with mouse or touch.
  */
 export function Keyboard({ low = 36, high = 96, split, height = 200 }: KeyboardProps) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -66,6 +67,13 @@ export function Keyboard({ low = 36, high = 96, split, height = 200 }: KeyboardP
           layer.roundRect(k.x, k.y - 4, k.w, k.h + 4, 3).fill(base);
         } else {
           layer.rect(k.x, k.y, k.w, k.h).fill(base).rect(k.x + k.w - 1, k.y, 1, k.h).fill({ color: hex(color.key.label), alpha: 0.35 });
+        }
+        const hint = live.hint[k.note]!;
+        if (hint && !held) {
+          // Learn: the key to play next, in its part's colour.
+          const tint = hex(hint === 2 ? color.note.chord : color.note.melody);
+          layer.roundRect(k.x, k.y - (k.black ? 4 : 0), k.w, k.h + (k.black ? 4 : 0), k.black ? 3 : 0).fill({ color: tint, alpha: 0.3 });
+          layer.roundRect(k.x + 3, k.y + k.h - 10, k.w - 6, 6, 3).fill({ color: tint, alpha: NOTE_ALPHA });
         }
         if (held) {
           const radius = k.black ? 3 : 0;

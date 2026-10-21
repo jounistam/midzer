@@ -32,8 +32,9 @@ export async function importFile(file: File): Promise<Imported> {
   const title = titleOf(file.name);
   const isMidi = bytes[0] === 0x4d && bytes[1] === 0x54 && bytes[2] === 0x68 && bytes[3] === 0x64; // "MThd"
   if (isMidi) {
-    const { song, warnings } = importMidi(bytes, title);
-    return { song, notes: ['Chords were read from the notes; check them in the editor.', ...warnings] };
+    const { song, warnings, melodyFrom } = importMidi(bytes, title);
+    const melody = melodyFrom ? [`The melody for Learn comes from ${melodyFrom}.`] : [];
+    return { song, notes: ['Chords were read from the notes; check them in the editor.', ...melody, ...warnings] };
   }
   return importText(new TextDecoder().decode(bytes), title);
 }

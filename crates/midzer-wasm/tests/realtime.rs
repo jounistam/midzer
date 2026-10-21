@@ -98,6 +98,13 @@ fn playing_band_renders_without_allocating() {
             load(&mut host);
             command(&mut host, Command::SongSeek { bar: 2 });
         }
+        // Wait mode: hold on a beat and inside one, then go on.
+        match block {
+            3000 => command(&mut host, Command::SongWait { tick: Some(12 * 480) }),
+            4000 => command(&mut host, Command::SongWait { tick: Some(13 * 480 + 240) }),
+            5000 => command(&mut host, Command::SongWait { tick: None }),
+            _ => {}
+        }
         events += host.process(BLOCK_FRAMES);
     }
     command(&mut host, Command::Stop);

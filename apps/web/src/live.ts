@@ -11,6 +11,8 @@ export const live = {
   player: new Uint8Array(128),
   /** Number of band notes sounding on each key. */
   band: new Uint8Array(128),
+  /** Keys Learn asks for next: 1 melody, 2 chord, 0 none. */
+  hint: new Uint8Array(128),
   /** Bumped on every change so renderers can skip unchanged frames. */
   version: 0,
 };

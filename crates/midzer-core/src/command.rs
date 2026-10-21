@@ -48,6 +48,9 @@ pub enum Command {
     SetSong { on: bool },
     /// Stopped: where the song starts. Playing: a jump on the next bar line.
     SongSeek { bar: u16 },
+    /// The band stops at song tick `tick` (in [`crate::style::PPQ`] per beat)
+    /// and waits there until the wait moves or is cleared with `None`.
+    SongWait { tick: Option<u32> },
 }
 
 mod op {
@@ -73,6 +76,7 @@ mod op {
     pub const SONG_LOOP: u32 = 20;
     pub const SET_SONG: u32 = 21;
     pub const SONG_SEEK: u32 = 22;
+    pub const SONG_WAIT: u32 = 23;
 }
 
 fn request_code(request: Request) -> u32 {
@@ -153,6 +157,7 @@ impl Command {
             Command::SongLoop { start, end } => [op::SONG_LOOP, start as u32, end as u32, 0],
             Command::SetSong { on } => [op::SET_SONG, on as u32, 0, 0],
             Command::SongSeek { bar } => [op::SONG_SEEK, bar as u32, 0, 0],
+            Command::SongWait { tick } => [op::SONG_WAIT, tick.is_some() as u32, tick.unwrap_or(0), 0],
         }
     }
 
@@ -188,6 +193,7 @@ impl Command {
             op::SONG_LOOP => Some(Command::SongLoop { start: short(a)?, end: short(b)? }),
             op::SET_SONG => Some(Command::SetSong { on: a != 0 }),
             op::SONG_SEEK => Some(Command::SongSeek { bar: short(a)? }),
+            op::SONG_WAIT => Some(Command::SongWait { tick: (a != 0).then_some(b) }),
             _ => None,
         }
     }
@@ -229,6 +235,8 @@ mod tests {
             Command::SongLoop { start: 2, end: 6 },
             Command::SetSong { on: true },
             Command::SongSeek { bar: 12 },
+            Command::SongWait { tick: Some(5 * 480 + 240) },
+            Command::SongWait { tick: None },
         ] {
             assert_eq!(Command::decode(cmd.encode()), Some(cmd));
         }

@@ -3,14 +3,14 @@ import { goTo, startAudio, useSession } from '../session';
 import { LoadingStatus } from './LoadingStatus';
 
 const MODES = [
-  { id: 'jam', title: 'Jam', blurb: 'Hold chords, the band follows you.', ready: true },
-  { id: 'songs', title: 'Songs', blurb: 'Play along with chord charts and MIDI files.', ready: true },
-  { id: 'learn', title: 'Learn', blurb: 'Falling notes, wait mode and lessons.', ready: false },
+  { id: 'jam', title: 'Jam', blurb: 'Hold chords, the band follows you.' },
+  { id: 'songs', title: 'Songs', blurb: 'Play along with chord charts and MIDI files.' },
+  { id: 'learn', title: 'Learn', blurb: 'Falling notes, wait mode and lessons.' },
 ] as const;
 
 export function Home() {
   const audio = useSession((s) => s.audio);
-  const open = (screen: 'jam' | 'songs') => {
+  const open = (screen: 'jam' | 'songs' | 'learn') => {
     if (audio === 'idle' || audio === 'error') void startAudio();
     goTo(screen);
   };
@@ -23,15 +23,9 @@ export function Home() {
       <h1>What do you want to do?</h1>
       <div className="mode-grid">
         {MODES.map((m) => (
-          <button
-            key={m.id}
-            className={`mode-card ${m.ready ? '' : 'soon'}`}
-            disabled={!m.ready}
-            onClick={m.id === 'learn' ? undefined : () => open(m.id)}
-          >
+          <button key={m.id} className="mode-card" onClick={() => open(m.id)}>
             <span className="mode-title">{m.title}</span>
             <span className="mode-blurb">{m.blurb}</span>
-            {!m.ready && <span className="badge">Coming soon</span>}
           </button>
         ))}
       </div>

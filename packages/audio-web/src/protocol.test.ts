@@ -25,6 +25,8 @@ describe('encodeCommand', () => {
     expect(encodeCommand({ type: 'songLoop', start: 2, end: 6 })).toEqual([20, 2, 6, 0]);
     expect(encodeCommand({ type: 'setSong', on: true })).toEqual([21, 1, 0, 0]);
     expect(encodeCommand({ type: 'songSeek', bar: 12 })).toEqual([22, 12, 0, 0]);
+    expect(encodeCommand({ type: 'songWait', tick: 2640 })).toEqual([23, 1, 2640, 0]);
+    expect(encodeCommand({ type: 'songWait', tick: null })).toEqual([23, 0, 0, 0]);
   });
 
   it('encodes floats as f32 bits', () => {
@@ -76,7 +78,8 @@ describe('decodeEvent', () => {
   });
 
   it('decodes song positions', () => {
-    expect(decodeEvent(8, 17, 0, 3)).toEqual({ type: 'songPosition', bar: 17, frame: 3 });
+    expect(decodeEvent(8, 17, 0, 3)).toEqual({ type: 'songPosition', beat: 17, frame: 3 });
+    expect(decodeEvent(9, 1, 1200, 4)).toEqual({ type: 'hold', holding: true, tick: 1200, frame: 4 });
   });
 
   it('ignores unknown opcodes', () => {

@@ -27,7 +27,10 @@ import { isBuiltin, saveUserSong } from './songs/library';
 import { Recorder } from './songs/recorder';
 import { chartCommands, newSongId, type Song } from './songs/song';
 
-export type Screen = 'onboarding' | 'home' | 'jam' | 'songs' | 'song';
+export type Screen = 'onboarding' | 'home' | 'jam' | 'songs' | 'song' | 'learn' | 'lesson';
+
+/** Screens that play an open song, so leaving them closes it. */
+const SONG_SCREENS: Screen[] = ['song', 'lesson'];
 
 /** Bars `start..end` of the open song repeat. */
 export interface LoopRange {
@@ -196,7 +199,8 @@ let recorder: Recorder | null = null;
 // ---- Navigation -------------------------------------------------------------
 
 export function goTo(screen: Screen): void {
-  if (get().screen === 'song' && screen !== 'song') closeSong(screen);
+  const from = get().screen;
+  if (SONG_SCREENS.includes(from) && screen !== from) closeSong(screen);
   else set({ screen });
 }
 
@@ -261,6 +265,7 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
   enqueue(event, timeMs);
   sendMidiOut(event, timeMs);
   recorder?.record(event);
+  for (const listener of engineListeners) listener(event, timeMs);
 
   // UI state changes when the change is heard, not when it is scheduled.
   const delay = Math.max(0, timeMs - performance.now());
@@ -283,13 +288,41 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
       );
       break;
     case 'songPosition':
-      setTimeout(() => set({ songBar: event.bar }), delay);
+      if (event.beat % 4 === 0) setTimeout(() => set({ songBar: event.beat / 4 }), delay);
       break;
     case 'band':
       setTimeout(() => set({ band: event.state }), delay);
       break;
   }
   for (const listener of beatListeners) if (event.type === 'beat') listener(event.bar, event.beat, timeMs);
+}
+
+type EngineListener = (event: TimedEvent, timeMs: number) => void;
+const engineListeners = new Set<EngineListener>();
+
+/** Calls `listener` with every engine event and the time it is heard. Returns an unsubscribe function. */
+export function onEngineEvents(listener: EngineListener): () => void {
+  engineListeners.add(listener);
+  return () => engineListeners.delete(listener);
+}
+
+type PlayerListener = (note: number, on: boolean, timeMs: number) => void;
+const playerListeners = new Set<PlayerListener>();
+
+/**
+ * Calls `listener` for each key the player presses or releases, from any
+ * input, with the time it was played. Returns an unsubscribe function.
+ */
+export function onPlayerNote(listener: PlayerListener): () => void {
+  playerListeners.add(listener);
+  return () => playerListeners.delete(listener);
+}
+
+function notifyPlayer(cmd: EngineCommand, timeMs = performance.now()): void {
+  if (cmd.type === 'noteOn' || cmd.type === 'noteOff') {
+    const on = cmd.type === 'noteOn' && cmd.velocity > 0;
+    for (const listener of playerListeners) listener(cmd.note, on, timeMs);
+  }
 }
 
 type BeatListener = (bar: number, beat: number, timeMs: number) => void;
@@ -362,8 +395,8 @@ export function setStyle(index: number): void {
   set({ style: index });
   send({ type: 'setStyle', index });
   const { song, screen, playing } = get();
-  if (screen === 'song' && song) {
-    editSong({ ...song, style: index });
+  if (song) {
+    if (screen === 'song') editSong({ ...song, style: index });
     return;
   }
   savePrefs();
@@ -441,18 +474,20 @@ function syncSong(): void {
   send({ type: 'setSong', on: true });
 }
 
-/** Opens a song: the band follows its chart, style and tempo. */
-export function openSong(song: Song, notes: string[] = []): void {
+/** Opens a song: the band follows its chart, style and tempo (scaled by `speed`). */
+export function openSong(song: Song, notes: string[] = [], { screen = 'song' as Screen, speed = 1 } = {}): void {
   send({ type: 'stop' });
-  set({ song, songDirty: false, songNotes: notes, songBar: null, songStartBar: 0, loop: null, screen: 'song', style: song.style });
+  send({ type: 'songWait', tick: null });
+  set({ song, songDirty: false, songNotes: notes, songBar: null, songStartBar: 0, loop: null, screen, style: song.style });
   send({ type: 'setStyle', index: song.style });
-  setTempo(song.bpm);
+  setTempo(song.bpm * speed);
   syncSong();
 }
 
 /** Leaves the song: back to following the player, with the Jam style and tempo. */
 export function closeSong(screen: Screen = 'songs'): void {
   send({ type: 'stop' });
+  send({ type: 'songWait', tick: null });
   send({ type: 'setSong', on: false });
   const { style } = readPrefs();
   set({ song: null, songDirty: false, songBar: null, loop: null, screen, style });
@@ -473,13 +508,13 @@ export function editSong(song: Song): void {
   syncSong();
 }
 
-/** Saves the open song to My songs; a built-in one is saved as a copy. Returns false on failure. */
-export function saveSong(): boolean {
+/** Saves the open song to My songs; a built-in one is saved as a copy. Resolves false on failure. */
+export async function saveSong(): Promise<boolean> {
   const { song } = get();
   if (!song) return false;
   const saved = isBuiltin(song) ? { ...song, id: newSongId(), source: 'user' as const, title: `${song.title} (my version)` } : song;
-  if (!saveUserSong(saved)) return false;
-  set({ song: saved, songDirty: false });
+  if (!(await saveUserSong(saved))) return false;
+  if (get().song === song) set({ song: saved, songDirty: false });
   return true;
 }
 
@@ -513,12 +548,18 @@ export function saveTake(): void {
 
 // ---- Player input -----------------------------------------------------------
 
+/** Sends the player's notes to the engine and to whoever listens for them. */
+function playerCommand(cmd: EngineCommand): void {
+  send(cmd);
+  notifyPlayer(cmd);
+}
+
 export function playerNoteOn(note: number, velocity = 100): void {
-  send({ type: 'noteOn', note, velocity });
+  playerCommand({ type: 'noteOn', note, velocity });
 }
 
 export function playerNoteOff(note: number): void {
-  send({ type: 'noteOff', note });
+  playerCommand({ type: 'noteOff', note });
 }
 
 function isTyping(target: EventTarget | null): boolean {
@@ -560,7 +601,7 @@ export function attachQwerty(): () => void {
 async function connectMidi(): Promise<void> {
   midiAccess = await requestMidi();
   if (!midiAccess) return;
-  listenToInputs(midiAccess, send);
+  listenToInputs(midiAccess, playerCommand);
   const refresh = () => {
     const ports = (map: MIDIInputMap | MIDIOutputMap) =>
       [...map.values()].map((p) => ({ id: p.id, name: p.name ?? 'MIDI device' }));

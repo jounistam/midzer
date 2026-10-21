@@ -1,5 +1,5 @@
 import { STYLES } from '@midzer/audio-web';
-import { useRef, useState, type DragEvent } from 'react';
+import { useEffect, useRef, useState, type DragEvent } from 'react';
 import { TopBar } from '../components/TopBar';
 import { goTo, openSong } from '../session';
 import { BUILTIN_SONGS } from '../songs/builtin';
@@ -11,15 +11,22 @@ import { LoadingStatus } from './LoadingStatus';
 const ACCEPT = '.mid,.midi,.cho,.chopro,.chordpro,.crd,.pro,.txt';
 
 export function Songs() {
-  const [mine, setMine] = useState(loadUserSongs);
+  const [mine, setMine] = useState<Song[]>([]);
   const [pasting, setPasting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    let live = true;
+    void loadUserSongs().then((songs) => live && setMine(songs));
+    return () => {
+      live = false;
+    };
+  }, []);
+
   /** Saves an import to My songs and opens it with its notes for the user. */
   const open = ({ song, notes }: Imported) => {
-    saveUserSong(song);
-    setMine(loadUserSongs());
+    void saveUserSong(song);
     openSong(song, notes);
   };
   const fromFile = async (file: File | undefined) => {
@@ -48,8 +55,8 @@ export function Songs() {
   };
   const remove = (song: Song) => {
     if (!window.confirm(`Delete “${song.title}”?`)) return;
-    deleteUserSong(song.id);
-    setMine(loadUserSongs());
+    setMine((songs) => songs.filter((s) => s.id !== song.id));
+    void deleteUserSong(song.id);
   };
 
   return (

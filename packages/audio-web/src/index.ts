@@ -6,6 +6,7 @@ export {
   chordTones,
   encodeCommand,
   NOTE_NAMES,
+  PPQ,
   QUALITY_INTERVALS,
   QUALITY_SUFFIXES,
   STYLES,
