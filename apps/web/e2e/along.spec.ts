@@ -60,9 +60,10 @@ test.use({
 });
 
 /**
- * Plays the computer-key pads in the page on every beat the screen shows, for
- * `beats` beats: `keys[beat]` for each beat of the bar. Taps land at a steady
- * distance from the heard beat, as a player's would.
+ * Plays the computer keys in the page on every beat the screen shows, for
+ * `beats` beats: `keys[beat]` for each beat of the bar, several at once when
+ * joined with "+" (a chord). Taps land at a steady distance from the heard
+ * beat, as a player's would.
  */
 async function drumOnTheBeat(page: import('@playwright/test').Page, keys: string[], beats: number) {
   await page.evaluate(
@@ -74,7 +75,7 @@ async function drumOnTheBeat(page: import('@playwright/test').Page, keys: string
           const active = [...dots.children].findIndex((d) => d.classList.contains('active'));
           if (active < 0 || dots.getAttribute('data-played') === String(active)) return;
           dots.setAttribute('data-played', String(active));
-          window.dispatchEvent(new KeyboardEvent('keydown', { key: keys[active % keys.length] }));
+          for (const key of keys[active % keys.length]!.split('+')) window.dispatchEvent(new KeyboardEvent('keydown', { key }));
           if (++played >= beats) {
             observer.disconnect();
             resolve();
@@ -86,7 +87,7 @@ async function drumOnTheBeat(page: import('@playwright/test').Page, keys: string
   );
 }
 
-test('play along: follows the beat of an audio input and times the drums against it', async ({ page }) => {
+test('play along: follows the beat of an audio input and times drums and keys against it', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
@@ -96,6 +97,7 @@ test('play along: follows the beat of an audio input and times the drums against
   await page.getByRole('button', { name: /^Play along/ }).click();
   await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeEnabled({ timeout: 30_000 });
   await expect(page.getByTestId('along-status')).toHaveText('Pick something to play along with');
+  await page.getByRole('button', { name: 'Drums', exact: true }).click();
 
   // The fake input stands in for a line in or a monitor of the system's output.
   await page.getByRole('button', { name: 'Listen' }).click();
@@ -114,8 +116,11 @@ test('play along: follows the beat of an audio input and times the drums against
   await expect(page.getByTestId('timing-report')).toHaveCount(0);
 
   // A run: the first hit starts it, kick on 1 and 3, snare on 2 and 4, for four bars.
-  await drumOnTheBeat(page, ['v', 'f', 'v', 'f'], 16);
+  await drumOnTheBeat(page, ['v', 'f', 'v', 'f'], 8);
   await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
+  // While playing, the accuracy is the big thing on screen.
+  await expect(page.getByTestId('hit-percent')).toHaveText(/^\d+%$/, { timeout: 5_000 });
+  await drumOnTheBeat(page, ['v', 'f', 'v', 'f'], 8);
   await page.getByRole('button', { name: 'Stop', exact: true }).click();
   const report = page.getByTestId('timing-report');
   await expect(report).toBeVisible();
@@ -126,6 +131,13 @@ test('play along: follows the beat of an audio input and times the drums against
   await expect(report.getByRole('row', { name: /^Kick 8 / })).toBeVisible();
   await expect(report.getByRole('row', { name: /^Snare 8 / })).toBeVisible();
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/13-play-along.png` });
+
+  // Keys: the computer keys play notes, chords struck together count once.
+  await page.getByRole('button', { name: 'Keys', exact: true }).click();
+  await drumOnTheBeat(page, ['a+d+g', 'a', 'a+d+g', 'a'], 8);
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/14-play-along-keys.png` });
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
+  await expect(report.getByRole('row', { name: /^Keys 8 / })).toBeVisible();
 
   // Moving the 1 and halving the tempo; then leaving turns it all off.
   await page.getByRole('button', { name: 'Half as fast' }).click();

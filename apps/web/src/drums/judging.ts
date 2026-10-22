@@ -1,21 +1,27 @@
-// How a drummer played against a recording: each hit arrives from the engine
-// placed on the recording's grid (the `judged` event), and this sums a run up
-// as overall accuracy, a histogram of offsets, accuracy bar by bar and what
-// each part of the kit tends to do ("Snare: 12 ms late on the backbeat").
+// How a player did against a recording or a live track: each drum hit or keys
+// strike arrives from the engine placed on the track's grid (the `judged` and
+// `keysJudged` events), and this sums a run up as overall accuracy, a
+// histogram of offsets, accuracy bar by bar, what each part of the kit (or the
+// keys) tends to do ("Snare: 12 ms late on the backbeat") and, for keys
+// against a recording's chart, how many chords were right.
 
 import type { DrumPiece } from '@midzer/audio-web';
 
 export interface JudgedHit {
   /** From the nearest sixteenth; negative is early. */
   ms: number;
-  piece: DrumPiece;
+  /** A drum piece, or a keys strike. */
+  piece: DrumPiece | 'keys';
+  /** For keys: whether the notes fit the chart's chord; null or absent when not checked. */
+  chord?: boolean | null;
   /** 0..15 within the bar. */
   sixteenth: number;
   bar: number;
 }
 
-/** A hit this close to the grid counts as on time. */
+/** A hit this close to the grid counts as on time, and one further off than OFF_MS as clearly off. */
 export const ON_TIME_MS = 15;
+export const OFF_MS = 30;
 /** Hits further off than this are left out of averages: more likely a different note than a late one. */
 const OUTLIER_MS = 60;
 /** A part's lean worth pointing out, and the hits it takes to say so. */
@@ -24,15 +30,16 @@ const LEAN_HITS = 4;
 export const HISTOGRAM_STEP_MS = 5;
 export const HISTOGRAM_RANGE_MS = 50;
 
-export type PartId = 'kick' | 'snare' | 'hiHat' | 'ride' | 'toms' | 'cymbals';
+export type PartId = 'kick' | 'snare' | 'hiHat' | 'ride' | 'toms' | 'cymbals' | 'keys';
 
-const PARTS: { id: PartId; label: string; pieces: DrumPiece[] }[] = [
+const PARTS: { id: PartId; label: string; pieces: JudgedHit['piece'][] }[] = [
   { id: 'kick', label: 'Kick', pieces: ['kick'] },
   { id: 'snare', label: 'Snare', pieces: ['snare', 'snareRim', 'sideStick'] },
   { id: 'hiHat', label: 'Hi-hat', pieces: ['hiHatClosed', 'hiHatOpen', 'hiHatPedal'] },
   { id: 'ride', label: 'Ride', pieces: ['ride', 'rideBell'] },
   { id: 'toms', label: 'Toms', pieces: ['tom1', 'tom2', 'tom3', 'tom4'] },
   { id: 'cymbals', label: 'Crashes', pieces: ['crash', 'crash2', 'splash', 'china'] },
+  { id: 'keys', label: 'Keys', pieces: ['keys'] },
 ];
 
 /** Where in the bar a hit falls, for saying where a part leans. */
@@ -72,6 +79,8 @@ export interface TimingSummary {
   histogram: number[];
   bars: BarSummary[];
   parts: PartSummary[];
+  /** Keys strikes checked against the chart's chords, and how many fit; null when none were. */
+  chords: { checked: number; right: number } | null;
 }
 
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
@@ -123,5 +132,8 @@ export function summarize(hits: readonly JudgedHit[]): TimingSummary {
     return [{ id, label, hits: mine.length, meanMs: mean(ms.filter((x) => Math.abs(x) <= OUTLIER_MS)), onTime: onTimeShare(ms), lean: lean(mine) }];
   });
 
-  return { hits: hits.length, onTime: onTimeShare(all), meanMs: m, spreadMs: spread, histogram, bars, parts };
+  const checked = hits.filter((h) => h.chord === true || h.chord === false);
+  const chords = checked.length ? { checked: checked.length, right: checked.filter((h) => h.chord).length } : null;
+
+  return { hits: hits.length, onTime: onTimeShare(all), meanMs: m, spreadMs: spread, histogram, bars, parts, chords };
 }

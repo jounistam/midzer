@@ -55,4 +55,17 @@ describe('judging against a recording', () => {
     expect(describeOffset(2)).toBe('on time');
     expect(summarize([]).parts).toEqual([]);
   });
+  it('sums up keys strikes and the chords checked against the chart', () => {
+    const hits: JudgedHit[] = [
+      { ms: 4, piece: 'keys', chord: true, sixteenth: 0, bar: 0 },
+      { ms: -20, piece: 'keys', chord: false, sixteenth: 8, bar: 0 },
+      { ms: 2, piece: 'keys', chord: null, sixteenth: 10, bar: 0 },
+      { ms: 0, piece: 'keys', chord: true, sixteenth: 0, bar: 1 },
+      { ms: -2, piece: 'kick', sixteenth: 0, bar: 1 },
+    ];
+    const summary = summarize(hits);
+    expect(summary.chords).toEqual({ checked: 3, right: 2 });
+    expect(summary.parts.find((p) => p.id === 'keys')).toMatchObject({ hits: 4, onTime: 0.75 });
+    expect(summarize(groove(1, 0)).chords).toBeNull();
+  });
 });

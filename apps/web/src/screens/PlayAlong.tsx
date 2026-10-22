@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react';
 import type { LiveDevice } from '@midzer/audio-web';
 import { PlayButton } from '../components/ControlPanel';
-import { TimingBar } from '../components/DrummerStage';
+import { HitFeedback } from '../components/HitFeedback';
+import { Keyboard } from '../components/Keyboard';
 import { KitView } from '../components/KitView';
 import { TimingReport } from '../components/TimingReport';
 import { TopBar } from '../components/TopBar';
+import { MISS_SOUND_OPTIONS } from '../playalong/feedback';
 import { SYNC_TAPS } from '../playalong/sync';
+import { useStageHeight } from '../components/stageHeight';
 import {
   cancelLiveSync,
   canCaptureTab,
@@ -14,6 +17,8 @@ import {
   liveSourceKey,
   liveTempo,
   refreshLiveDevices,
+  setInstrument,
+  setMissSound,
   startLiveSource,
   startLiveSync,
   stopLiveSource,
@@ -22,16 +27,20 @@ import {
 import { LoadingStatus } from './LoadingStatus';
 
 /**
- * Drumming along with any audio: a browser tab, the computer's own output or
- * a line input. midzer finds the beat as it plays and times every hit against
- * it, a beat later; the band stays out.
+ * Playing along with any audio, on drums or keys: a browser tab, the
+ * computer's own output or a line input. midzer finds the beat as it plays
+ * and times every hit against it, a beat later; the band stays out. While
+ * playing, how the hits land is the biggest thing on screen.
  */
 export function PlayAlong() {
+  const drums = useSession((s) => s.instrument === 'drums');
+  const split = useSession((s) => s.split);
+  const height = useStageHeight();
   return (
     <div className="jam along-screen">
       <TopBar title="Play along" onBack={() => goTo('home')} styles={false} />
       <main className="jam-main">
-        <div className="jam-stage">
+        <div className="jam-stage along-main">
           <AlongStage />
           <AlongTiming />
           <LoadingStatus />
@@ -39,16 +48,18 @@ export function PlayAlong() {
         <aside className="panel control-panel">
           <SourcePicker />
           <PlayButton className="full" />
+          <InstrumentPicker />
           <BeatFixes />
           <SyncControl />
+          <MissSoundControl />
         </aside>
       </main>
-      <KitView height={170} />
+      {drums ? <KitView height={height} /> : <Keyboard split={split} height={Math.min(height, 220)} />}
     </div>
   );
 }
 
-/** The tempo found, how sure it is, and the beat. Read from a distance, like the drummer's Jam display. */
+/** The tempo found, how sure it is, and the beat: a strip above the accuracy, readable from a distance. */
 function AlongStage() {
   const source = useSession((s) => s.liveSource);
   const tracker = useSession((s) => s.liveTracker);
@@ -56,28 +67,27 @@ function AlongStage() {
   const beat = useSession((s) => s.beat);
   const listening = source.status === 'on';
   const status = !listening ? 'Pick something to play along with' : tracker.locked ? 'Found the beat' : tracker.level < 0.25 ? 'Waiting for sound…' : 'Listening for the beat…';
+  const locked = listening && tracker.locked;
   return (
-    <section className="panel drum-stage along-stage" aria-live="polite">
-      <div className="stage-cell">
+    <section className="panel along-strip" aria-live="polite">
+      <div className="along-tempo">
         <p className="eyebrow">Tempo</p>
-        <p className={`stage-big ${listening && tracker.locked ? '' : 'empty'}`} data-testid="along-tempo">
-          {listening && tracker.locked ? bpm : '—'}
+        <p className={`along-bpm ${locked ? '' : 'empty'}`} data-testid="along-tempo">
+          {locked ? bpm : '—'}
         </p>
         <p className="stage-sub" data-testid="along-status">
           {status}
         </p>
       </div>
-      <div className="stage-cell along-meters">
+      <div className={`stage-beats ${locked ? '' : 'waiting'}`} aria-label={locked ? `Beat ${beat + 1}` : 'No beat yet'}>
+        {[0, 1, 2, 3].map((b) => (
+          <span key={b} className={`stage-beat ${locked && b === beat ? 'active' : ''} ${b === 0 ? 'one' : ''}`} />
+        ))}
+      </div>
+      <div className="along-meters">
         <Meter label="Sound" value={listening ? tracker.level : 0} />
         <Meter label="Sure of the beat" value={listening ? tracker.confidence : 0} />
       </div>
-      {listening && tracker.locked && (
-        <div className="stage-beats" aria-label={`Beat ${beat + 1}`}>
-          {[0, 1, 2, 3].map((b) => (
-            <span key={b} className={`stage-beat ${b === beat ? 'active' : ''} ${b === 0 ? 'one' : ''}`} />
-          ))}
-        </div>
-      )}
     </section>
   );
 }
@@ -93,21 +103,61 @@ function Meter({ label, value }: { label: string; value: number }) {
   );
 }
 
-/** Rushing or dragging while drumming; the report after each run. */
+/** How the hits land while playing; the report after each run. */
 function AlongTiming() {
   const playing = useSession((s) => s.playing);
   const drums = useSession((s) => s.instrument === 'drums');
+  if (playing) return <HitFeedback against="the track" lagging />;
   return (
     <section className="panel song-timing">
-      {playing ? (
-        <TimingBar against="the track" />
-      ) : (
-        <div className="along-report">
-          {!drums && <p className="setting-note">Hits are timed on drums: an e-kit, the pads below or the computer keys (V kick, F snare, J hi-hat).</p>}
-          <TimingReport source="the track" />
-        </div>
-      )}
+      <div className="along-report">
+        <p className="setting-note">
+          {drums
+            ? 'Drum on an e-kit, the pads below or the computer keys (V kick, F snare, J hi-hat).'
+            : 'Play a MIDI keyboard, the keys below or the computer keys (A S D F… for C D E F…); notes struck together count as one chord.'}
+        </p>
+        <TimingReport source="the track" />
+      </div>
     </section>
+  );
+}
+
+/** Drums or keys: what the computer keys play and what is timed. */
+function InstrumentPicker() {
+  const instrument = useSession((s) => s.instrument);
+  return (
+    <div className="control-group">
+      <p className="label" id="along-instrument-label">
+        I'm playing
+      </p>
+      <div className="segmented" role="group" aria-labelledby="along-instrument-label">
+        {(['drums', 'keys'] as const).map((i) => (
+          <button key={i} className={`seg ${instrument === i ? 'on' : ''}`} aria-pressed={instrument === i} onClick={() => setInstrument(i)}>
+            {i === 'drums' ? 'Drums' : 'Keys'}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** A soft tick when a hit is clearly off, for a player watching their instrument instead of the screen. */
+export function MissSoundControl() {
+  const sound = useSession((s) => s.missSound);
+  return (
+    <div className="control-group">
+      <p className="label" id="miss-sound-label">
+        Sound when off the beat
+      </p>
+      <div className="segmented" role="group" aria-labelledby="miss-sound-label">
+        {MISS_SOUND_OPTIONS.map((o) => (
+          <button key={o.value} className={`seg ${sound === o.value ? 'on' : ''}`} aria-pressed={sound === o.value} onClick={() => setMissSound(o.value)}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+      <p className="setting-note">A high tick when early, a low one when late, a double one for a wrong chord.</p>
+    </div>
   );
 }
 

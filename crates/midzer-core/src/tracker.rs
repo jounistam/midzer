@@ -58,10 +58,15 @@ const PLL_RESYNC: f64 = 0.3;
 /// Below this level (dBFS) the input counts as silent; after this long it is lost.
 const SILENCE_DB: f32 = -60.0;
 const LOST_AFTER_S: f32 = 2.5;
-/// Locking: this much periodicity, a steady tempo and this many beats.
-const LOCK_CONFIDENCE: f32 = 0.35;
-const UNLOCK_CONFIDENCE: f32 = 0.15;
+/// Locking: this many beats in a row, and either clear periodicity or some
+/// periodicity with this many tempo readings (3 s) in a row without a jump.
+/// Real songs have a noisier onset strength than clicks, so their
+/// periodicity stays low (0.1–0.4); the steady tempo makes up for it.
 const LOCK_BEATS: u32 = 8;
+const SURE_CONFIDENCE: f32 = 0.35;
+const LOCK_CONFIDENCE: f32 = 0.15;
+const LOCK_READS: u32 = 12;
+const UNLOCK_CONFIDENCE: f32 = 0.05;
 /// Confidence follows the periodicity with this time constant.
 const CONFIDENCE_SECONDS: f32 = 1.0;
 
@@ -160,6 +165,8 @@ pub struct BeatTracker {
     beat: Option<(f64, u32)>,
     beat_period: f64,
     beats_in_lock: u32,
+    /// Tempo readings in a row without a jump.
+    steady_reads: u32,
     confidence: f32,
     locked: bool,
     power: f32,
@@ -233,6 +240,7 @@ impl BeatTracker {
             beat: None,
             beat_period: 0.0,
             beats_in_lock: 0,
+            steady_reads: 0,
             confidence: 0.0,
             locked: false,
             power: 0.0,
@@ -263,6 +271,7 @@ impl BeatTracker {
         self.confirmed = None;
         self.beat = None;
         self.beats_in_lock = 0;
+        self.steady_reads = 0;
         self.confidence = 0.0;
         self.locked = false;
         self.quiet_frames = 0;
@@ -285,6 +294,11 @@ impl BeatTracker {
     /// The tempo the loop runs at, once it has beats.
     pub fn bpm(&self) -> Option<f32> {
         self.beat.map(|_| (60.0 * self.sample_rate as f64 / self.beat_period) as f32)
+    }
+
+    /// The tempo the autocorrelation reads now, before the loop.
+    pub fn estimate_bpm(&self) -> Option<f32> {
+        self.period.map(|p| 60.0 * self.rate / p)
     }
 
     /// The last confirmed beat (engine frame, index) and the period in frames.
@@ -425,6 +439,10 @@ impl BeatTracker {
         let k = (self.tempo_every as f32 / (CONFIDENCE_SECONDS * self.rate)).min(1.0);
         self.confidence += (periodicity - self.confidence) * k;
 
+        match self.period {
+            Some(p) if (found / p - 1.0).abs() <= TEMPO_JUMP => self.steady_reads += 1,
+            _ => self.steady_reads = 0,
+        }
         let next = match self.period {
             None => found,
             Some(p) if (found / p - 1.0).abs() <= TEMPO_JUMP => p + 0.5 * (found - p),
@@ -582,7 +600,8 @@ impl BeatTracker {
         };
         self.beat = Some((at, index));
         self.beats_in_lock += 1;
-        if !self.locked && self.confidence >= LOCK_CONFIDENCE && self.beats_in_lock >= LOCK_BEATS {
+        let sure = self.confidence >= SURE_CONFIDENCE || (self.confidence >= LOCK_CONFIDENCE && self.steady_reads >= LOCK_READS);
+        if !self.locked && sure && self.beats_in_lock >= LOCK_BEATS {
             self.locked = true;
         }
         out.push(TrackedBeat { at, index, period: self.beat_period, low, high });

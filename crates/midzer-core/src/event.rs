@@ -49,6 +49,11 @@ pub enum EngineEvent {
     /// Live audio: whether the beat tracker has found the beat, how sure it
     /// is (0..=255) and the source's loudness (0..=255 over -80..0 dBFS).
     Live { locked: bool, confidence: u8, level: u8 },
+    /// A keys player's strike (a note, or the notes of a chord played
+    /// together) placed on a backing track's or live source's grid, like
+    /// [`EngineEvent::Judged`]. `chord` says whether the notes fit the chart's
+    /// chord there; `None` when it wasn't checked (a single note, no chart).
+    KeysJudged { ms: f32, sixteenth: u8, bar: u16, chord: Option<bool> },
 }
 
 /// What the band is doing, for the UI.
@@ -89,6 +94,7 @@ mod op {
     pub const COUNT_IN: u32 = 13;
     pub const JUDGED: u32 = 14;
     pub const LIVE: u32 = 15;
+    pub const KEYS_JUDGED: u32 = 16;
 }
 
 const NO_CHORD: u32 = 0xff;
@@ -126,6 +132,14 @@ impl EngineEvent {
             }
             EngineEvent::Live { locked, confidence, level } => {
                 [op::LIVE, locked as u32 | (confidence as u32) << 8 | (level as u32) << 16, 0, frame]
+            }
+            EngineEvent::KeysJudged { ms, sixteenth, bar, chord } => {
+                let chord = match chord {
+                    None => 0,
+                    Some(true) => 1,
+                    Some(false) => 2,
+                };
+                [op::KEYS_JUDGED, ms.to_bits(), sixteenth as u32 | chord << 8 | (bar as u32) << 16, frame]
             }
             EngineEvent::Band(s) => {
                 let section = Section::ALL.iter().position(|x| *x == s.section).unwrap_or(0) as u32;
@@ -174,6 +188,16 @@ impl EngineEvent {
                 bar: (b >> 16) as u16,
             },
             op::LIVE => EngineEvent::Live { locked: a & 1 != 0, confidence: byte(a >> 8), level: byte(a >> 16) },
+            op::KEYS_JUDGED => EngineEvent::KeysJudged {
+                ms: f32::from_bits(a),
+                sixteenth: byte(b),
+                bar: (b >> 16) as u16,
+                chord: match byte(b >> 8) {
+                    0 => None,
+                    1 => Some(true),
+                    _ => Some(false),
+                },
+            },
             op::BAND => {
                 let flags = byte(b >> 8);
                 let next_style = byte(a >> 8);
@@ -361,6 +385,8 @@ mod tests {
             EngineEvent::CountIn { hits: 3 },
             EngineEvent::Judged { ms: -12.5, piece: Piece::China, sixteenth: 15, bar: 511 },
             EngineEvent::Live { locked: true, confidence: 200, level: 17 },
+            EngineEvent::KeysJudged { ms: -12.5, sixteenth: 15, bar: 300, chord: Some(false) },
+            EngineEvent::KeysJudged { ms: 3.0, sixteenth: 0, bar: 0, chord: None },
         ] {
             assert_eq!(EngineEvent::decode(event.encode(42)), Some((event, 42)));
         }

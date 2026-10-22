@@ -13,6 +13,7 @@ mod drums;
 mod engine;
 mod event;
 mod fft;
+mod harmony;
 mod listen;
 mod live;
 mod song;

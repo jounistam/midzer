@@ -47,6 +47,7 @@ import {
   type KitTriggers,
 } from './drums/kit';
 import { pickProgression, progressionCommands } from './drums/progressions';
+import { MISS_SOUND_OPTIONS, missOf, playMiss, type MissSound } from './playalong/feedback';
 import type { JudgedHit } from './drums/judging';
 import { COUNT_IN_OPTIONS, countInPieces, type CountInChoice } from './drums/stage';
 import { offsetToBeat, SYNC_TAPS, syncedOffset } from './playalong/sync';
@@ -195,6 +196,8 @@ interface SessionState {
   liveSyncTaps: number | null;
   /** Why the last sync didn't take. */
   liveSyncError: string | null;
+  /** A tick for hits clearly off (or wrong chords) while playing along. */
+  missSound: MissSound;
 }
 
 export const BAND_DRUMS_OPTIONS: { mode: BandDrums; label: string }[] = [
@@ -244,6 +247,7 @@ interface Prefs {
   playRecording: boolean;
   recordingDrums: boolean;
   liveOffsets: Record<string, number>;
+  missSound: MissSound;
 }
 
 function readPrefs(): Prefs {
@@ -264,6 +268,7 @@ function readPrefs(): Prefs {
     playRecording: true,
     recordingDrums: true,
     liveOffsets: {},
+    missSound: 'soft',
   };
   try {
     const saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Partial<Prefs>;
@@ -285,17 +290,18 @@ function readPrefs(): Prefs {
     const liveOffsets = Object.fromEntries(
       Object.entries(saved.liveOffsets ?? {}).filter((e): e is [string, number] => typeof e[1] === 'number' && Math.abs(e[1]) <= 1000),
     );
-    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets };
+    const missSound = MISS_SOUND_OPTIONS.some((o) => o.value === saved.missSound) ? saved.missSound! : defaults.missSound;
+    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound };
   } catch {
     return defaults;
   }
 }
 
 function savePrefs(): void {
-  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets } = get();
+  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound } = get();
   // With a song open the style belongs to the song; keep the Jam one.
   const style = get().song ? readPrefs().style : get().style;
-  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets };
+  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound };
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch {
@@ -369,6 +375,7 @@ export const useSession = create<SessionState>(() => ({
   liveTracker: { locked: false, confidence: 0, level: 0 },
   liveDevices: [],
   liveOffsets: prefs.liveOffsets,
+  missSound: prefs.missSound,
   liveSyncTaps: null,
   liveSyncError: null,
 }));
@@ -492,6 +499,7 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
     case 'transport':
       if (event.playing) {
         live.timing.reset();
+        live.hits.reset();
         skipJudged = false;
         judged = [];
         set({ judgedCount: 0 });
@@ -514,11 +522,20 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
       set({ countInHits: event.hits });
       break;
     case 'judged':
+    case 'keysJudged': {
       if (skipJudged) break;
-      judged.push({ ms: event.ms, piece: event.piece, sixteenth: event.sixteenth, bar: event.bar });
+      const chord = event.type === 'keysJudged' ? event.chord : null;
+      judged.push({ ms: event.ms, piece: event.type === 'keysJudged' ? 'keys' : event.piece, chord, sixteenth: event.sixteenth, bar: event.bar });
       set({ judgedCount: judged.length });
-      if (syncTaps) syncTap(event.ms, event.sixteenth);
+      if (syncTaps) {
+        syncTap(event.ms, event.sixteenth);
+        break;
+      }
+      live.hits.push(event.ms, chord);
+      const miss = missOf(event.ms, chord);
+      if (miss) playMiss(miss, get().missSound);
       break;
+    }
     case 'live':
       set({ liveTracker: { locked: event.locked, confidence: event.confidence, level: event.level } });
       break;
@@ -696,6 +713,13 @@ export function setEnergy(energy: number): void {
   send({ type: 'setEnergy', energy });
   // Show the new value at once instead of after the audio latency.
   set({ band: { ...get().band, follow: false, energy } });
+}
+
+export function setMissSound(missSound: MissSound): void {
+  set({ missSound });
+  savePrefs();
+  // Let the player hear what they picked.
+  playMiss('early', missSound);
 }
 
 export function setIdleMode(mode: IdleMode): void {
@@ -1211,8 +1235,8 @@ function isTyping(target: EventTarget | null): boolean {
 }
 
 /** Computer-keyboard playing. Returns a cleanup function. */
-/** The computer keys are drum pads for drummers, and for everyone when playing along. */
-const drumKeys = () => get().instrument === 'drums' || get().screen === 'along';
+/** The computer keys are drum pads for drummers. */
+const drumKeys = () => get().instrument === 'drums';
 
 export function attachQwerty(): () => void {
   const down = (e: KeyboardEvent) => {

@@ -20,9 +20,16 @@ const DRUM_GATE_S: f32 = 0.1;
 /// Per render block the host calls [`Engine::handle`] for each queued command,
 /// then [`Engine::process`] once and plays the returned events, then
 /// [`Engine::end_block`]. Nothing here allocates after construction.
+/// Keys notes within this many ms of a strike's first note belong to it (a chord).
+const STRIKE_MS: f32 = 35.0;
+
 pub struct Engine {
     band: Band,
     held: [bool; 128],
+    /// A keys strike being gathered while a recording or live source plays:
+    /// the frame of its first note and the pitch classes so far.
+    strike: Option<(u64, u16)>,
+    strike_frames: u64,
     /// Only notes below this key form chords; 0 means the whole keyboard.
     split: u8,
     events: EventBuffer,
@@ -54,6 +61,8 @@ impl Engine {
         Self {
             band: Band::new(sample_rate),
             held: [false; 128],
+            strike: None,
+            strike_frames: (STRIKE_MS / 1000.0 * sample_rate) as u64,
             split: 0,
             events: EventBuffer::default(),
             listener: Listener::new(sample_rate),
@@ -92,6 +101,9 @@ impl Engine {
                 self.band.onset(0.0);
                 self.band.set_keys_held(true);
                 self.detect_chord();
+                if track || live {
+                    self.strike_note(note);
+                }
             }
             Command::AllNotesOff => {
                 for note in 0..128u8 {
@@ -156,6 +168,8 @@ impl Engine {
                     self.handle(Command::AllNotesOff);
                     self.instrument = instrument;
                     self.update_drummer();
+                    // The band may have reported its own tempo; the live source's stands.
+                    self.live.retell_tempo();
                 }
             }
             Command::DrumChoke { note } => {
@@ -374,9 +388,35 @@ impl Engine {
         }
     }
 
+    /// A keys note while playing along: notes this close together are one strike.
+    fn strike_note(&mut self, note: u8) {
+        let pc = 1u16 << (note % 12);
+        match self.strike {
+            Some((at, pitches)) if self.now < at + self.strike_frames => self.strike = Some((at, pitches | pc)),
+            _ => {
+                self.finish_strike();
+                self.strike = Some((self.now, pc));
+            }
+        }
+    }
+
+    /// Judges the strike gathered so far against the recording or the live source.
+    fn finish_strike(&mut self) {
+        let Some((at, pitches)) = self.strike.take() else { return };
+        if self.live.active() {
+            self.live.strike(pitches, at, &mut self.events);
+        } else if self.backing.active() {
+            let since_ms = (self.now - at) as f32 * 1000.0 / self.sample_rate;
+            self.backing.keys_strike(pitches, self.band.latency_ms() + since_ms, self.band.song(), &mut self.events);
+        }
+    }
+
     /// Schedules this block and returns all of its events, sorted by frame.
     pub fn process(&mut self, frames: u32) -> &[Timed] {
         self.release_drums(frames);
+        if self.strike.is_some_and(|(at, _)| self.now >= at + self.strike_frames) {
+            self.finish_strike();
+        }
         match self.start_in {
             Some((delay, bpm)) if delay >= frames as u64 => self.start_in = Some((delay - frames as u64, bpm)),
             Some((delay, bpm)) => {
@@ -848,6 +888,50 @@ mod tests {
     }
 
     #[test]
+    fn a_keys_player_is_judged_against_a_recording_and_its_chords() {
+        let mut engine = Engine::new(48_000.0);
+        engine.handle(Command::SetLatency { ms: 0.0 });
+        engine.handle(Command::SongClear { bars: 4 });
+        // Dm for bar 1, G from bar 2.
+        engine.handle(Command::SongChord { beat: 0, slot: crate::Slot::Chord(Chord::new(2, Quality::Minor)) });
+        engine.handle(Command::SongChord { beat: 4, slot: crate::Slot::Chord(Chord::new(7, Quality::Major)) });
+        engine.handle(Command::SetSong { on: true });
+        engine.set_track(Some(Box::new(Track { main: vec![0; 2 * 480_000], drums: None })));
+        engine.handle(Command::TrackClear { beats: 17 });
+        for i in 0..17 {
+            engine.handle(Command::TrackBeat { index: i, seconds: 0.5 + 0.5 * i as f32 });
+        }
+        engine.handle(Command::SetTrack { on: true });
+        let note = |note: u8| Command::NoteOn { note, velocity: 90 };
+        // Song beat 0 is heard at 0.5 s (frame 24 000).
+        let beat = |i: u64| 24_000 + i * 24_000;
+        let script = [
+            (0, Command::Play),
+            // Dm on beat 2, 4 ms late, its notes 10 ms apart: one strike.
+            (beat(1) + 192, note(62)),
+            (beat(1) + 192 + 480, note(65)),
+            (beat(1) + 192 + 960, note(69)),
+            // C major on beat 4 over Dm: wrong.
+            (beat(3), note(60)),
+            (beat(3) + 200, note(64)),
+            (beat(3) + 400, note(67)),
+            // G a sixteenth early for bar 2's G: right, and meant for it.
+            (beat(4) - 6_000, note(55)),
+            (beat(4) - 6_000, note(59)),
+            // A single note isn't checked.
+            (beat(5), note(74)),
+        ];
+        let events = run_script(&mut engine, &mut 0, 6.0, &script);
+        let judged: Vec<_> = events.iter().filter_map(|(_, e)| if let EngineEvent::KeysJudged { ms, sixteenth, bar, chord } = e { Some((*ms, *sixteenth, *bar, *chord)) } else { None }).collect();
+        assert_eq!(judged.len(), 4, "{judged:?}");
+        assert_eq!(judged.iter().map(|j| (j.1, j.2, j.3)).collect::<Vec<_>>(), [(4, 0, Some(true)), (12, 0, Some(false)), (15, 0, Some(true)), (4, 1, None)]);
+        // Seen at the start of their block, up to 128 frames early.
+        assert!(judged[0].0 <= 4.01 && judged[0].0 > 4.0 - 2.7, "{}", judged[0].0);
+        assert_eq!(events.iter().filter(|(_, e)| matches!(e, EngineEvent::Timing { .. })).count(), 4);
+        assert!(!events.iter().any(|(_, e)| matches!(e, EngineEvent::Judged { .. })));
+    }
+
+    #[test]
     fn live_audio_takes_over_from_the_band_and_judges_the_drummer() {
         let mut engine = drummer();
         engine.handle(Command::SetLiveOffset { ms: 0.0 });
@@ -884,6 +968,15 @@ mod tests {
         assert!(judged[0].1 == Piece::Snare && judged[0].0 > 8.0 - 2.7 - 3.0 && judged[0].0 < 8.0 + 3.0, "{judged:?}");
         assert!(events.iter().any(|(_, e)| matches!(e, EngineEvent::Live { locked: true, .. })));
         assert!(engine.is_playing());
+        // Switching to keys keeps the source's tempo on show, whatever the band's is.
+        engine.handle(Command::SetInstrument { instrument: Instrument::Keys });
+        let mut tempo = None;
+        for _ in 0..200 {
+            engine.listen_live(&[0.0; 128]);
+            tempo = engine.process(128).iter().rev().find_map(|t| if let EngineEvent::Tempo { bpm } = t.event { Some(bpm) } else { None }).or(tempo);
+            engine.end_block();
+        }
+        assert!(tempo.is_some_and(|bpm| (bpm - 120.0).abs() < 1.0), "{tempo:?}");
         engine.handle(Command::SetLive { on: false });
         let off = engine.process(128).to_vec();
         assert!(off.iter().any(|t| t.event == EngineEvent::Transport { playing: false }));

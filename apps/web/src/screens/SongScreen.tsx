@@ -4,6 +4,8 @@ import { BandMutes, EnergyControl, PlayButton, TakeButton, TempoControl } from '
 import { Keyboard } from '../components/Keyboard';
 import { KitView } from '../components/KitView';
 import { TimingBar } from '../components/DrummerStage';
+import { HitFeedback } from '../components/HitFeedback';
+import { useStageHeight } from '../components/stageHeight';
 import { TimingReport } from '../components/TimingReport';
 import { TopBar } from '../components/TopBar';
 import {
@@ -32,6 +34,7 @@ import {
   type SongSection,
 } from '../songs/song';
 import { LoadingStatus } from './LoadingStatus';
+import { MissSoundControl } from './PlayAlong';
 
 export function SongScreen() {
   const song = useSession((s) => s.song);
@@ -39,6 +42,7 @@ export function SongScreen() {
   const drums = useSession((s) => s.instrument === 'drums');
   const notes = useSession((s) => s.songNotes);
   const recording = useSession((s) => s.recording.status === 'ready' && s.playRecording);
+  const kitHeight = useStageHeight(200);
   const [editing, setEditing] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
   if (!song) return null;
@@ -59,7 +63,7 @@ export function SongScreen() {
       <main className="jam-main">
         <div className="song-stage">
           <NowPlaying song={song} />
-          {drums && <DrumTiming recording={recording} />}
+          {(drums || recording) && <PlayTiming recording={recording} />}
           {notes.length > 0 && (
             <p className="notice" role="status">
               {notes.join(' ')}
@@ -80,6 +84,7 @@ export function SongScreen() {
         <aside className="panel control-panel">
           <PlayButton className="full" />
           {song.backing && <RecordingControl />}
+          {recording && <MissSoundControl />}
           <LoopControl song={song} selection={selection} />
           {!recording && (
             <>
@@ -92,16 +97,16 @@ export function SongScreen() {
           {song.transcription && <TranscriptionButton tracks={song.transcription.length} />}
         </aside>
       </main>
-      {drums ? <KitView /> : <Keyboard split={split} />}
+      {drums ? <KitView height={kitHeight} /> : <Keyboard split={split} />}
     </div>
   );
 }
 
-/** How a drummer's hits sit against the band, or against the recording with a report after each run. */
-function DrumTiming({ recording }: { recording: boolean }) {
+/** How a drummer's hits sit against the band; or how a drummer's or keys player's sit against the recording, with a report after each run. */
+function PlayTiming({ recording }: { recording: boolean }) {
   const playing = useSession((s) => s.playing);
   if (recording) {
-    return <section className="panel song-timing">{playing ? <TimingBar against="the recording" /> : <TimingReport />}</section>;
+    return playing ? <HitFeedback against="the recording" /> : <section className="panel song-timing"><TimingReport /></section>;
   }
   return <section className="panel song-timing">{playing ? <TimingBar /> : <p className="setting-note">Count in, or press Play: the band follows your tempo.</p>}</section>;
 }

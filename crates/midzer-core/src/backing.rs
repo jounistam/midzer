@@ -50,6 +50,19 @@ pub struct Judged {
     pub bar: u16,
 }
 
+/// Whether the pitch classes played fit `chord`: every one a chord tone, or
+/// all but one when four or more are played (a colour note). Single notes
+/// aren't checked: a melody moves through notes outside the chord.
+pub(crate) fn fits(pitches: u16, chord: Chord) -> Option<bool> {
+    let count = pitches.count_ones();
+    if count < 2 {
+        return None;
+    }
+    let tones = chord.pitch_classes().fold(0u16, |set, pc| set | 1 << pc);
+    let outside = (pitches & !tones).count_ones();
+    Some(outside == 0 || (outside == 1 && count >= 4))
+}
+
 /// What the mixer does at a frame of this block.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Cue {
@@ -352,6 +365,18 @@ impl Backing {
         if keeps_time(piece, velocity) {
             out.push(0, EngineEvent::Timing { ms: j.ms });
         }
+    }
+
+    /// Judges a keys player's strike (the pitch classes played together, a
+    /// bit set) made `late_ms` before now, and whether it fits the chart's
+    /// chord on the beat it was meant for.
+    pub fn keys_strike(&self, pitches: u16, late_ms: f32, chart: &SongPlayer, out: &mut EventBuffer) {
+        let Some(j) = self.judge(late_ms) else { return };
+        // A strike a sixteenth before a beat is meant for that beat's chord.
+        let beat = (j.bar as u32 * 16 + j.sixteenth as u32 + 1) / 4;
+        let chord = chart.chord_at(beat).and_then(|c| fits(pitches, c));
+        out.push(0, EngineEvent::KeysJudged { ms: j.ms, sixteenth: j.sixteenth, bar: j.bar, chord });
+        out.push(0, EngineEvent::Timing { ms: j.ms });
     }
 
     /// Adds this block of the recording to `left` and `right`, after

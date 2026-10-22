@@ -407,7 +407,12 @@ export type EngineEvent =
   /** A drummer's hit on a backing track's grid: `ms` from sixteenth `sixteenth` (0..15) of song bar `bar`. */
   | { type: 'judged'; ms: number; piece: DrumPiece; sixteenth: number; bar: number }
   /** Live audio: whether the beat is found, how sure (0..1) and the source's loudness (0..1 over -80..0 dBFS). */
-  | { type: 'live'; locked: boolean; confidence: number; level: number };
+  | { type: 'live'; locked: boolean; confidence: number; level: number }
+  /**
+   * A keys strike (a note, or a chord's notes played together) on a backing track's or live source's
+   * grid, like `judged`. `chord`: whether the notes fit the chart's chord there; null when not checked.
+   */
+  | { type: 'keysJudged'; ms: number; sixteenth: number; bar: number; chord: boolean | null };
 
 /** An event plus the AudioContext frame at which it sounds. */
 export type TimedEvent = EngineEvent & { frame: number };
@@ -477,6 +482,10 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
     }
     case 15:
       return { type: 'live', locked: (a & 1) !== 0, confidence: ((a >> 8) & 0xff) / 255, level: ((a >> 16) & 0xff) / 255, frame };
+    case 16: {
+      const chord = (b >> 8) & 0xff;
+      return { type: 'keysJudged', ms: bitsFloat(a), sixteenth: b & 0xff, bar: b >>> 16, chord: chord === 0 ? null : chord === 1, frame };
+    }
     default:
       return null;
   }

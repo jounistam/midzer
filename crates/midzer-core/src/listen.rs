@@ -124,7 +124,7 @@ const CHORD_SETTLE_HOPS: u32 = 6;
 
 /// Second-order low-pass (RBJ cookbook), run twice before decimating.
 #[derive(Clone, Copy, Default)]
-struct Biquad {
+pub(crate) struct Biquad {
     b0: f32,
     b1: f32,
     b2: f32,
@@ -137,7 +137,7 @@ struct Biquad {
 }
 
 impl Biquad {
-    fn low_pass(sample_rate: f32, cutoff: f32) -> Self {
+    pub(crate) fn low_pass(sample_rate: f32, cutoff: f32) -> Self {
         let w = 2.0 * std::f32::consts::PI * cutoff / sample_rate;
         let alpha = w.sin() / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
         let cos = w.cos();
@@ -152,7 +152,7 @@ impl Biquad {
         }
     }
 
-    fn run(&mut self, x: f32) -> f32 {
+    pub(crate) fn run(&mut self, x: f32) -> f32 {
         let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1 - self.a2 * self.y2;
         self.x2 = self.x1;
         self.x1 = x;

@@ -14,6 +14,7 @@
 use crate::drummer::keeps_time;
 use crate::drums::Piece;
 use crate::event::{EngineEvent, EventBuffer};
+use crate::harmony::{Harmony, change};
 use crate::tracker::{BeatList, BeatTracker, TrackedBeat};
 
 const BEATS: u32 = 4;
@@ -28,6 +29,15 @@ const STATUS_EVERY_S: f32 = 0.1;
 const DOWNBEAT_DECAY: f32 = 0.9;
 const DOWNBEAT_AFTER: u32 = 8;
 const DOWNBEAT_MARGIN: f32 = 1.15;
+/// How much the player's own playing counts (kick, snare, crashes and chord
+/// changes on the beats), against the source's cues: a player who hears the
+/// song knows where the 1 is.
+const PLAYER_WEIGHT: f32 = 2.0;
+/// The player's hits that count as cues for the 1 are this close to a beat, in ms.
+const CUE_MS: f32 = 60.0;
+/// How much a change of harmony on a beat counts for it being the 1, against
+/// the bass and snare cues. Tuned on real songs (`live_eval`).
+const CHANGE_WEIGHT: f32 = 3.0;
 /// The tempo shown changes when the tracked one moves by this much.
 const TEMPO_STEP: f32 = 0.5;
 
@@ -36,12 +46,28 @@ struct Hit {
     /// When the player heard the source at the moment of the hit, as the engine
     /// got it: the hit's frame less the offset.
     at: f64,
-    piece: Piece,
-    velocity: u8,
+    what: Played,
+}
+
+/// A drum hit, or a keys strike: the pitch classes struck together (a bit set).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Played {
+    Drum { piece: Piece, velocity: u8 },
+    Keys { pitches: u16 },
 }
 
 pub struct Live {
     tracker: BeatTracker,
+    harmony: Harmony,
+    /// How much the harmony changed on each beat of the bar, accumulated like `low` and `high`.
+    changes: [f32; 4],
+    /// The player's own cues per beat of the bar: kicks, snares, and accents
+    /// (crashes, and new chords from a keys player).
+    kicks: [f32; 4],
+    snares: [f32; 4],
+    accents: [f32; 4],
+    /// The pitch classes of the keys player's last strike.
+    last_pitches: u16,
     sample_rate: f32,
     active: bool,
     /// A run: between Play (or the first hit once locked) and Stop.
@@ -71,10 +97,16 @@ pub struct Live {
 
 impl Live {
     pub fn new(sample_rate: f32) -> Self {
-        let hit = Hit { at: 0.0, piece: Piece::Kick, velocity: 0 };
+        let hit = Hit { at: 0.0, what: Played::Keys { pitches: 0 } };
         let status_every = (STATUS_EVERY_S * sample_rate) as u32;
         Self {
             tracker: BeatTracker::new(sample_rate),
+            harmony: Harmony::new(sample_rate),
+            changes: [0.0; 4],
+            kicks: [0.0; 4],
+            snares: [0.0; 4],
+            accents: [0.0; 4],
+            last_pitches: 0,
             sample_rate,
             active: false,
             running: false,
@@ -115,6 +147,12 @@ impl Live {
 
     fn forget(&mut self) {
         self.tracker.reset();
+        self.harmony.reset();
+        self.changes = [0.0; 4];
+        self.kicks = [0.0; 4];
+        self.snares = [0.0; 4];
+        self.accents = [0.0; 4];
+        self.last_pitches = 0;
         self.beat_count = 0;
         self.pending_count = 0;
         self.downbeat = 0;
@@ -130,6 +168,11 @@ impl Live {
     /// How much later, in ms, the player hears the source than the engine gets it.
     pub fn set_offset(&mut self, ms: f32) {
         self.offset = ms as f64 / 1000.0 * self.sample_rate as f64;
+    }
+
+    /// Reports the tracked tempo again with the next beats shown.
+    pub fn retell_tempo(&mut self) {
+        self.bpm = 0.0;
     }
 
     /// The player says the beat is twice (or half) as fast as the one found.
@@ -189,6 +232,16 @@ impl Live {
     /// A drummer's hit at engine frame `now`. The first one once the beat is
     /// found starts a run.
     pub fn hit(&mut self, piece: Piece, velocity: u8, now: u64, out: &mut EventBuffer) {
+        self.queue(Played::Drum { piece, velocity }, now, out);
+    }
+
+    /// A keys player's strike that began at engine frame `at`: the pitch
+    /// classes played together (a bit set), judged like a drum hit.
+    pub fn strike(&mut self, pitches: u16, at: u64, out: &mut EventBuffer) {
+        self.queue(Played::Keys { pitches }, at, out);
+    }
+
+    fn queue(&mut self, what: Played, now: u64, out: &mut EventBuffer) {
         if !self.active {
             return;
         }
@@ -202,7 +255,7 @@ impl Live {
             self.pending.copy_within(1.., 0);
             self.pending_count -= 1;
         }
-        self.pending[self.pending_count] = Hit { at: now as f64 - self.offset, piece, velocity };
+        self.pending[self.pending_count] = Hit { at: now as f64 - self.offset, what };
         self.pending_count += 1;
     }
 
@@ -213,6 +266,7 @@ impl Live {
         }
         let mut beats = BeatList::default();
         self.tracker.push(input, start, &mut beats);
+        self.harmony.push(input, start);
         for beat in beats.as_slice() {
             self.on_beat(beat, out);
         }
@@ -253,6 +307,21 @@ impl Live {
         let slot = (beat.index % BEATS) as usize;
         self.low[slot] = self.low[slot] * DOWNBEAT_DECAY + beat.low;
         self.high[slot] = self.high[slot] * DOWNBEAT_DECAY + beat.high;
+        for cue in [&mut self.kicks, &mut self.snares, &mut self.accents] {
+            cue[slot] *= DOWNBEAT_DECAY;
+        }
+        // The harmony two beats back: the beats before and after it are complete by now.
+        if self.beat_count >= 4 {
+            let b = &self.beats[self.beat_count - 4..self.beat_count];
+            if b[3].1 - b[0].1 == 3 {
+                let (a0, a1) = self.harmony.inside(b[0].0, b[1].0);
+                let (c0, c1) = self.harmony.inside(b[1].0, b[2].0);
+                if let (Some(before), Some(after)) = (self.harmony.between(a0, a1), self.harmony.between(c0, c1)) {
+                    let at = (b[1].1 % BEATS) as usize;
+                    self.changes[at] = self.changes[at] * DOWNBEAT_DECAY + change(&before, &after);
+                }
+            }
+        }
         self.beats_heard += 1;
         if self.downbeat_told || self.beats_heard < DOWNBEAT_AFTER {
             return;
@@ -262,8 +331,11 @@ impl Live {
             let sum: f32 = v.iter().sum();
             v.map(|x| if sum > 0.0 { x / sum } else { 0.0 })
         };
-        let (low, high) = (norm(low), norm(high));
-        let score = |d: usize| low[d] + 0.5 * low[(d + 2) % 4] + 0.5 * (high[(d + 1) % 4] + high[(d + 3) % 4]) - 0.25 * (high[d] + high[(d + 2) % 4]);
+        let (low, high, changes) = (norm(low), norm(high), norm(self.changes));
+        let (kicks, snares, accents) = (norm(self.kicks), norm(self.snares), norm(self.accents));
+        // Kick and bass on 1 and 3, snare on 2 and 4, a change on the 1.
+        let groove = |low: &[f32; 4], high: &[f32; 4], d: usize| low[d] + 0.5 * low[(d + 2) % 4] + 0.5 * (high[(d + 1) % 4] + high[(d + 3) % 4]) - 0.25 * (high[d] + high[(d + 2) % 4]);
+        let score = |d: usize| CHANGE_WEIGHT * changes[d] + groove(&low, &high, d) + PLAYER_WEIGHT * (groove(&kicks, &snares, d) + accents[d]);
         let best = (0..4).max_by(|&a, &b| score(a).total_cmp(&score(b))).unwrap_or(0);
         let current = self.downbeat as usize;
         if best != current && score(best) > score(current).max(0.0) * DOWNBEAT_MARGIN + 1e-3 {
@@ -289,7 +361,7 @@ impl Live {
     }
 
     /// Places a hit on the sixteenths of the beat that starts at `beat` (frame, index) and ends at `end`.
-    fn judge(&self, hit: Hit, beat: (f64, u32), end: f64, out: &mut EventBuffer) {
+    fn judge(&mut self, hit: Hit, beat: (f64, u32), end: f64, out: &mut EventBuffer) {
         let length = end - beat.0;
         if length <= 0.0 {
             return;
@@ -297,12 +369,44 @@ impl Live {
         let into = (hit.at - beat.0) / length * 4.0;
         let nearest = into.round();
         let ms = ((into - nearest) / 4.0 * length / self.sample_rate as f64 * 1000.0) as f32;
+        if (nearest == 0.0 || nearest == 4.0) && ms.abs() < CUE_MS {
+            self.cue(hit.what, (beat.1 + nearest as u32 / 4) % BEATS);
+        }
         let sixteenth = (beat.1 as i64 - self.downbeat as i64) * 4 + nearest as i64;
         let bar = (sixteenth.div_euclid(16) - self.first_bar).clamp(0, u16::MAX as i64) as u16;
         let sixteenth = sixteenth.rem_euclid(16) as u8;
-        out.push(0, EngineEvent::Judged { ms, piece: hit.piece, sixteenth, bar });
-        if keeps_time(hit.piece, hit.velocity) {
-            out.push(0, EngineEvent::Timing { ms });
+        match hit.what {
+            Played::Drum { piece, velocity } => {
+                out.push(0, EngineEvent::Judged { ms, piece, sixteenth, bar });
+                if keeps_time(piece, velocity) {
+                    out.push(0, EngineEvent::Timing { ms });
+                }
+            }
+            Played::Keys { .. } => {
+                out.push(0, EngineEvent::KeysJudged { ms, sixteenth, bar, chord: None });
+                out.push(0, EngineEvent::Timing { ms });
+            }
+        }
+    }
+
+    /// Something the player played on beat `slot` of the tracker's bar: a
+    /// cue for where the 1 is.
+    fn cue(&mut self, what: Played, slot: u32) {
+        let slot = slot as usize;
+        match what {
+            Played::Drum { piece: Piece::Kick, .. } => self.kicks[slot] += 1.0,
+            Played::Drum { piece: Piece::Snare | Piece::SnareRim, .. } => self.snares[slot] += 1.0,
+            Played::Drum { piece: Piece::Crash | Piece::Crash2 | Piece::China | Piece::Splash, .. } => self.accents[slot] += 1.0,
+            Played::Drum { .. } => {}
+            Played::Keys { pitches } => {
+                // A new chord (two notes or more) is a cue; the same one again isn't.
+                if pitches.count_ones() >= 2 && pitches != self.last_pitches {
+                    self.accents[slot] += 1.0;
+                }
+                if pitches.count_ones() >= 2 {
+                    self.last_pitches = pitches;
+                }
+            }
         }
     }
 
@@ -371,10 +475,11 @@ mod tests {
 
     const SR: f32 = 48_000.0;
 
-    /// 120 BPM clicks from 0.25 s, the 1s louder with a low thump like a kick.
+    /// 120 BPM clicks from 0.25 s, the 1s louder with a low thump like a
+    /// kick, over a held chord (so the harmony never changes).
     fn source(seconds: f32) -> Vec<f32> {
         let len = (seconds * SR) as usize;
-        let mut out = vec![0.0f32; len];
+        let mut out: Vec<f32> = (0..len).map(|i| [110.0f32, 164.8, 220.0].iter().map(|hz| 0.05 * (2.0 * std::f32::consts::PI * hz * i as f32 / SR).sin()).sum()).collect();
         let mut seed = 3u32;
         for i in 0.. {
             let start = ((0.25 + i as f32 * 0.5) * SR) as usize;
@@ -388,7 +493,9 @@ mod tests {
                 seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 let noise = (seed >> 9) as f32 / (1u32 << 23) as f32 * 2.0 - 1.0;
                 let t = k as f32 / SR;
-                let thump = if i % 4 == 0 { (2.0 * std::f32::consts::PI * 60.0 * t).sin() * 0.8 * (-t / 0.04).exp() } else { 0.0 };
+                // A kick's pitch falls fast, from about 150 to 50 Hz.
+                let phase = 2.0 * std::f32::consts::PI * (50.0 * t + 100.0 * 0.03 * (1.0 - (-t / 0.03).exp()));
+                let thump = if i % 4 == 0 { phase.sin() * 0.8 * (-t / 0.04).exp() } else { 0.0 };
                 out[start + k] += noise * 0.3 * (-t / 0.006).exp() + thump;
             }
         }
@@ -483,7 +590,10 @@ mod tests {
         for (f, b) in &beats {
             let heard = (*f as f64 / SR as f64 - 0.25 - 0.030) / 0.5;
             assert!((heard - heard.round()).abs() * 500.0 < 4.0, "beat at {} s", *f as f64 / SR as f64);
-            assert_eq!(*b as i64, (heard.round() as i64).rem_euclid(4), "the thump is the 1");
+            // The 1 is a guess until it has heard a few bars.
+            if *f as f64 > 6.0 * SR as f64 {
+                assert_eq!(*b as i64, (heard.round() as i64).rem_euclid(4), "the thump is the 1");
+            }
         }
         assert!(beats.windows(2).all(|w| w[1].0 - w[0].0 > 23_000 && w[1].0 - w[0].0 < 25_000), "no beat twice or skipped");
         let statuses: Vec<_> = events.iter().filter_map(|(_, e)| if let EngineEvent::Live { locked, .. } = e { Some(*locked) } else { None }).collect();
@@ -511,5 +621,45 @@ mod tests {
         assert!(!ones.is_empty() && ones.iter().all(|t| ((t - 10.75) / 2.0 - ((t - 10.75) / 2.0).round()).abs() < 0.01), "{ones:?}");
         assert!(rest.iter().any(|(_, e)| *e == EngineEvent::Transport { playing: false }), "the run ends in silence");
         assert!(!live.is_running());
+    }
+
+    #[test]
+    fn the_player_s_kick_crash_and_chords_show_the_1_and_keys_are_judged() {
+        let mut live = Live::new(SR);
+        live.set_active(true, &mut EventBuffer::default());
+        // The source's thump says beat 0 is the 1; the player, who hears the
+        // song, plays the 1 on the beat after it: kick and crash there and a
+        // new chord, snare two beats later. The keys come 6 ms late.
+        let beat = |i: u32| 0.25 + i as f64 * 0.5;
+        let mut played = Vec::new();
+        for i in (12..48).filter(|i| i % 4 == 1) {
+            played.push((frame(beat(i)), Some(Piece::Kick), 0));
+            played.push((frame(beat(i)), Some(Piece::Crash), 0));
+            played.push((frame(beat(i) + 0.006), None, if (i / 4) % 2 == 0 { 0b1001_0001u16 } else { 0b0010_0010_0001 }));
+            played.push((frame(beat(i + 2)), Some(Piece::Snare), 0));
+        }
+        let signal = source(25.0);
+        let mut events = Vec::new();
+        let mut next = 0;
+        for (i, block) in signal.chunks(128).enumerate() {
+            let now = (i * 128) as u64;
+            let mut out = EventBuffer::default();
+            while next < played.len() && played[next].0 < now + 128 {
+                match played[next] {
+                    (_, Some(piece), _) => live.hit(piece, 100, now, &mut out),
+                    (at, None, pitches) => live.strike(pitches, at, &mut out),
+                }
+                next += 1;
+            }
+            live.listen(block, now, &mut out);
+            live.process(128, now, &mut out);
+            out.sort();
+            events.extend(out.as_slice().iter().map(|t| (now + t.frame as u64, t.event)));
+        }
+        let kicks: Vec<u8> = judged(&events).iter().filter(|h| h.1 == Piece::Kick).map(|h| h.2).collect();
+        assert!(kicks.len() >= 8 && kicks[kicks.len() - 4..].iter().all(|&s| s == 0), "the player's 1 wins: {kicks:?}");
+        let keys: Vec<_> = events.iter().filter_map(|(_, e)| if let EngineEvent::KeysJudged { ms, chord, .. } = e { Some((*ms, *chord)) } else { None }).collect();
+        assert_eq!(keys.len(), 9);
+        assert!(keys.iter().all(|&(ms, chord)| ms > 6.0 - 2.7 - 1.5 && ms < 6.0 + 1.5 && chord.is_none()), "{keys:?}");
     }
 }

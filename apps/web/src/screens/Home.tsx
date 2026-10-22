@@ -6,7 +6,7 @@ const MODES = [
   { id: 'jam', title: 'Jam', blurb: 'Hold chords, the band follows you.' },
   { id: 'songs', title: 'Songs', blurb: 'Play along with chord charts and MIDI files.' },
   { id: 'learn', title: 'Learn', blurb: 'Falling notes, wait mode and lessons.' },
-  { id: 'along', title: 'Play along', blurb: 'Drum along with any song this computer plays.' },
+  { id: 'along', title: 'Play along', blurb: 'Drum or play keys along with any song this computer plays.' },
 ] as const;
 
 export function Home() {

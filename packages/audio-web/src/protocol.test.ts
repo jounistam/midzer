@@ -150,6 +150,8 @@ describe('decodeEvent', () => {
   it('decodes the live status like event.rs', () => {
     expect(decodeEvent(15, 1 | (255 << 8) | (51 << 16), 0, 4)).toEqual({ type: 'live', locked: true, confidence: 1, level: 0.2, frame: 4 });
     expect(decodeEvent(15, 0, 0, 4)).toEqual({ type: 'live', locked: false, confidence: 0, level: 0, frame: 4 });
+    expect(decodeEvent(16, new Uint32Array(new Float32Array([-6.5]).buffer)[0]!, 3 | (2 << 8) | (7 << 16), 4)).toEqual({ type: 'keysJudged', ms: -6.5, sixteenth: 3, bar: 7, chord: false, frame: 4 });
+    expect(decodeEvent(16, new Uint32Array(new Float32Array([1]).buffer)[0]!, 0, 4)).toEqual({ type: 'keysJudged', ms: 1, sixteenth: 0, bar: 0, chord: null, frame: 4 });
   });
 
   it('decodes song positions', () => {

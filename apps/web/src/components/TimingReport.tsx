@@ -4,12 +4,12 @@ import { judgedHits, useSession } from '../session';
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 
-/** How the last run against a recording or a live track went: overall, by offset, bar by bar and by part of the kit. */
+/** How the last run against a recording or a live track went: overall, by offset, bar by bar, by part of the kit (or keys) and the chords. */
 export function TimingReport({ source = 'the recording' }: { source?: string }) {
   const count = useSession((s) => s.judgedCount);
   // judgedHits() grows in place; the count says when to look again.
   const summary = useMemo(() => summarize(judgedHits()), [count]);
-  if (summary.hits === 0) return <p className="setting-note">Press Play and drum along: every hit is timed against {source}'s own beat.</p>;
+  if (summary.hits === 0) return <p className="setting-note">Press Play and play along: every hit is timed against {source}'s own beat.</p>;
 
   return (
     <div className="timing-report" data-testid="timing-report">
@@ -17,6 +17,7 @@ export function TimingReport({ source = 'the recording' }: { source?: string }) 
         <Tile label="On time" value={pct(summary.onTime)} note={`within ${ON_TIME_MS} ms, ${summary.hits} hits`} />
         <Tile label="On average" value={describeOffset(summary.meanMs)} />
         <Tile label="Spread" value={`±${Math.round(summary.spreadMs)} ms`} />
+        {summary.chords && <Tile label="Chords" value={pct(summary.chords.right / summary.chords.checked)} note={`${summary.chords.right} of ${summary.chords.checked} fit the chart`} />}
       </div>
       <Histogram bins={summary.histogram} />
       {summary.bars.length > 1 && <BarAccuracy bars={summary.bars} />}

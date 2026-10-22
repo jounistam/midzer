@@ -6,6 +6,7 @@
 
 import { DRUM_PIECES, MIC_CHANNEL, partOfChannel, type TimedEvent } from '@midzer/audio-web';
 import { TimingMeter } from './drums/stage';
+import { RecentHits } from './playalong/feedback';
 
 const PIECE_OF_NOTE = new Map<number, number>(DRUM_PIECES.map((p, i) => [p.note, i]));
 
@@ -24,6 +25,8 @@ export const live = {
   hiHat: -1,
   /** How far a drummer's hits land off the band's grid, smoothed. */
   timing: new TimingMeter(),
+  /** Hits judged against a recording or live track in this run, for the accuracy display. */
+  hits: new RecentHits(),
   /** Microphone loudness 0..1 and the note it hears (-1 none), for the meter. */
   mic: { level: 0, key: -1 },
   /** Bumped on every change so renderers can skip unchanged frames. */

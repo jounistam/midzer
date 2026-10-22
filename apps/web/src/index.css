@@ -2024,14 +2024,47 @@ code {
 
 /* ---- Play along with live audio --------------------------------------------- */
 
-.jam-stage .along-stage {
-  grid-template-columns: 1fr 1fr;
-  min-height: 320px;
+.jam-stage .along-strip {
+  flex: none;
+  display: grid;
+  grid-template-columns: minmax(160px, auto) 1fr minmax(180px, 260px);
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-4) var(--space-6);
+}
+
+.along-tempo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.along-bpm {
+  margin: 0;
+  font-family: var(--font-family-display);
+  font-size: clamp(40px, 4vw, 64px);
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.along-bpm.empty {
+  color: var(--color-text-muted);
+}
+
+.along-strip .stage-beats {
+  grid-column: auto;
+  gap: var(--space-6);
+}
+
+.stage-beats.waiting .stage-beat {
+  opacity: 0.4;
 }
 
 .along-meters {
-  gap: var(--space-4);
-  align-self: center;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
 }
 
 .along-meter {
@@ -2069,6 +2102,231 @@ code {
 .along-device select {
   flex: 1;
   min-width: 0;
+}
+
+/* ---- Hit feedback (playing along) ------------------------------------------- */
+
+.jam-stage .hit-feedback,
+.song-stage .hit-feedback {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-6);
+  min-height: 340px;
+  padding: var(--space-6) var(--space-8);
+  border: 2px solid transparent;
+}
+
+.hit-feedback[data-flash='on'] {
+  animation: hit-flash-on 400ms ease-out;
+}
+
+.hit-feedback[data-flash='near'] {
+  animation: hit-flash-near 400ms ease-out;
+}
+
+.hit-feedback[data-flash='off'] {
+  animation: hit-flash-off 500ms ease-out;
+}
+
+@keyframes hit-flash-on {
+  from {
+    border-color: var(--color-status-success);
+    box-shadow: 0 0 48px color-mix(in srgb, var(--color-status-success) 45%, transparent);
+  }
+}
+
+@keyframes hit-flash-near {
+  from {
+    border-color: var(--color-status-warning);
+    box-shadow: 0 0 48px color-mix(in srgb, var(--color-status-warning) 40%, transparent);
+  }
+}
+
+@keyframes hit-flash-off {
+  from {
+    border-color: var(--color-status-danger);
+    box-shadow: 0 0 64px color-mix(in srgb, var(--color-status-danger) 55%, transparent);
+    background: color-mix(in srgb, var(--color-status-danger) 14%, var(--color-surface-default));
+  }
+}
+
+.hit-score {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
+  column-gap: var(--space-8);
+  align-items: end;
+}
+
+.hit-score .eyebrow {
+  grid-column: 1 / -1;
+}
+
+.hit-percent {
+  grid-row: 2 / span 2;
+  margin: 0;
+  font-family: var(--font-family-display);
+  font-size: clamp(80px, min(13vw, 17vh), 220px);
+  font-weight: 700;
+  line-height: 0.9;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+  transition: color var(--motion-duration-fast);
+}
+
+.hit-feedback[data-level='on'] .hit-percent {
+  color: var(--color-status-success);
+  text-shadow: 0 0 40px color-mix(in srgb, var(--color-status-success) 50%, transparent);
+}
+
+.hit-feedback[data-level='near'] .hit-percent {
+  color: var(--color-status-warning);
+  text-shadow: 0 0 40px color-mix(in srgb, var(--color-status-warning) 45%, transparent);
+}
+
+.hit-feedback[data-level='off'] .hit-percent {
+  color: var(--color-status-danger);
+  text-shadow: 0 0 40px color-mix(in srgb, var(--color-status-danger) 50%, transparent);
+}
+
+.hit-verdict {
+  margin: 0;
+  font-family: var(--font-family-display);
+  font-size: clamp(28px, 3.2vw, 52px);
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.hit-lane {
+  flex: none;
+  position: relative;
+  height: clamp(64px, 10vh, 120px);
+  border-radius: var(--radius-card);
+  background: var(--color-surface-track);
+  overflow: hidden;
+}
+
+.hit-lane-near,
+.hit-lane-pocket {
+  position: absolute;
+  top: 0;
+  height: 100%;
+}
+
+.hit-lane-near {
+  background: color-mix(in srgb, var(--color-status-warning) 12%, transparent);
+}
+
+.hit-lane-pocket {
+  background: color-mix(in srgb, var(--color-status-success) 26%, transparent);
+}
+
+.hit-lane-zero {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  margin-left: -1px;
+  background: var(--color-text-muted);
+}
+
+.hit-dot {
+  position: absolute;
+  top: 50%;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border-radius: 50%;
+}
+
+.hit-dot.newest {
+  width: 40px;
+  height: 40px;
+  margin: -20px 0 0 -20px;
+}
+
+.hit-dot.on {
+  background: var(--color-status-success);
+}
+
+.hit-dot.near {
+  background: var(--color-status-warning);
+}
+
+.hit-dot.off {
+  background: var(--color-status-danger);
+}
+
+.hit-dot.newest.on {
+  box-shadow: 0 0 24px var(--color-status-success);
+}
+
+.hit-dot.newest.near {
+  box-shadow: 0 0 24px var(--color-status-warning);
+}
+
+.hit-dot.newest.off {
+  box-shadow: 0 0 28px var(--color-status-danger);
+}
+
+.hit-needle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  margin-left: -3px;
+  border-radius: 3px;
+  background: var(--color-text-primary);
+  box-shadow: 0 0 12px var(--color-text-primary);
+  transition: left 150ms ease-out;
+}
+
+.hit-lane-end {
+  position: absolute;
+  top: var(--space-1);
+  left: var(--space-3);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  z-index: 1;
+}
+
+.hit-lane-end.right {
+  left: auto;
+  right: var(--space-3);
+}
+
+.hit-note {
+  margin: 0;
+}
+
+@media (max-width: 900px) {
+  .jam-stage .along-strip {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .along-strip .stage-beats {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .jam-stage .hit-feedback,
+  .song-stage .hit-feedback {
+    min-height: 0;
+    padding: var(--space-4);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hit-feedback[data-flash] {
+    animation-duration: 1ms;
+  }
 }
 
 /* ---- Timing report (play along with a recording) --------------------------- */
@@ -2229,4 +2487,27 @@ code {
   font-family: var(--font-family-display);
   font-weight: 600;
   text-align: right;
+}
+
+/* Play along fits the window on a big screen, so the kit and the accuracy are both in view. */
+@media (min-width: 901px) {
+  .along-screen {
+    height: 100vh;
+  }
+
+  .along-screen .jam-main {
+    min-height: 0;
+  }
+
+  .along-screen .jam-stage {
+    min-height: 0;
+  }
+
+  .along-screen .control-panel {
+    overflow-y: auto;
+  }
+
+  .along-screen .jam-stage .hit-feedback {
+    min-height: 0;
+  }
 }

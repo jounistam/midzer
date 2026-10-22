@@ -104,7 +104,8 @@ fn apply(synth: &mut Synthesizer, event: &EngineEvent, kit_sound: bool) {
         | EngineEvent::Timing { .. }
         | EngineEvent::CountIn { .. }
         | EngineEvent::Judged { .. }
-            | EngineEvent::Live { .. } => {}
+            | EngineEvent::Live { .. }
+            | EngineEvent::KeysJudged { .. } => {}
     }
 }
 
