@@ -46,6 +46,9 @@ pub enum EngineEvent {
     /// A drummer's hit placed on a backing track's grid: `ms` from sixteenth
     /// `sixteenth` (0..16) of song bar `bar`.
     Judged { ms: f32, piece: Piece, sixteenth: u8, bar: u16 },
+    /// Live audio: whether the beat tracker has found the beat, how sure it
+    /// is (0..=255) and the source's loudness (0..=255 over -80..0 dBFS).
+    Live { locked: bool, confidence: u8, level: u8 },
 }
 
 /// What the band is doing, for the UI.
@@ -85,6 +88,7 @@ mod op {
     pub const TIMING: u32 = 12;
     pub const COUNT_IN: u32 = 13;
     pub const JUDGED: u32 = 14;
+    pub const LIVE: u32 = 15;
 }
 
 const NO_CHORD: u32 = 0xff;
@@ -119,6 +123,9 @@ impl EngineEvent {
             EngineEvent::CountIn { hits } => [op::COUNT_IN, hits as u32, 0, frame],
             EngineEvent::Judged { ms, piece, sixteenth, bar } => {
                 [op::JUDGED, ms.to_bits(), piece.index() as u32 | (sixteenth as u32) << 8 | (bar as u32) << 16, frame]
+            }
+            EngineEvent::Live { locked, confidence, level } => {
+                [op::LIVE, locked as u32 | (confidence as u32) << 8 | (level as u32) << 16, 0, frame]
             }
             EngineEvent::Band(s) => {
                 let section = Section::ALL.iter().position(|x| *x == s.section).unwrap_or(0) as u32;
@@ -166,6 +173,7 @@ impl EngineEvent {
                 sixteenth: byte(b >> 8),
                 bar: (b >> 16) as u16,
             },
+            op::LIVE => EngineEvent::Live { locked: a & 1 != 0, confidence: byte(a >> 8), level: byte(a >> 16) },
             op::BAND => {
                 let flags = byte(b >> 8);
                 let next_style = byte(a >> 8);
@@ -352,6 +360,7 @@ mod tests {
             EngineEvent::Timing { ms: -12.5 },
             EngineEvent::CountIn { hits: 3 },
             EngineEvent::Judged { ms: -12.5, piece: Piece::China, sixteenth: 15, bar: 511 },
+            EngineEvent::Live { locked: true, confidence: 200, level: 17 },
         ] {
             assert_eq!(EngineEvent::decode(event.encode(42)), Some((event, 42)));
         }

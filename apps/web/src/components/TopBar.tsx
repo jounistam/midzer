@@ -3,7 +3,8 @@ import { useState } from 'react';
 import { goTo, setStyle, useSession } from '../session';
 import { SettingsDrawer } from './SettingsDrawer';
 
-export function TopBar({ title, onBack }: { title: string; onBack?: () => void }) {
+/** `styles` off hides the style picker where the band doesn't play. */
+export function TopBar({ title, onBack, styles = true }: { title: string; onBack?: () => void; styles?: boolean }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   return (
     <header className="top-bar">
@@ -19,7 +20,7 @@ export function TopBar({ title, onBack }: { title: string; onBack?: () => void }
         <span className="crumb">/</span>
         <span className="title">{title}</span>
       </div>
-      <StylePicker />
+      {styles ? <StylePicker /> : <span />}
       <div className="top-right">
         <DeviceChip />
         <button className="btn btn-secondary btn-icon" onClick={() => setSettingsOpen(true)} aria-label="Settings">

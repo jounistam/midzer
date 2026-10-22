@@ -4,7 +4,7 @@
 // as the AudioWorklet, plus native MIDI, since desktop webviews lack Web MIDI.
 
 import { Channel, invoke } from '@tauri-apps/api/core';
-import type { EngineHandle, EventListener, TrackLoaded } from './engine';
+import type { EngineHandle, EventListener, LiveDevice, TrackLoaded } from './engine';
 import { decodeEvent, encodeCommand, type EngineCommand } from './protocol';
 
 export { isNativeHost } from './engine';
@@ -155,6 +155,18 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
         throw new Error(String(e));
       });
       return () => void invoke('mic_close');
+    },
+    // Tabs are a browser thing; system audio comes as a loopback device.
+    canCaptureTab: false,
+    async liveDevices() {
+      return invoke<LiveDevice[]>('live_devices');
+    },
+    async openLive(source) {
+      if (source.kind !== 'device') throw new Error('The desktop app plays along with system audio or an input.');
+      await invoke('live_open', { id: source.id }).catch((e: unknown) => {
+        throw new Error(String(e));
+      });
+      return () => void invoke('live_close');
     },
     async close() {
       listeners.clear();

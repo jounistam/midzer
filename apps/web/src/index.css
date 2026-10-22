@@ -2022,6 +2022,55 @@ code {
   padding: var(--space-4) var(--space-6);
 }
 
+/* ---- Play along with live audio --------------------------------------------- */
+
+.jam-stage .along-stage {
+  grid-template-columns: 1fr 1fr;
+  min-height: 320px;
+}
+
+.along-meters {
+  gap: var(--space-4);
+  align-self: center;
+}
+
+.along-meter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.along-meter .mic-meter-track {
+  flex: none;
+}
+
+.along-report {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.along-meter .mic-meter-fill {
+  transition: width var(--motion-duration-fast);
+}
+
+.along-sources,
+.along-device,
+.along-listening {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.along-device {
+  flex-direction: row;
+}
+
+.along-device select {
+  flex: 1;
+  min-width: 0;
+}
+
 /* ---- Timing report (play along with a recording) --------------------------- */
 
 .timing-report {

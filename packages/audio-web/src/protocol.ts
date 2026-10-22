@@ -46,6 +46,10 @@ const Cmd = {
   TrackClear: 38,
   TrackBeat: 39,
   SetTrackDrums: 40,
+  SetLive: 41,
+  SetLiveOffset: 42,
+  LiveDownbeat: 43,
+  LiveTempo: 44,
 } as const;
 
 /** Ticks per beat in song positions; mirrors `PPQ` in style.rs. */
@@ -207,7 +211,15 @@ export type EngineCommand =
   /** When song beat `index` is heard, in seconds into the recording. */
   | { type: 'trackBeat'; index: number; seconds: number }
   /** Whether the recording's separate drum stem is heard. */
-  | { type: 'setTrackDrums'; on: boolean };
+  | { type: 'setTrackDrums'; on: boolean }
+  /** Whether live audio (see `EngineHandle.openLive`) is followed and hits judged against its beats, instead of the band. */
+  | { type: 'setLive'; on: boolean }
+  /** How much later, in ms, the player hears the live source than the engine gets it. */
+  | { type: 'setLiveOffset'; ms: number }
+  /** The live beat heard nearest to now is a 1. */
+  | { type: 'liveDownbeat' }
+  /** The live beat is twice (or half) as fast as the one found. */
+  | { type: 'liveTempo'; double: boolean };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -312,6 +324,14 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.TrackBeat, cmd.index, floatBits(cmd.seconds), 0];
     case 'setTrackDrums':
       return [Cmd.SetTrackDrums, cmd.on ? 1 : 0, 0, 0];
+    case 'setLive':
+      return [Cmd.SetLive, cmd.on ? 1 : 0, 0, 0];
+    case 'setLiveOffset':
+      return [Cmd.SetLiveOffset, floatBits(cmd.ms), 0, 0];
+    case 'liveDownbeat':
+      return [Cmd.LiveDownbeat, 0, 0, 0];
+    case 'liveTempo':
+      return [Cmd.LiveTempo, cmd.double ? 1 : 0, 0, 0];
   }
 }
 
@@ -385,7 +405,9 @@ export type EngineEvent =
   /** Evenly spaced count-in hits so far; 0 when a count-in starts over. */
   | { type: 'countIn'; hits: number }
   /** A drummer's hit on a backing track's grid: `ms` from sixteenth `sixteenth` (0..15) of song bar `bar`. */
-  | { type: 'judged'; ms: number; piece: DrumPiece; sixteenth: number; bar: number };
+  | { type: 'judged'; ms: number; piece: DrumPiece; sixteenth: number; bar: number }
+  /** Live audio: whether the beat is found, how sure (0..1) and the source's loudness (0..1 over -80..0 dBFS). */
+  | { type: 'live'; locked: boolean; confidence: number; level: number };
 
 /** An event plus the AudioContext frame at which it sounds. */
 export type TimedEvent = EngineEvent & { frame: number };
@@ -453,6 +475,8 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
       const piece = DRUM_PIECES[b & 0xff]?.id;
       return piece ? { type: 'judged', ms: bitsFloat(a), piece, sixteenth: (b >> 8) & 0xff, bar: b >>> 16, frame } : null;
     }
+    case 15:
+      return { type: 'live', locked: (a & 1) !== 0, confidence: ((a >> 8) & 0xff) / 255, level: ((a >> 16) & 0xff) / 255, frame };
     default:
       return null;
   }

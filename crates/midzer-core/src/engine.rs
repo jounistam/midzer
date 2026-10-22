@@ -7,6 +7,7 @@ use crate::drummer::{CountIn, CountInListener};
 use crate::drums::{Instrument, Kit, KitAction, Piece, Triggers};
 use crate::event::{EngineEvent, EventBuffer, MIC_CHANNEL, PLAYER_DRUM_CHANNEL, Timed};
 use crate::listen::{Heard, HeardList, ListenMode, Listener};
+use crate::live::Live;
 
 /// MIDI channel for the player's own notes.
 pub const PLAYER_CHANNEL: u8 = 0;
@@ -44,6 +45,8 @@ pub struct Engine {
     band_drums: BandDrums,
     /// A recording that plays songs instead of the band.
     backing: Backing,
+    /// Live audio the player plays along with, instead of the band.
+    live: Live,
 }
 
 impl Engine {
@@ -66,12 +69,14 @@ impl Engine {
             start_in: None,
             band_drums: BandDrums::Off,
             backing: Backing::new(sample_rate),
+            live: Live::new(sample_rate),
         }
     }
 
     pub fn handle(&mut self, cmd: Command) {
         let drums = self.instrument == Instrument::Drums;
         let track = self.backing.active();
+        let live = self.live.active();
         match cmd {
             Command::NoteOn { note, velocity } if drums => self.drum_note(note, velocity),
             Command::NoteOff { .. } if drums => {}
@@ -96,6 +101,7 @@ impl Engine {
                 }
                 self.update_keys_held();
             }
+            Command::Play if live => self.live.play(self.now, &mut self.events),
             Command::Play if track => self.backing.play(self.band.bpm(), &mut self.events),
             Command::Play => {
                 self.start_in = None;
@@ -108,13 +114,14 @@ impl Engine {
                     self.backing.stop(0, &mut self.events);
                     self.events.push(0, EngineEvent::Tempo { bpm: self.band.bpm() });
                 }
+                self.live.stop(0, &mut self.events);
             }
             Command::SetTempo { bpm } => self.band.set_tempo(bpm),
             Command::SetSplit { note } => self.split = note,
             Command::SetMute { channel, muted } => self.band.set_muted(channel, muted, &mut self.events),
             Command::SetStyle { index } => self.band.set_style(index, &mut self.events),
-            // The recording has its own arrangement.
-            Command::Section { .. } if track => {}
+            // The recording or the live source has its own arrangement.
+            Command::Section { .. } if track || live => {}
             Command::Section { request } => self.band.request(request, &mut self.events),
             Command::SetFollow { on } => self.band.set_follow(on, &mut self.events),
             Command::SetEnergy { energy } => self.band.set_energy(energy, &mut self.events),
@@ -177,9 +184,27 @@ impl Engine {
             Command::SetTrack { on } => {
                 if on != track {
                     self.handle(Command::Stop);
+                    if on && live {
+                        self.handle(Command::SetLive { on: false });
+                    }
                     self.backing.set_active(on, &mut self.events);
                 }
             }
+            Command::SetLive { on } => {
+                if on != live {
+                    self.handle(Command::Stop);
+                    if on && track {
+                        self.handle(Command::SetTrack { on: false });
+                    }
+                    self.live.set_active(on, &mut self.events);
+                    if !on {
+                        self.events.push(0, EngineEvent::Tempo { bpm: self.band.bpm() });
+                    }
+                }
+            }
+            Command::SetLiveOffset { ms } => self.live.set_offset(ms),
+            Command::LiveDownbeat => self.live.set_downbeat(self.now),
+            Command::LiveTempo { double } => self.live.scale_tempo(double),
             Command::TrackClear { beats } => self.backing.clear_beats(beats as u32),
             Command::TrackBeat { index, seconds } => self.backing.set_beat(index as u32, seconds),
             Command::SetTrackDrums { on } => self.backing.set_drums(on),
@@ -199,6 +224,11 @@ impl Engine {
         let mut heard = HeardList::default();
         self.listener.push(input, &mut heard);
         self.on_heard(&heard);
+    }
+
+    /// Feeds this block of the live source (see [`Command::SetLive`]), before [`Engine::process`].
+    pub fn listen_live(&mut self, input: &[f32]) {
+        self.live.listen(input, self.now, &mut self.events);
     }
 
     fn on_heard(&mut self, heard: &HeardList) {
@@ -272,7 +302,7 @@ impl Engine {
 
     fn kit_action(&mut self, action: KitAction) {
         let playing = self.is_playing();
-        if self.backing.active() && action != KitAction::StartStop {
+        if (self.backing.active() || self.live.active()) && action != KitAction::StartStop {
             return;
         }
         match action {
@@ -296,7 +326,10 @@ impl Engine {
         self.drum_gate[piece.index()] = self.gate_frames;
         self.events.push(0, EngineEvent::NoteOn { channel: PLAYER_DRUM_CHANNEL, key: piece.note(), velocity });
         self.band.note_played(velocity);
-        if self.backing.active() {
+        if self.live.active() {
+            // Judged against the live source a beat later.
+            self.live.hit(piece, velocity, self.now, &mut self.events);
+        } else if self.backing.active() {
             // Judged against the recording; nothing to lead or count in.
             self.backing.drum_hit(piece, velocity, self.band.latency_ms(), &mut self.events);
         } else if self.instrument != Instrument::Drums {
@@ -355,6 +388,7 @@ impl Engine {
                 self.band.process(frames - delay as u32, &mut self.events);
                 self.events.shift_from(mark, delay as u32);
             }
+            None if self.live.active() => self.live.process(frames, self.now, &mut self.events),
             None if self.backing.active() => {
                 let mark = self.events.len();
                 self.backing.process(frames, self.band.song(), &mut self.events);
@@ -392,7 +426,7 @@ impl Engine {
     }
 
     pub fn is_playing(&self) -> bool {
-        self.band.is_playing() || self.backing.is_playing()
+        self.band.is_playing() || self.backing.is_playing() || self.live.is_running()
     }
 
     pub fn chord(&self) -> Option<crate::chord::Chord> {
@@ -811,6 +845,49 @@ mod tests {
         assert!(events.iter().any(|(_, e)| matches!(e, EngineEvent::Timing { .. })));
         assert!(!engine.is_playing(), "stopped at the end of the recording");
         assert!(events.iter().any(|(_, e)| *e == EngineEvent::Transport { playing: false }));
+    }
+
+    #[test]
+    fn live_audio_takes_over_from_the_band_and_judges_the_drummer() {
+        let mut engine = drummer();
+        engine.handle(Command::SetLiveOffset { ms: 0.0 });
+        engine.handle(Command::SetTrack { on: true });
+        engine.handle(Command::SetLive { on: true });
+        // 120 BPM clicks from 0.25 s, heard as they come in.
+        let click = |f: u64| {
+            let into = (f as f64 / 48_000.0 - 0.25).rem_euclid(0.5);
+            if f >= 12_000 && into < 0.01 { ((f * 7919) % 200) as f32 / 200.0 - 0.5 } else { 0.0 }
+        };
+        let snare_at = (48_000.0 * (0.25 + 20.0 * 0.5 + 0.008)) as u64;
+        let mut events = Vec::new();
+        let mut input = [0.0f32; 128];
+        for block in 0..(48_000 * 14 / 128) as u64 {
+            let at = block * 128;
+            for (i, x) in input.iter_mut().enumerate() {
+                *x = click(at + i as u64);
+            }
+            match at {
+                99_968 => engine.handle(Command::Play),
+                112_000 => engine.handle(Command::Section { request: Request::Fill }),
+                f if f + 128 > snare_at && f <= snare_at => engine.handle(hit(Piece::Snare, 100)),
+                _ => {}
+            }
+            engine.listen_live(&input);
+            events.extend(engine.process(128).iter().map(|t| (at + t.frame as u64, t.event)));
+            engine.end_block();
+        }
+        assert!(band_states(&events).iter().all(|(_, s)| !s.playing), "the band stays out");
+        assert!(!events.iter().any(|(_, e)| matches!(e, EngineEvent::NoteOn { channel: 0..=9, .. })));
+        assert!(events.contains(&(99_968, EngineEvent::Transport { playing: true })), "Play starts a run");
+        let judged: Vec<_> = events.iter().filter_map(|(_, e)| if let EngineEvent::Judged { ms, piece, .. } = e { Some((*ms, *piece)) } else { None }).collect();
+        assert_eq!(judged.len(), 1);
+        assert!(judged[0].1 == Piece::Snare && judged[0].0 > 8.0 - 2.7 - 3.0 && judged[0].0 < 8.0 + 3.0, "{judged:?}");
+        assert!(events.iter().any(|(_, e)| matches!(e, EngineEvent::Live { locked: true, .. })));
+        assert!(engine.is_playing());
+        engine.handle(Command::SetLive { on: false });
+        let off = engine.process(128).to_vec();
+        assert!(off.iter().any(|t| t.event == EngineEvent::Transport { playing: false }));
+        assert!(!engine.is_playing());
     }
 
     #[test]

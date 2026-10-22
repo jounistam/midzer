@@ -6,11 +6,12 @@ const MODES = [
   { id: 'jam', title: 'Jam', blurb: 'Hold chords, the band follows you.' },
   { id: 'songs', title: 'Songs', blurb: 'Play along with chord charts and MIDI files.' },
   { id: 'learn', title: 'Learn', blurb: 'Falling notes, wait mode and lessons.' },
+  { id: 'along', title: 'Play along', blurb: 'Drum along with any song this computer plays.' },
 ] as const;
 
 export function Home() {
   const audio = useSession((s) => s.audio);
-  const open = (screen: 'jam' | 'songs' | 'learn') => {
+  const open = (screen: (typeof MODES)[number]['id']) => {
     if (audio === 'idle' || audio === 'error') void startAudio();
     goTo(screen);
   };

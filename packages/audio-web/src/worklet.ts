@@ -39,6 +39,8 @@ interface MidzerExports {
   mz_events_ptr(host: number): number;
   mz_input_ptr(host: number): number;
   mz_listen(host: number, frames: number): void;
+  mz_live_ptr(host: number): number;
+  mz_listen_live(host: number, frames: number): void;
   mz_command(host: number, w0: number, w1: number, w2: number, w3: number): number;
   mz_process(host: number, frames: number): number;
 }
@@ -56,6 +58,7 @@ class MidzerProcessor extends AudioWorkletProcessor {
   private right!: Float32Array;
   private eventWords!: Uint32Array;
   private input!: Float32Array;
+  private live!: Float32Array;
   private dropped = 0;
 
   constructor(options: AudioWorkletNodeOptions) {
@@ -117,6 +120,13 @@ class MidzerProcessor extends AudioWorkletProcessor {
       this.input.set(mic.length === BLOCK ? mic : mic.subarray(0, Math.min(mic.length, BLOCK)));
       wasm.mz_listen(host, Math.min(mic.length, BLOCK));
     }
+    // The live source to play along with, on the second input.
+    const live = inputs[1]?.[0];
+    if (live) {
+      if (this.live.buffer !== wasm.memory.buffer) this.refreshViews();
+      this.live.set(live.length === BLOCK ? live : live.subarray(0, Math.min(live.length, BLOCK)));
+      wasm.mz_listen_live(host, Math.min(live.length, BLOCK));
+    }
     const count = wasm.mz_process(host, frames);
 
     // Growing wasm memory detaches old views; re-create them only then.
@@ -154,6 +164,7 @@ class MidzerProcessor extends AudioWorkletProcessor {
     this.right = new Float32Array(memory.buffer, this.wasm.mz_right_ptr(this.host), BLOCK);
     this.eventWords = new Uint32Array(memory.buffer, this.wasm.mz_events_ptr(this.host), MAX_EVENTS * 4);
     this.input = new Float32Array(memory.buffer, this.wasm.mz_input_ptr(this.host), BLOCK);
+    this.live = new Float32Array(memory.buffer, this.wasm.mz_live_ptr(this.host), BLOCK);
   }
 }
 

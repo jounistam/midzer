@@ -26,6 +26,8 @@ import {
   type KitAction,
   type KitTrigger,
   type ListenMode,
+  type LiveDevice,
+  type LiveSource,
   type NativeMidi,
   type SectionRequest,
   type TimedEvent,
@@ -47,6 +49,7 @@ import {
 import { pickProgression, progressionCommands } from './drums/progressions';
 import type { JudgedHit } from './drums/judging';
 import { COUNT_IN_OPTIONS, countInPieces, type CountInChoice } from './drums/stage';
+import { offsetToBeat, SYNC_TAPS, syncedOffset } from './playalong/sync';
 import { qwertyToNote } from './qwerty';
 import { isBuiltin, saveUserSong } from './songs/library';
 import { decodeRecording } from './songs/analyzeAudio';
@@ -55,7 +58,7 @@ import { Recorder } from './songs/recorder';
 import { loadRecording } from './songs/recordings';
 import { chartCommands, newSongId, trackCommands, type Song } from './songs/song';
 
-export type Screen = 'onboarding' | 'home' | 'jam' | 'songs' | 'song' | 'learn' | 'lesson';
+export type Screen = 'onboarding' | 'home' | 'jam' | 'songs' | 'song' | 'learn' | 'lesson' | 'along';
 
 /** Screens that play an open song, so leaving them closes it. */
 const SONG_SCREENS: Screen[] = ['song', 'lesson'];
@@ -73,6 +76,24 @@ export type RecordingState =
   | { status: 'loading' }
   | { status: 'ready'; seconds: number; drumStem: boolean }
   | { status: 'error'; message: string };
+
+/** The live source being played along with. */
+export type LiveSourceState =
+  | { status: 'none' }
+  | { status: 'opening'; key: string }
+  | { status: 'on'; key: string }
+  /** It stopped by itself, e.g. the browser's "Stop sharing". */
+  | { status: 'ended'; key: string }
+  | { status: 'error'; key: string; message: string };
+
+/** What the beat tracker says about the live source. */
+export interface LiveTracker {
+  locked: boolean;
+  /** 0..1 */
+  confidence: number;
+  /** Loudness, 0..1 over -80..0 dBFS. */
+  level: number;
+}
 
 export const BAND_CHANNELS: Record<BandPart, number> = {
   drums: DRUM_CHANNEL,
@@ -164,6 +185,16 @@ interface SessionState {
   recordingDrums: boolean;
   /** Hits judged against the recording in the current or last run; see `judgedHits`. */
   judgedCount: number;
+  liveSource: LiveSourceState;
+  liveTracker: LiveTracker;
+  /** Inputs to play along with; names may be missing until audio input is allowed. */
+  liveDevices: LiveDevice[];
+  /** How much later the player hears each source than midzer does, in ms, by `liveSourceKey`. */
+  liveOffsets: Record<string, number>;
+  /** Taps so far while syncing, or null when not syncing. */
+  liveSyncTaps: number | null;
+  /** Why the last sync didn't take. */
+  liveSyncError: string | null;
 }
 
 export const BAND_DRUMS_OPTIONS: { mode: BandDrums; label: string }[] = [
@@ -212,6 +243,7 @@ interface Prefs {
   progression: string | null;
   playRecording: boolean;
   recordingDrums: boolean;
+  liveOffsets: Record<string, number>;
 }
 
 function readPrefs(): Prefs {
@@ -231,6 +263,7 @@ function readPrefs(): Prefs {
     progression: null,
     playRecording: true,
     recordingDrums: true,
+    liveOffsets: {},
   };
   try {
     const saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Partial<Prefs>;
@@ -249,17 +282,20 @@ function readPrefs(): Prefs {
     const progression = typeof saved.progression === 'string' ? saved.progression : null;
     const playRecording = saved.playRecording !== false;
     const recordingDrums = saved.recordingDrums !== false;
-    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums };
+    const liveOffsets = Object.fromEntries(
+      Object.entries(saved.liveOffsets ?? {}).filter((e): e is [string, number] => typeof e[1] === 'number' && Math.abs(e[1]) <= 1000),
+    );
+    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets };
   } catch {
     return defaults;
   }
 }
 
 function savePrefs(): void {
-  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums } = get();
+  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets } = get();
   // With a song open the style belongs to the song; keep the Jam one.
   const style = get().song ? readPrefs().style : get().style;
-  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums };
+  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets };
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch {
@@ -329,6 +365,12 @@ export const useSession = create<SessionState>(() => ({
   playRecording: prefs.playRecording,
   recordingDrums: prefs.recordingDrums,
   judgedCount: 0,
+  liveSource: { status: 'none' },
+  liveTracker: { locked: false, confidence: 0, level: 0 },
+  liveDevices: [],
+  liveOffsets: prefs.liveOffsets,
+  liveSyncTaps: null,
+  liveSyncError: null,
 }));
 
 const set = useSession.setState;
@@ -344,8 +386,10 @@ let recorder: Recorder | null = null;
 
 export function goTo(screen: Screen): void {
   const from = get().screen;
+  if (from === 'along' && screen !== from) leavePlayAlong();
   if (SONG_SCREENS.includes(from) && screen !== from) closeSong(screen);
   else set({ screen });
+  if (screen === 'along' && from !== screen) enterPlayAlong();
   syncJamHarmony();
 }
 
@@ -402,6 +446,7 @@ export async function startAudio(): Promise<void> {
     syncSong();
     void loadSongRecording();
     syncJamHarmony();
+    if (get().screen === 'along') enterPlayAlong();
     for (const [part, isMuted] of Object.entries(muted)) {
       if (isMuted) engine.send({ type: 'setMute', channel: BAND_CHANNELS[part as BandPart], muted: true });
     }
@@ -433,8 +478,10 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
   recorder?.record(event);
   for (const listener of engineListeners) listener(event, timeMs);
 
-  // UI state changes when the change is heard, not when it is scheduled.
-  const delay = Math.max(0, timeMs - performance.now());
+  // UI state changes when the change is heard, not when it is scheduled. A
+  // live source isn't heard through midzer's output, so without its latency.
+  const heardMs = get().screen === 'along' ? timeMs - get().outputLatencyMs : timeMs;
+  const delay = Math.max(0, heardMs - performance.now());
   switch (event.type) {
     case 'chord':
       setTimeout(() => set({ chord: event.chord }), delay);
@@ -445,6 +492,7 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
     case 'transport':
       if (event.playing) {
         live.timing.reset();
+        skipJudged = false;
         judged = [];
         set({ judgedCount: 0 });
       }
@@ -466,8 +514,13 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
       set({ countInHits: event.hits });
       break;
     case 'judged':
+      if (skipJudged) break;
       judged.push({ ms: event.ms, piece: event.piece, sixteenth: event.sixteenth, bar: event.bar });
       set({ judgedCount: judged.length });
+      if (syncTaps) syncTap(event.ms, event.sixteenth);
+      break;
+    case 'live':
+      set({ liveTracker: { locked: event.locked, confidence: event.confidence, level: event.level } });
       break;
     case 'songPosition':
       if (event.beat % 4 === 0) setTimeout(() => set({ songBar: event.beat / 4 }), delay);
@@ -969,6 +1022,145 @@ export function playsRecording(): boolean {
   return screen === 'song' && recording.status === 'ready' && playRecording;
 }
 
+// ---- Playing along with live audio ---------------------------------------------
+
+let closeLiveSource: (() => void) | null = null;
+/** Counts opens, so one that finishes after another started is dropped. */
+let liveRequest = 0;
+/** Taps on the beat while syncing. */
+let syncTaps: number[] | null = null;
+/** After syncing, the rest of that run's hits (still being judged) aren't drumming either. */
+let skipJudged = false;
+
+/** Where a source's sync offset is kept. */
+export function liveSourceKey(source: LiveSource): string {
+  return source.kind === 'tab' ? 'tab' : `device:${source.id}`;
+}
+
+/** Whether the engine can play along with a browser tab here. */
+export function canCaptureTab(): boolean {
+  return engine?.canCaptureTab ?? false;
+}
+
+function enterPlayAlong(): void {
+  if (!engine) return;
+  send({ type: 'stop' });
+  send({ type: 'setLive', on: true });
+  judged = [];
+  set({ judgedCount: 0, liveTracker: { locked: false, confidence: 0, level: 0 } });
+  void refreshLiveDevices();
+}
+
+function leavePlayAlong(): void {
+  stopLiveSource();
+  syncTaps = null;
+  set({ liveSyncTaps: null });
+  send({ type: 'setLive', on: false });
+}
+
+export async function refreshLiveDevices(): Promise<void> {
+  if (!engine) return;
+  try {
+    set({ liveDevices: await engine.liveDevices() });
+  } catch (e) {
+    console.warn('midzer: no audio inputs listed', e);
+  }
+}
+
+/** Listens to `source` and follows its beat; the browser may ask the user to pick or allow it. */
+export async function startLiveSource(source: LiveSource): Promise<void> {
+  if (!engine) return;
+  stopLiveSource();
+  const request = ++liveRequest;
+  const key = liveSourceKey(source);
+  set({ liveSource: { status: 'opening', key } });
+  try {
+    const close = await engine.openLive(source, () => {
+      if (closeLiveSource !== close) return;
+      closeLiveSource = null;
+      send({ type: 'stop' });
+      set({ liveSource: { status: 'ended', key } });
+    });
+    if (request !== liveRequest) {
+      close();
+      return;
+    }
+    closeLiveSource = close;
+    // Listening starts afresh: the old source's beat means nothing here.
+    send({ type: 'setLive', on: false });
+    send({ type: 'setLiveOffset', ms: get().liveOffsets[key] ?? 0 });
+    send({ type: 'setLive', on: true });
+    set({ liveSource: { status: 'on', key }, liveTracker: { locked: false, confidence: 0, level: 0 } });
+    // Names show once audio input is allowed.
+    if (source.kind === 'device') void refreshLiveDevices();
+  } catch (e) {
+    if (request !== liveRequest) return;
+    set({ liveSource: { status: 'error', key, message: liveErrorText(e) } });
+  }
+}
+
+export function stopLiveSource(): void {
+  liveRequest++;
+  closeLiveSource?.();
+  closeLiveSource = null;
+  if (get().liveSource.status !== 'none') {
+    send({ type: 'stop' });
+    set({ liveSource: { status: 'none' }, liveTracker: { locked: false, confidence: 0, level: 0 } });
+  }
+}
+
+function liveErrorText(e: unknown): string {
+  const name = e instanceof DOMException ? e.name : '';
+  if (name === 'NotAllowedError') return 'Nothing was shared. Try again and allow it, or pick another source.';
+  if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'That audio input is gone. Pick another.';
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** The beat heard now is a 1. */
+export function liveDownbeat(): void {
+  send({ type: 'liveDownbeat' });
+}
+
+/** The beat is twice (or half) as fast as the one found. */
+export function liveTempo(double: boolean): void {
+  send({ type: 'liveTempo', double });
+}
+
+/** Starts syncing: the next taps on the beat set the source's offset. */
+export function startLiveSync(): void {
+  syncTaps = [];
+  set({ liveSyncTaps: 0, liveSyncError: null });
+}
+
+export function cancelLiveSync(): void {
+  syncTaps = null;
+  set({ liveSyncTaps: null });
+}
+
+function syncTap(ms: number, sixteenth: number): void {
+  const offset = offsetToBeat(ms, sixteenth, get().bpm);
+  if (!syncTaps || offset === null) return;
+  syncTaps.push(offset);
+  set({ liveSyncTaps: syncTaps.length });
+  if (syncTaps.length < SYNC_TAPS) return;
+  const { liveSource, liveOffsets } = get();
+  const key = liveSource.status === 'none' ? null : liveSource.key;
+  const next = key === null ? null : syncedOffset(liveOffsets[key] ?? 0, syncTaps);
+  syncTaps = null;
+  if (key === null || next === null) {
+    set({ liveSyncTaps: null, liveSyncError: 'The taps were too uneven to go by. Try again, tapping right on the beat.' });
+    return;
+  }
+  set({ liveSyncTaps: null, liveOffsets: { ...liveOffsets, [key]: next } });
+  savePrefs();
+  send({ type: 'setLiveOffset', ms: next });
+  // The sync taps aren't drumming: no report on them.
+  send({ type: 'stop' });
+  skipJudged = true;
+  judged = [];
+  set({ judgedCount: 0 });
+}
+
 // ---- Recording ----------------------------------------------------------------
 
 /** Downloads the last performance as a MIDI file. */
@@ -1019,6 +1211,9 @@ function isTyping(target: EventTarget | null): boolean {
 }
 
 /** Computer-keyboard playing. Returns a cleanup function. */
+/** The computer keys are drum pads for drummers, and for everyone when playing along. */
+const drumKeys = () => get().instrument === 'drums' || get().screen === 'along';
+
 export function attachQwerty(): () => void {
   const down = (e: KeyboardEvent) => {
     if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -1027,7 +1222,7 @@ export function attachQwerty(): () => void {
       if (!e.repeat) togglePlay();
       return;
     }
-    if (get().instrument === 'drums') {
+    if (drumKeys()) {
       // Shift for an accent.
       const piece = qwertyToPiece(e.key);
       if (piece && !e.repeat) drumHit(piece, e.shiftKey ? 127 : 96);
@@ -1037,7 +1232,7 @@ export function attachQwerty(): () => void {
     if (note !== undefined && !e.repeat) playerNoteOn(note);
   };
   const up = (e: KeyboardEvent) => {
-    if (get().instrument === 'drums') return;
+    if (drumKeys()) return;
     const note = qwertyToNote(e.key);
     if (note !== undefined) playerNoteOff(note);
   };

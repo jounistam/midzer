@@ -1,17 +1,27 @@
 //! The cpal streams: the engine renders inside the output callback, and the
-//! input callback feeds the microphone to it.
+//! input callbacks feed it the microphone and the live source.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, Stream, StreamConfig};
+use cpal::{DeviceId, SampleFormat, Stream, StreamConfig};
 use crossbeam_queue::ArrayQueue;
 use midzer_core::{Command, Engine};
 use midzer_synth::Synth;
 
 use crate::{COMMAND_QUEUE, Control, EVENT_QUEUE, MIC_QUEUE, Shared};
+
+/// An input live audio can come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveDevice {
+    /// cpal's device id, host included.
+    pub id: String,
+    pub name: String,
+    /// It records what the computer plays (a monitor or loopback), not a microphone or line in.
+    pub loopback: bool,
+}
 
 /// Frames the engine renders at a time, as in the AudioWorklet.
 const BLOCK: usize = 128;
@@ -21,7 +31,7 @@ const MIC_BACKLOG: usize = 2048;
 /// Runs on its own thread: opens the output, then serves microphone requests
 /// until told to stop. Streams close when dropped here.
 pub(crate) fn own_streams(control: mpsc::Receiver<Control>, ready: mpsc::Sender<Result<Arc<Shared>, String>>) {
-    let host = cpal::default_host();
+    let host = output_host();
     let opened = open_output(&host);
     let (shared, _output) = match opened {
         Ok(ok) => ok,
@@ -33,6 +43,7 @@ pub(crate) fn own_streams(control: mpsc::Receiver<Control>, ready: mpsc::Sender<
     let _ = ready.send(Ok(shared.clone()));
 
     let mut mic: Option<Stream> = None;
+    let mut live: Option<Stream> = None;
     while let Ok(msg) = control.recv() {
         match msg {
             Control::OpenMic(reply) => {
@@ -52,6 +63,27 @@ pub(crate) fn own_streams(control: mpsc::Receiver<Control>, ready: mpsc::Sender<
                 shared.mic_open.store(false, Ordering::Release);
                 mic = None;
                 while shared.mic.pop().is_some() {}
+            }
+            Control::OpenLive(id, reply) => {
+                shared.live_open.store(false, Ordering::Release);
+                // The old stream closes first: some devices take one stream at a time.
+                drop(live.take());
+                while shared.live.pop().is_some() {}
+                match open_live(&id, &shared) {
+                    Ok(stream) => {
+                        live.replace(stream);
+                        shared.live_open.store(true, Ordering::Release);
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
+            Control::CloseLive => {
+                shared.live_open.store(false, Ordering::Release);
+                drop(live.take());
+                while shared.live.pop().is_some() {}
             }
             Control::Stop => break,
         }
@@ -87,6 +119,8 @@ fn open_output(host: &cpal::Host) -> Result<(Arc<Shared>, Stream), String> {
         inputs: ArrayQueue::new(1024),
         mic: ArrayQueue::new(MIC_QUEUE),
         mic_open: AtomicBool::new(false),
+        live: ArrayQueue::new(MIC_QUEUE),
+        live_open: AtomicBool::new(false),
         synth_in: ArrayQueue::new(1),
         synth_out: ArrayQueue::new(4),
         track_in: ArrayQueue::new(1),
@@ -116,29 +150,96 @@ fn open_output(host: &cpal::Host) -> Result<(Arc<Shared>, Stream), String> {
     Ok((shared, stream))
 }
 
+/// ALSA on Linux even where cpal would pick PulseAudio: the output has only been tuned on ALSA.
+fn output_host() -> cpal::Host {
+    #[cfg(target_os = "linux")]
+    if let Ok(host) = cpal::host_from_id(cpal::HostId::Alsa) {
+        return host;
+    }
+    cpal::default_host()
+}
+
+/// Where live audio comes from: PulseAudio (or PipeWire's stand-in) on Linux,
+/// whose monitor sources record what the computer plays.
+fn live_host() -> cpal::Host {
+    #[cfg(target_os = "linux")]
+    if let Ok(host) = cpal::host_from_id(cpal::HostId::PulseAudio) {
+        return host;
+    }
+    cpal::default_host()
+}
+
+pub(crate) fn live_devices() -> Vec<LiveDevice> {
+    let host = live_host();
+    let describe = |device: &cpal::Device, loopback: bool| {
+        let id = device.id().ok()?.to_string();
+        let name = device.description().map(|d| d.name().to_string()).unwrap_or_else(|_| id.clone());
+        // PulseAudio monitors record a sink.
+        let loopback = loopback || id.ends_with(".monitor");
+        Some(LiveDevice { id, name, loopback })
+    };
+    let mut out: Vec<LiveDevice> = Vec::new();
+    // WASAPI records an output device in loopback when asked for input from it.
+    if cfg!(target_os = "windows")
+        && let Ok(outputs) = host.output_devices()
+    {
+        out.extend(outputs.filter_map(|d| describe(&d, true)));
+    }
+    if let Ok(inputs) = host.input_devices() {
+        for device in inputs.filter_map(|d| describe(&d, false)) {
+            if !out.iter().any(|o| o.id == device.id) {
+                out.push(device);
+            }
+        }
+    }
+    // System audio first.
+    out.sort_by_key(|d| !d.loopback);
+    out
+}
+
 fn open_input(host: &cpal::Host, shared: &Arc<Shared>) -> Result<Stream, String> {
     let device = host.default_input_device().ok_or("No microphone was found.")?;
-    let default = device.default_input_config().map_err(|e| e.to_string())?;
-    let supported = device.supported_input_configs().map_err(|e| e.to_string())?;
     // The engine analyses the mic at the output rate, so the input must match it.
-    let config = f32_config(default, supported, shared.sample_rate)
-        .ok_or("The microphone cannot record at the output's sample rate.")?;
+    input_stream(&device, shared, "The microphone cannot record at the output's sample rate.", |s| (&s.mic, &s.mic_open))
+}
+
+fn open_live(id: &str, shared: &Arc<Shared>) -> Result<Stream, String> {
+    let id: DeviceId = id.parse().map_err(|_| "That audio source is not known.".to_string())?;
+    let host = cpal::host_from_id(id.host()).map_err(|e| e.to_string())?;
+    let device = host.device_by_id(&id).ok_or("That audio source is gone.")?;
+    input_stream(&device, shared, "That audio source cannot record at the output's sample rate.", |s| (&s.live, &s.live_open))
+}
+
+/// An f32 input stream at the output's rate, mixed to mono into the queue `pick` chooses while its flag is set.
+fn input_stream(
+    device: &cpal::Device,
+    shared: &Arc<Shared>,
+    wrong_rate: &str,
+    pick: fn(&Shared) -> (&ArrayQueue<f32>, &AtomicBool),
+) -> Result<Stream, String> {
+    let default = device.default_input_config().or_else(|_| device.default_output_config()).map_err(|e| e.to_string())?;
+    let supported: Vec<_> = match device.supported_input_configs() {
+        Ok(configs) => configs.collect(),
+        Err(_) => device.supported_output_configs().map_err(|e| e.to_string())?.collect(),
+    };
+    let config = f32_config(default, supported.into_iter(), shared.sample_rate).ok_or(wrong_rate)?;
     let channels = config.channels as usize;
     let shared = shared.clone();
     let stream = device
         .build_input_stream(
             config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                if !shared.mic_open.load(Ordering::Acquire) {
+                let (queue, open) = pick(&shared);
+                if !open.load(Ordering::Acquire) {
                     return;
                 }
                 for frame in data.chunks(channels) {
                     let mono = frame.iter().sum::<f32>() / channels as f32;
                     // Full means the output side stalled; old input is worth less than new.
-                    shared.mic.force_push(mono);
+                    queue.force_push(mono);
                 }
             },
-            |e| eprintln!("midzer: microphone: {e}"),
+            |e| eprintln!("midzer: audio input: {e}"),
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -156,6 +257,7 @@ struct Renderer {
     left: [f32; BLOCK],
     right: [f32; BLOCK],
     input: [f32; BLOCK],
+    live: [f32; BLOCK],
     frame: u64,
 }
 
@@ -170,6 +272,7 @@ impl Renderer {
             left: [0.0; BLOCK],
             right: [0.0; BLOCK],
             input: [0.0; BLOCK],
+            live: [0.0; BLOCK],
             frame: 0,
             shared,
         }
@@ -214,20 +317,19 @@ impl Renderer {
         }
 
         let listening = shared.mic_open.load(Ordering::Acquire);
+        let following = shared.live_open.load(Ordering::Acquire);
         for chunk in data.chunks_mut(BLOCK * channels) {
             let n = chunk.len() / channels;
             if listening {
-                while shared.mic.len() > MIC_BACKLOG + n {
-                    shared.mic.pop();
-                }
-                let mut got = 0;
-                while got < n {
-                    let Some(x) = shared.mic.pop() else { break };
-                    self.input[got] = x;
-                    got += 1;
-                }
+                let got = take_input(&shared.mic, &mut self.input[..n]);
                 if got > 0 {
                     self.engine.listen(&self.input[..got]);
+                }
+            }
+            if following {
+                let got = take_input(&shared.live, &mut self.live[..n]);
+                if got > 0 {
+                    self.engine.listen_live(&self.live[..got]);
                 }
             }
             let events = self.engine.process(n as u32);
@@ -249,4 +351,19 @@ impl Renderer {
             self.frame += n as u64;
         }
     }
+}
+
+/// Fills `into` from an input queue as far as it goes, skipping the oldest
+/// samples once they pile up; returns how many it got.
+fn take_input(queue: &ArrayQueue<f32>, into: &mut [f32]) -> usize {
+    while queue.len() > MIC_BACKLOG + into.len() {
+        queue.pop();
+    }
+    let mut got = 0;
+    while got < into.len() {
+        let Some(x) = queue.pop() else { break };
+        into[got] = x;
+        got += 1;
+    }
+    got
 }

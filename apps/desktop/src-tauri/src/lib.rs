@@ -1,5 +1,5 @@
-//! The desktop app: the web UI in a Tauri window, with the engine, MIDI and
-//! the microphone on native threads (`midzer-native`). The UI talks to it
+//! The desktop app: the web UI in a Tauri window, with the engine, MIDI, the
+//! microphone and live audio on native threads (`midzer-native`). The UI talks to it
 //! through the commands below and one update channel; see
 //! `packages/audio-web/src/native.ts` for the other side.
 
@@ -32,6 +32,14 @@ struct AudioProgress {
 struct Port {
     id: String,
     name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveDevice {
+    id: String,
+    name: String,
+    loopback: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -105,6 +113,26 @@ fn mic_open(state: State<AppEngine>) -> Result<(), String> {
 fn mic_close(state: State<AppEngine>) -> Result<(), String> {
     with_engine(&state, |engine| {
         engine.close_mic();
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn live_devices(state: State<AppEngine>) -> Result<Vec<LiveDevice>, String> {
+    with_engine(&state, |engine| {
+        Ok(engine.live_devices().into_iter().map(|d| LiveDevice { id: d.id, name: d.name, loopback: d.loopback }).collect())
+    })
+}
+
+#[tauri::command]
+fn live_open(state: State<AppEngine>, id: String) -> Result<(), String> {
+    with_engine(&state, |engine| engine.open_live(&id))
+}
+
+#[tauri::command]
+fn live_close(state: State<AppEngine>) -> Result<(), String> {
+    with_engine(&state, |engine| {
+        engine.close_live();
         Ok(())
     })
 }
@@ -247,6 +275,9 @@ pub fn run() {
             engine_load_soundfont,
             mic_open,
             mic_close,
+            live_devices,
+            live_open,
+            live_close,
             midi_ports,
             midi_set_output,
             audio_load,

@@ -4,6 +4,7 @@ import { Jam } from './screens/Jam';
 import { Learn } from './screens/Learn';
 import { Lesson } from './screens/Lesson';
 import { Onboarding } from './screens/Onboarding';
+import { PlayAlong } from './screens/PlayAlong';
 import { Songs } from './screens/Songs';
 import { SongScreen } from './screens/SongScreen';
 import { attachQwerty, useSession } from './session';
@@ -29,5 +30,7 @@ export function App() {
       return <Learn />;
     case 'lesson':
       return <Lesson />;
+    case 'along':
+      return <PlayAlong />;
   }
 }

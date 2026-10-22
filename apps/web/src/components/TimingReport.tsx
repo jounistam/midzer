@@ -4,12 +4,12 @@ import { judgedHits, useSession } from '../session';
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 
-/** How the last run against the recording went: overall, by offset, bar by bar and by part of the kit. */
-export function TimingReport() {
+/** How the last run against a recording or a live track went: overall, by offset, bar by bar and by part of the kit. */
+export function TimingReport({ source = 'the recording' }: { source?: string }) {
   const count = useSession((s) => s.judgedCount);
   // judgedHits() grows in place; the count says when to look again.
   const summary = useMemo(() => summarize(judgedHits()), [count]);
-  if (summary.hits === 0) return <p className="setting-note">Press Play and drum along: every hit is timed against the recording's own beat.</p>;
+  if (summary.hits === 0) return <p className="setting-note">Press Play and drum along: every hit is timed against {source}'s own beat.</p>;
 
   return (
     <div className="timing-report" data-testid="timing-report">

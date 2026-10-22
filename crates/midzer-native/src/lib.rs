@@ -1,5 +1,6 @@
-//! Native host for the midzer engine: audio through cpal, MIDI through midir
-//! and the microphone, for the desktop app (and later mobile).
+//! Native host for the midzer engine: audio through cpal, MIDI through midir,
+//! the microphone and live audio to play along with, for the desktop app (and
+//! later mobile).
 //!
 //! The engine runs inside the cpal output callback, exactly as it runs in the
 //! AudioWorklet on the web: commands come in through lock-free queues, events
@@ -19,12 +20,13 @@ use crossbeam_queue::ArrayQueue;
 use midzer_core::{Command, Track, WORDS_PER_EVENT};
 use midzer_synth::Synth;
 
+pub use audio::LiveDevice;
 pub use midi::{Port, Ports};
 
 /// Engine events waiting for the forwarder; about a second of a busy band.
 const EVENT_QUEUE: usize = 16_384;
 const COMMAND_QUEUE: usize = 8_192;
-/// Microphone samples in flight between the input and output callbacks.
+/// Microphone (and live source) samples in flight between the input and output callbacks.
 const MIC_QUEUE: usize = 16_384;
 const FORWARD_EVERY: Duration = Duration::from_millis(2);
 const PORT_SCAN_EVERY: Duration = Duration::from_secs(1);
@@ -52,6 +54,9 @@ struct Shared {
     inputs: ArrayQueue<[u32; 4]>,
     mic: ArrayQueue<f32>,
     mic_open: AtomicBool,
+    /// The live source to play along with, like the microphone.
+    live: ArrayQueue<f32>,
+    live_open: AtomicBool,
     /// A freshly loaded synth for the audio thread, and old ones to drop elsewhere.
     synth_in: ArrayQueue<Box<Synth>>,
     synth_out: ArrayQueue<Box<Synth>>,
@@ -88,6 +93,9 @@ impl Shared {
 enum Control {
     OpenMic(mpsc::Sender<Result<(), String>>),
     CloseMic,
+    /// A device id from [`NativeEngine::live_devices`].
+    OpenLive(String, mpsc::Sender<Result<(), String>>),
+    CloseLive,
     Stop,
 }
 
@@ -163,6 +171,24 @@ impl NativeEngine {
 
     pub fn close_mic(&self) {
         let _ = self.control.send(Control::CloseMic);
+    }
+
+    /// Inputs live audio can come from: system audio (loopback) where the
+    /// platform offers it, and the other inputs.
+    pub fn live_devices(&self) -> Vec<LiveDevice> {
+        audio::live_devices()
+    }
+
+    /// Plays along with the device `id` from [`NativeEngine::live_devices`]:
+    /// its audio goes to the engine's beat tracker.
+    pub fn open_live(&self, id: &str) -> Result<(), String> {
+        let (tx, rx) = mpsc::channel();
+        self.control.send(Control::OpenLive(id.to_string(), tx)).map_err(|e| e.to_string())?;
+        rx.recv().map_err(|e| e.to_string())?
+    }
+
+    pub fn close_live(&self) {
+        let _ = self.control.send(Control::CloseLive);
     }
 
     pub fn midi_ports(&self) -> Ports {

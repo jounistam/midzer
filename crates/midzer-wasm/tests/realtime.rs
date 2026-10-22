@@ -221,6 +221,31 @@ fn playing_band_renders_without_allocating() {
     }
     command(&mut host, Command::SetTrack { on: false });
     host.process(BLOCK_FRAMES);
+
+    // Live audio: a 120 BPM pulse the tracker locks onto, told half and
+    // double, its 1 moved, hits judged a beat later, then silence.
+    command(&mut host, Command::SetLiveOffset { ms: 25.0 });
+    command(&mut host, Command::SetLive { on: true });
+    for block in 0..7000usize {
+        for (i, x) in host.live_mut().iter_mut().enumerate() {
+            let f = block * BLOCK_FRAMES + i;
+            let into = f % 24_000;
+            *x = if block < 5500 && into < 400 { ((f * 7919) % 200) as f32 / 400.0 - 0.25 } else { 0.0 };
+        }
+        if block % 94 == 0 {
+            command(&mut host, Command::DrumHit { piece: [Piece::Kick, Piece::HiHatClosed, Piece::Snare][block / 94 % 3], velocity: 90 });
+        }
+        match block {
+            3000 => command(&mut host, Command::LiveTempo { double: true }),
+            3200 => command(&mut host, Command::LiveTempo { double: false }),
+            3500 => command(&mut host, Command::LiveDownbeat),
+            _ => {}
+        }
+        host.listen_live(BLOCK_FRAMES);
+        events += host.process(BLOCK_FRAMES);
+    }
+    command(&mut host, Command::SetLive { on: false });
+    host.process(BLOCK_FRAMES);
     COUNTING.store(false, Ordering::Relaxed);
 
     assert!(events > 1000, "band produced only {events} events");

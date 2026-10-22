@@ -12,9 +12,12 @@ mod drummer;
 mod drums;
 mod engine;
 mod event;
+mod fft;
 mod listen;
+mod live;
 mod song;
 pub mod style;
+mod tracker;
 mod voicing;
 
 pub use backing::{MAX_TRACK_BEATS, Track};
@@ -28,3 +31,4 @@ pub use song::{MAX_SONG_BARS, Slot};
 pub use engine::{Engine, PLAYER_CHANNEL};
 pub use event::{BandState, DRUM_CHANNEL, MIC_CHANNEL, PLAYER_DRUM_CHANNEL, EngineEvent, EventBuffer, MAX_EVENTS_PER_BLOCK, Timed, WORDS_PER_EVENT};
 pub use listen::{Heard, HeardList, ListenMode, Listener};
+pub use tracker::{BeatList, BeatTracker, TrackedBeat};

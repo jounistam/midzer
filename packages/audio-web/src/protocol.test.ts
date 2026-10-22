@@ -67,6 +67,16 @@ describe('encodeCommand', () => {
     expect(encodeCommand({ type: 'setTrackDrums', on: false })).toEqual([40, 0, 0, 0]);
   });
 
+  it('encodes live audio commands like command.rs', () => {
+    expect(encodeCommand({ type: 'setLive', on: true })).toEqual([41, 1, 0, 0]);
+    const [op, ms] = encodeCommand({ type: 'setLiveOffset', ms: -35.5 });
+    expect(op).toBe(42);
+    expect(new Float32Array(new Uint32Array([ms]).buffer)[0]).toBe(-35.5);
+    expect(encodeCommand({ type: 'liveDownbeat' })).toEqual([43, 0, 0, 0]);
+    expect(encodeCommand({ type: 'liveTempo', double: true })).toEqual([44, 1, 0, 0]);
+    expect(encodeCommand({ type: 'liveTempo', double: false })).toEqual([44, 0, 0, 0]);
+  });
+
   it('knows each piece by its General MIDI key', () => {
     expect(DRUM_PIECES).toHaveLength(17);
     expect(new Set(DRUM_PIECES.map((p) => p.note)).size).toBe(17);
@@ -135,6 +145,11 @@ describe('decodeEvent', () => {
     // China (16), sixteenth 15 of bar 511.
     expect(decodeEvent(14, bits, 16 | (15 << 8) | (511 << 16), 9)).toEqual({ type: 'judged', ms: -12.5, piece: 'china', sixteenth: 15, bar: 511, frame: 9 });
     expect(decodeEvent(14, bits, 99, 9)).toBeNull();
+  });
+
+  it('decodes the live status like event.rs', () => {
+    expect(decodeEvent(15, 1 | (255 << 8) | (51 << 16), 0, 4)).toEqual({ type: 'live', locked: true, confidence: 1, level: 0.2, frame: 4 });
+    expect(decodeEvent(15, 0, 0, 4)).toEqual({ type: 'live', locked: false, confidence: 0, level: 0, frame: 4 });
   });
 
   it('decodes song positions', () => {

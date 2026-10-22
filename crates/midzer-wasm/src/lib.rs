@@ -18,6 +18,8 @@ pub struct Host {
     right: [f32; BLOCK_FRAMES],
     /// Microphone input for the next block, filled by the worklet.
     input: [f32; BLOCK_FRAMES],
+    /// The live source (a tab or an input) for the next block, filled by the worklet.
+    live: [f32; BLOCK_FRAMES],
     /// Events of the last block, encoded for the main thread.
     events: [[u32; WORDS_PER_EVENT]; MAX_EVENTS_PER_BLOCK],
 }
@@ -30,6 +32,7 @@ impl Host {
             left: [0.0; BLOCK_FRAMES],
             right: [0.0; BLOCK_FRAMES],
             input: [0.0; BLOCK_FRAMES],
+            live: [0.0; BLOCK_FRAMES],
             events: [[0; WORDS_PER_EVENT]; MAX_EVENTS_PER_BLOCK],
         }
     }
@@ -55,6 +58,15 @@ impl Host {
 
     pub fn input_mut(&mut self) -> &mut [f32; BLOCK_FRAMES] {
         &mut self.input
+    }
+
+    /// Feeds `frames` of the live source from [`Host::live_mut`]; call before [`Host::process`].
+    pub fn listen_live(&mut self, frames: usize) {
+        self.engine.listen_live(&self.live[..frames.min(BLOCK_FRAMES)]);
+    }
+
+    pub fn live_mut(&mut self) -> &mut [f32; BLOCK_FRAMES] {
+        &mut self.live
     }
 
     /// Renders up to [`BLOCK_FRAMES`] frames; returns the number of encoded events.
@@ -181,6 +193,24 @@ pub unsafe extern "C" fn mz_input_ptr(host: *mut Host) -> *mut f32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mz_listen(host: *mut Host, frames: u32) {
     unsafe { (*host).listen(frames as usize) }
+}
+
+/// Where the worklet writes a block of the live source.
+///
+/// # Safety
+/// `host` must be a live pointer from [`mz_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mz_live_ptr(host: *mut Host) -> *mut f32 {
+    unsafe { (*host).live.as_mut_ptr() }
+}
+
+/// Tracks the beat of `frames` of the live source from [`mz_live_ptr`]; call before [`mz_process`].
+///
+/// # Safety
+/// `host` must be a live pointer from [`mz_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mz_listen_live(host: *mut Host, frames: u32) {
+    unsafe { (*host).listen_live(frames as usize) }
 }
 
 /// Encoded events of the last [`mz_process`] call, `WORDS_PER_EVENT` u32 each.

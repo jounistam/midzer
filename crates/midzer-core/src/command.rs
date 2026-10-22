@@ -88,6 +88,15 @@ pub enum Command {
     TrackBeat { index: u16, seconds: f32 },
     /// Whether the recording's separate drum stem is heard.
     SetTrackDrums { on: bool },
+    /// Whether live audio (see [`crate::Engine::listen_live`]) is followed and
+    /// the player's hits judged against its beats, instead of the band.
+    SetLive { on: bool },
+    /// How much later, in ms, the player hears the live source than the engine gets it.
+    SetLiveOffset { ms: f32 },
+    /// The live beat heard nearest to now is a 1.
+    LiveDownbeat,
+    /// The live beat is twice (or half) as fast as the one found.
+    LiveTempo { double: bool },
 }
 
 mod op {
@@ -131,6 +140,10 @@ mod op {
     pub const TRACK_CLEAR: u32 = 38;
     pub const TRACK_BEAT: u32 = 39;
     pub const SET_TRACK_DRUMS: u32 = 40;
+    pub const SET_LIVE: u32 = 41;
+    pub const SET_LIVE_OFFSET: u32 = 42;
+    pub const LIVE_DOWNBEAT: u32 = 43;
+    pub const LIVE_TEMPO: u32 = 44;
 }
 
 /// MIDI channel 10, where e-kits and drum pads send.
@@ -257,6 +270,10 @@ impl Command {
             Command::TrackClear { beats } => [op::TRACK_CLEAR, beats as u32, 0, 0],
             Command::TrackBeat { index, seconds } => [op::TRACK_BEAT, index as u32, seconds.to_bits(), 0],
             Command::SetTrackDrums { on } => [op::SET_TRACK_DRUMS, on as u32, 0, 0],
+            Command::SetLive { on } => [op::SET_LIVE, on as u32, 0, 0],
+            Command::SetLiveOffset { ms } => [op::SET_LIVE_OFFSET, ms.to_bits(), 0, 0],
+            Command::LiveDownbeat => [op::LIVE_DOWNBEAT, 0, 0, 0],
+            Command::LiveTempo { double } => [op::LIVE_TEMPO, double as u32, 0, 0],
         }
     }
 
@@ -340,6 +357,10 @@ impl Command {
             op::TRACK_CLEAR => Some(Command::TrackClear { beats: short(a)? }),
             op::TRACK_BEAT => Some(Command::TrackBeat { index: short(a)?, seconds: float(b).filter(|s| *s >= 0.0)? }),
             op::SET_TRACK_DRUMS => Some(Command::SetTrackDrums { on: a != 0 }),
+            op::SET_LIVE => Some(Command::SetLive { on: a != 0 }),
+            op::SET_LIVE_OFFSET => Some(Command::SetLiveOffset { ms: float(a).filter(|ms| ms.abs() <= 1000.0)? }),
+            op::LIVE_DOWNBEAT => Some(Command::LiveDownbeat),
+            op::LIVE_TEMPO => Some(Command::LiveTempo { double: a != 0 }),
             _ => None,
         }
     }
@@ -408,6 +429,10 @@ mod tests {
             Command::TrackClear { beats: 2049 },
             Command::TrackBeat { index: 2048, seconds: 312.625 },
             Command::SetTrackDrums { on: false },
+            Command::SetLive { on: true },
+            Command::SetLiveOffset { ms: -35.5 },
+            Command::LiveDownbeat,
+            Command::LiveTempo { double: true },
         ] {
             assert_eq!(Command::decode(cmd.encode()), Some(cmd));
         }

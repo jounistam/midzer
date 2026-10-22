@@ -28,6 +28,20 @@ export type TrackSource =
   /** The file itself, or a song's saved stems with the drums apart, decoded natively (desktop). */
   | { kind: 'file'; bytes: Uint8Array; stemsDir: string | null };
 
+/** Live audio to play along with (the `setLive` command). */
+export type LiveSource =
+  /** A browser tab's audio, picked in the browser's share dialog (Chrome and Edge). */
+  | { kind: 'tab' }
+  /** An audio input from `liveDevices`: a line input, or system audio where the platform offers it. */
+  | { kind: 'device'; id: string };
+
+export interface LiveDevice {
+  id: string;
+  name: string;
+  /** It records what the computer plays (a monitor or loopback), not a microphone or line in. */
+  loopback: boolean;
+}
+
 export interface TrackLoaded {
   seconds: number;
   /** Whether the drums are a separate stem that `setTrackDrums` can mute. */
@@ -53,8 +67,21 @@ export interface EngineHandle {
    * rejects if there is no microphone or access is denied.
    */
   openMic(options: MicOptions): Promise<() => void>;
+  /** Whether `openLive` can capture a browser tab. */
+  readonly canCaptureTab: boolean;
+  /** Inputs live audio can come from; names may be missing until audio input is allowed. */
+  liveDevices(): Promise<LiveDevice[]>;
+  /**
+   * Feeds live audio to the engine's beat tracker. Resolves a function that
+   * stops it; rejects if it can't be opened. `onEnded` runs if the source
+   * stops by itself (e.g. the browser's "Stop sharing").
+   */
+  openLive(source: LiveSource, onEnded: () => void): Promise<() => void>;
   close(): Promise<void>;
 }
+
+/** Input names that are the computer's own output rather than a microphone. */
+const LOOPBACK_NAME = /monitor|loopback|stereo mix|what u hear|blackhole|soundflower/i;
 
 /** Whether the page runs inside the desktop app, where the engine is native (see native.ts). */
 export function isNativeHost(): boolean {
@@ -73,8 +100,9 @@ export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
   // Large enough for a whole song chart (see chartCommands) sent at once.
   const commands = shared ? RecordRing.create(8192) : null;
   const events = shared ? RecordRing.create(4096) : null;
+  // Input 0 is the microphone, input 1 the live source.
   const node = new AudioWorkletNode(context, PROCESSOR_NAME, {
-    numberOfInputs: 1,
+    numberOfInputs: 2,
     channelCount: 1,
     channelCountMode: 'explicit',
     outputChannelCount: [2],
@@ -176,6 +204,49 @@ export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
         source.disconnect();
         for (const track of stream.getTracks()) track.stop();
       };
+    },
+    canCaptureTab: typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getDisplayMedia === 'function',
+    async liveDevices() {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices
+        .filter((d) => d.kind === 'audioinput')
+        .map((d, i) => ({ id: d.deviceId, name: d.label || `Audio input ${i + 1}`, loopback: LOOPBACK_NAME.test(d.label) }))
+        .sort((a, b) => Number(b.loopback) - Number(a.loopback));
+    },
+    async openLive(source, onEnded) {
+      const raw = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+      let stream: MediaStream;
+      if (source.kind === 'tab') {
+        // Chrome only shares audio along with a picture; the picture is dropped at once.
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: { ...raw, suppressLocalAudioPlayback: false },
+          systemAudio: 'include',
+          selfBrowserSurface: 'exclude',
+          preferCurrentTab: false,
+        } as DisplayMediaStreamOptions);
+        for (const track of stream.getVideoTracks()) track.stop();
+        if (stream.getAudioTracks().length === 0) {
+          throw new Error('No sound was shared. Pick a tab and turn on sharing its audio.');
+        }
+      } else {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { ...raw, deviceId: { exact: source.id } } });
+      }
+      const input = new MediaStreamAudioSourceNode(context, { mediaStream: stream });
+      input.connect(node, 0, 1);
+      let open = true;
+      const stop = () => {
+        if (!open) return;
+        open = false;
+        input.disconnect();
+        for (const track of stream.getTracks()) track.stop();
+      };
+      stream.getAudioTracks()[0]?.addEventListener('ended', () => {
+        if (!open) return;
+        stop();
+        onEnded();
+      });
+      return stop;
     },
     async close() {
       clearInterval(poll);

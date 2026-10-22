@@ -11,3 +11,7 @@ midzer-synth = { path = "../midzer-synth" }
 cpal = "0.18"
 midir = "0.11"
 crossbeam-queue = "0.3"
+
+# PulseAudio (pure Rust, also served by PipeWire) for recording system audio through its monitor sources.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18", features = ["pulseaudio"] }

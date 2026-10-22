@@ -3,6 +3,8 @@ export {
   startEngine,
   type EngineHandle,
   type EventListener,
+  type LiveDevice,
+  type LiveSource,
   type MicOptions,
   type TrackLoaded,
   type TrackSource,
