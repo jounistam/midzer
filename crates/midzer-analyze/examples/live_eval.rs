@@ -116,6 +116,11 @@ struct Score {
     /// The oracle's 1 against the analysis's (0–3).
     oracle_phase: usize,
     unlocks: u32,
+    /// While locked: seconds, how often the tempo shown (whole BPM) changed,
+    /// and its distance from the reference's (or twice or half it), in BPM × seconds.
+    locked_s: f32,
+    shown_changes: u32,
+    off_bpm_s: f32,
 }
 
 fn evaluate(path: &str) -> Score {
@@ -142,6 +147,9 @@ fn evaluate(path: &str) -> Score {
         let ratio = bpm / reference.bpm;
         let near = |r: f32| (ratio / r - 1.0).abs() < 0.04;
         let span = to - from;
+        score.locked_s += span;
+        let octave = [0.5, 1.0, 2.0].into_iter().min_by(|a, b| (ratio / a - 1.0).abs().total_cmp(&(ratio / b - 1.0).abs())).unwrap();
+        score.off_bpm_s += span * (bpm.round() - reference.bpm * octave).abs();
         if near(1.0) {
             score.right_s += span;
         } else if near(2.0) || near(0.5) {
@@ -185,6 +193,9 @@ fn evaluate(path: &str) -> Score {
                     locked = l;
                 }
                 EngineEvent::Tempo { bpm: b } => {
+                    if locked && b.round() != bpm.round() {
+                        score.shown_changes += 1;
+                    }
                     tally(locked, bpm, since, at, &mut score);
                     since = at;
                     bpm = b;
@@ -222,12 +233,13 @@ fn main() {
         scores.extend(handles.into_iter().map(|h| h.join().unwrap()));
     }
     let (mut oracle_right, mut agreed) = (0, (0, 0));
+    let (mut locked_s, mut changes, mut off) = (0.0f32, 0u32, 0.0f32);
     let (mut right, mut octave, mut wrong, mut total, mut on, mut shown, mut ones, mut ones_right, mut locks) = (0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0, Vec::new());
     for (path, s) in files.iter().zip(&scores) {
         let name: String = path.rsplit('/').next().unwrap_or(path).chars().take(44).collect();
         let n1: usize = s.ones.iter().sum();
         println!(
-            "{name:<44} lock {:>5.1}s end {:.2}x | right {:>3.0}% octave {:>3.0}% wrong {:>3.0}% | on beat {:>3}% | 1s {:>3}% {:?} oracle {} {:>3}% | unlocks {}",
+            "{name:<44} lock {:>5.1}s end {:.2}x | right {:>3.0}% octave {:>3.0}% wrong {:>3.0}% | on beat {:>3}% | 1s {:>3}% {:?} oracle {} {:>3}% | unlocks {} | bpm moves {:>4.1}/min off {:.1}",
             s.lock_s.unwrap_or(f32::NAN),
             s.end_bpm,
             100.0 * s.right_s / s.seconds,
@@ -239,6 +251,8 @@ fn main() {
             s.oracle_phase,
             100 * s.oracle_ones[0] / n1.max(1),
             s.unlocks,
+            60.0 * s.shown_changes as f32 / s.locked_s.max(1.0),
+            s.off_bpm_s / s.locked_s.max(1.0),
         );
         right += s.right_s;
         octave += s.octave_s;
@@ -254,10 +268,13 @@ fn main() {
             agreed.1 += n1;
         }
         locks.push(s.lock_s.unwrap_or(999.0));
+        locked_s += s.locked_s;
+        changes += s.shown_changes;
+        off += s.off_bpm_s;
     }
     locks.sort_by(f32::total_cmp);
     println!(
-        "ALL: right {:.0}% octave {:.0}% wrong {:.0}% | on beat {}% | 1s right {}% oracle {}% agreed {}% | median lock {:.1}s",
+        "ALL: right {:.0}% octave {:.0}% wrong {:.0}% | on beat {}% | 1s right {}% oracle {}% agreed {}% | median lock {:.1}s | bpm moves {:.1}/min off {:.2}",
         100.0 * right / total,
         100.0 * octave / total,
         100.0 * wrong / total,
@@ -266,5 +283,7 @@ fn main() {
         100 * oracle_right / ones.max(1),
         100 * agreed.0 / agreed.1.max(1),
         locks.get(locks.len() / 2).copied().unwrap_or(f32::NAN),
+        60.0 * changes as f32 / locked_s.max(1.0),
+        off / locked_s.max(1.0),
     );
 }

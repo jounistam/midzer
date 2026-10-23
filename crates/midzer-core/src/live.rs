@@ -43,7 +43,13 @@ const CUE_MS: f32 = 60.0;
 /// the bass and snare cues. Tuned on real songs (`live_eval`).
 const CHANGE_WEIGHT: f32 = 3.0;
 /// The tempo shown changes when the tracked one moves by this much.
-const TEMPO_STEP: f32 = 0.5;
+const TEMPO_STEP: f32 = 1.0;
+/// Songs rarely change tempo, so the tempo shown is the loop's averaged over
+/// this long; it moves at once only to a tempo this far from the average
+/// that has held for this long (or when the player doubles or halves it).
+const TEMPO_SMOOTH_S: f64 = 8.0;
+const TEMPO_NEW: f64 = 0.04;
+const TEMPO_NEW_S: f64 = 2.0;
 
 #[derive(Debug, Clone, Copy)]
 struct Hit {
@@ -105,6 +111,10 @@ pub struct Live {
     status_in: u32,
     status_every: u32,
     bpm: f32,
+    /// The averaged period behind the tempo shown (0 before any), and how
+    /// long the loop's has been far from it, in frames.
+    shown_period: f64,
+    far_for: f64,
 }
 
 impl Live {
@@ -141,6 +151,8 @@ impl Live {
             status_in: 0,
             status_every,
             bpm: 0.0,
+            shown_period: 0.0,
+            far_for: 0.0,
         }
     }
 
@@ -181,6 +193,8 @@ impl Live {
         self.next_shown = None;
         self.status = None;
         self.bpm = 0.0;
+        self.shown_period = 0.0;
+        self.far_for = 0.0;
     }
 
     /// How much later, in ms, the player hears the source than the engine gets it.
@@ -200,6 +214,7 @@ impl Live {
         self.guided_one = false;
         self.beat_count = 0;
         self.next_shown = None;
+        self.shown_period = 0.0;
     }
 
     /// A grid from a listener that heard the last seconds (see
@@ -505,7 +520,20 @@ impl Live {
             j += 1;
         }
         self.next_shown = Some(j);
-        let bpm = (60.0 * self.sample_rate as f64 / period) as f32;
+        let sr = self.sample_rate as f64;
+        if self.shown_period == 0.0 {
+            self.shown_period = period;
+        } else if (period / self.shown_period - 1.0).abs() > TEMPO_NEW {
+            self.far_for += frames as f64;
+            if self.far_for >= TEMPO_NEW_S * sr {
+                self.shown_period = period;
+                self.far_for = 0.0;
+            }
+        } else {
+            self.far_for = 0.0;
+            self.shown_period += (period - self.shown_period) * (frames as f64 / (TEMPO_SMOOTH_S * sr)).min(1.0);
+        }
+        let bpm = (60.0 * sr / self.shown_period) as f32;
         if (bpm - self.bpm).abs() >= TEMPO_STEP {
             self.bpm = bpm;
             out.push(0, EngineEvent::Tempo { bpm });
@@ -694,6 +722,27 @@ mod tests {
         }
         let tempo = events.iter().rev().find_map(|(_, e)| if let EngineEvent::Tempo { bpm } = e { Some(*bpm) } else { None }).unwrap();
         assert!((tempo - 60.0).abs() < 1.0, "{tempo}");
+    }
+
+    #[test]
+    fn the_tempo_shown_holds_through_wobbly_guides() {
+        let mut live = Live::new(SR);
+        live.set_active(true, &mut EventBuffer::default());
+        let signal = source(16.0);
+        let mut events = Vec::new();
+        for (i, block) in signal.chunks(frame(1.0) as usize).enumerate() {
+            let now = frame(i as f64);
+            if i >= 3 {
+                // A guide every second, its tempo 2 % off either way.
+                let period = 0.5 * SR * if i % 2 == 0 { 1.02 } else { 0.98 };
+                live.guide(frame(0.25 + 0.5 * (2 * i - 2) as f64) as u32, period, Some(0), 230, now);
+            }
+            events.extend(run(&mut live, block, now, &[]));
+        }
+        let shown: Vec<f32> = events.iter().filter(|(f, _)| *f > frame(6.0)).filter_map(|(_, e)| if let EngineEvent::Tempo { bpm } = e { Some(*bpm) } else { None }).collect();
+        assert!(shown.len() <= 1, "{shown:?}");
+        let last = events.iter().rev().find_map(|(_, e)| if let EngineEvent::Tempo { bpm } = e { Some(*bpm) } else { None }).unwrap();
+        assert!((last - 120.0).abs() < 1.5, "{last}");
     }
 
     #[test]
