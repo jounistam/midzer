@@ -2125,6 +2125,65 @@ code {
   min-width: 0;
 }
 
+/* The chords falling onto the keys, for a keys player, as in Learn. */
+.jam-stage .along-play {
+  flex: 1;
+  flex-direction: column;
+  min-height: 340px;
+  overflow: hidden;
+}
+
+.along-play-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  padding: var(--space-3) var(--space-6);
+}
+
+.along-play-head .eyebrow {
+  margin: 0;
+}
+
+.along-legend {
+  display: flex;
+  gap: var(--space-4);
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.along-legend .hand::before {
+  content: '';
+  display: inline-block;
+  width: 14px;
+  height: 6px;
+  margin-right: var(--space-2);
+  border-radius: 3px;
+  vertical-align: middle;
+}
+
+.along-legend .hand.left::before {
+  background: var(--color-note-melody);
+}
+
+.along-legend .hand.right::before {
+  background: var(--color-note-chord);
+}
+
+.along-legend .hand.next::before {
+  box-sizing: border-box;
+  border: 1.5px solid var(--color-note-chord);
+}
+
+/* Not playing, the report sits under the keys and scrolls. */
+.along-screen .jam-stage .along-play ~ .song-timing {
+  flex: none;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
 /* ---- Hit feedback (playing along) ------------------------------------------- */
 
 .jam-stage .hit-feedback,
@@ -2156,6 +2215,33 @@ code {
     border-color: var(--color-status-success);
     box-shadow: 0 0 48px color-mix(in srgb, var(--color-status-success) 45%, transparent);
   }
+}
+
+.jam-stage .hit-feedback.compact {
+  flex: none;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-6);
+  min-height: 0;
+  padding: var(--space-3) var(--space-6);
+}
+
+.hit-feedback.compact .hit-score {
+  flex: none;
+  column-gap: var(--space-4);
+}
+
+.hit-feedback.compact .hit-percent {
+  font-size: clamp(36px, 4vw, 64px);
+}
+
+.hit-feedback.compact .hit-verdict {
+  font-size: clamp(16px, 1.4vw, 22px);
+}
+
+.hit-feedback.compact .hit-lane {
+  flex: 1;
+  height: 52px;
 }
 
 @keyframes hit-flash-near {
@@ -2341,6 +2427,16 @@ code {
   .song-stage .hit-feedback {
     min-height: 0;
     padding: var(--space-4);
+  }
+
+  .jam-stage .hit-feedback.compact {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-3);
+  }
+
+  .hit-feedback.compact .hit-lane {
+    flex: none;
   }
 }
 

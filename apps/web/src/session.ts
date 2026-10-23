@@ -48,7 +48,8 @@ import {
   type KitTriggers,
 } from './drums/kit';
 import { pickProgression, progressionCommands } from './drums/progressions';
-import { ChordTimeline, type ChordNow } from './playalong/chords';
+import { ChordTimeline, keyHints, snapToBeats, type ChordNow, type HeardChord } from './playalong/chords';
+import { parseLevel, type AlongLevel } from './playalong/levels';
 import { MISS_SOUND_OPTIONS, missOf, playMiss, type MissSound } from './playalong/feedback';
 import type { JudgedHit } from './drums/judging';
 import { COUNT_IN_OPTIONS, countInPieces, type CountInChoice } from './drums/stage';
@@ -192,6 +193,8 @@ interface SessionState {
   liveTracker: LiveTracker;
   /** The chord heard in the live source now, and the ones before it. */
   liveChord: ChordNow;
+  /** How much a keys player playing along is asked to play; see ALONG_LEVELS. */
+  alongLevel: AlongLevel;
   /** Inputs to play along with; names may be missing until audio input is allowed. */
   liveDevices: LiveDevice[];
   /** How much later the player hears each source than midzer does, in ms, by `liveSourceKey`. */
@@ -252,6 +255,7 @@ interface Prefs {
   recordingDrums: boolean;
   liveOffsets: Record<string, number>;
   missSound: MissSound;
+  alongLevel: AlongLevel;
 }
 
 function readPrefs(): Prefs {
@@ -273,6 +277,7 @@ function readPrefs(): Prefs {
     recordingDrums: true,
     liveOffsets: {},
     missSound: 'soft',
+    alongLevel: parseLevel(undefined),
   };
   try {
     const saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Partial<Prefs>;
@@ -295,17 +300,18 @@ function readPrefs(): Prefs {
       Object.entries(saved.liveOffsets ?? {}).filter((e): e is [string, number] => typeof e[1] === 'number' && Math.abs(e[1]) <= 1000),
     );
     const missSound = MISS_SOUND_OPTIONS.some((o) => o.value === saved.missSound) ? saved.missSound! : defaults.missSound;
-    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound };
+    const alongLevel = parseLevel(saved.alongLevel);
+    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel };
   } catch {
     return defaults;
   }
 }
 
 function savePrefs(): void {
-  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound } = get();
+  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel } = get();
   // With a song open the style belongs to the song; keep the Jam one.
   const style = get().song ? readPrefs().style : get().style;
-  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound };
+  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel };
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch {
@@ -378,6 +384,7 @@ export const useSession = create<SessionState>(() => ({
   liveSource: { status: 'none' },
   liveTracker: { locked: false, confidence: 0, level: 0 },
   liveChord: { current: null, before: [], next: null },
+  alongLevel: prefs.alongLevel,
   liveDevices: [],
   liveOffsets: prefs.liveOffsets,
   missSound: prefs.missSound,
@@ -500,6 +507,8 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
       setTimeout(() => set({ chord: event.chord }), delay);
       break;
     case 'beat':
+      live.beatClock.ms = heardMs;
+      live.beatClock.beat = event.beat;
       setTimeout(() => set({ bar: event.bar, beat: event.beat }), delay);
       break;
     case 'transport':
@@ -726,6 +735,11 @@ export function setMissSound(missSound: MissSound): void {
   savePrefs();
   // Let the player hear what they picked.
   playMiss('early', missSound);
+}
+
+export function setAlongLevel(alongLevel: AlongLevel): void {
+  set({ alongLevel });
+  savePrefs();
 }
 
 export function setIdleMode(mode: IdleMode): void {
@@ -1065,14 +1079,39 @@ function onLiveChords(spans: LiveChordSpan[]): void {
   liveChords.add(spans, (liveOffsets[liveSource.key] ?? 0) - outputLatencyMs);
 }
 
-/** Shows the chord heard now, a few times a second, while a source is followed. */
+/** The live source's chords between `fromMs` and `toMs` in the player's time, for the moving chord view. */
+export function liveChordWindow(fromMs: number, toMs: number, nowMs: number): HeardChord[] {
+  return liveChords.window(fromMs, toMs, nowMs);
+}
+
+/** The keys lit for a keys player, so they are only redrawn when they change. */
+let alongHinted = '';
+
+function setAlongHints(hints: Map<number, number>): void {
+  const key = [...hints].join();
+  if (key === alongHinted) return;
+  alongHinted = key;
+  live.hint.fill(0);
+  for (const [k, h] of hints) live.hint[k] = h;
+  live.version++;
+}
+
+/** Shows the chord heard now, a few times a second, while a source is followed, and lights its keys for a keys player. */
 function followLiveChords(on: boolean): void {
   clearInterval(liveChordTimer);
   liveChords.clear();
   set({ liveChord: { current: null, before: [], next: null } });
+  setAlongHints(new Map());
   if (!on) return;
   liveChordTimer = setInterval(() => {
-    const now = liveChords.at(performance.now());
+    const ms = performance.now();
+    const { instrument, alongLevel, bpm, liveTracker } = get();
+    // The next chord's keys show from a beat before it.
+    const leadMs = liveTracker.locked && bpm > 0 ? 60_000 / bpm : 600;
+    const spans = liveChords.window(ms - leadMs, ms + leadMs + 1, ms);
+    // On the beats the player sees, like the falling chords.
+    setAlongHints(instrument === 'keys' ? keyHints(liveTracker.locked && bpm > 0 ? snapToBeats(spans, live.beatClock.ms, 60_000 / bpm) : spans, ms, alongLevel, leadMs) : new Map());
+    const now = liveChords.at(ms);
     const shown = get().liveChord;
     // The countdown to the next chord changes every tenth of a second, not on every tick.
     const nextKey = (c: typeof now) => (c.next ? `${c.next.name}@${Math.ceil(c.next.inMs / 100)}` : '');

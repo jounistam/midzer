@@ -18,9 +18,13 @@
 //!   suspended reference chords are left out). Also in hindsight (what the
 //!   last run that heard that moment said: how well the chords are
 //!   recognised, apart from how late), and how often the chord shown was
-//!   predicted from the song's loop and how often that was right.
+//!   predicted from the song's loop and how often that was right;
+//! - changes: of the reference's chord changes, the share the chords shown a
+//!   second before (falling towards the player) have on time, the new chord
+//!   starting within 150 ms of it (moved onto the reference's nearest beat
+//!   within 200 ms); and the same in hindsight.
 //!
-//! Settings: WINDOW, EVERY (beat runs), CHORD_EVERY, EDGE, FIT (seconds).
+//! Settings: WINDOW, EVERY (beat runs), CHORD_EVERY, EDGE, FIT (seconds), CHANGE_W.
 
 use midzer_analyze::{decode, resample};
 use midzer_core::Quality;
@@ -73,6 +77,9 @@ struct Score {
     hindsight_right: usize,
     predicted_n: usize,
     predicted_right: usize,
+    changes: usize,
+    changes_ahead: usize,
+    changes_late: usize,
     runs: usize,
     compute_s: f64,
     seconds: f64,
@@ -115,6 +122,9 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
     }
     if let Some(v) = env("FIT") {
         hearing.settings.fit_s = v;
+    }
+    if let Some(v) = env("CHANGE_W") {
+        hearing.settings.change_weight = v as f32;
     }
     // (ready at, result), in seconds.
     let mut grids = Vec::new();
@@ -193,6 +203,30 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
         }
         t += 0.1;
     }
+    // A chord change on time: a span of the new chord starting within 150 ms of it.
+    let on_time = |spans: &[midzer_hear::ChordSpan], c: f64, want: Option<(u8, bool)>, heard: bool| {
+        spans.iter().filter(|s| !heard || !s.predicted).any(|s| (s.from / SR as f64 - c).abs() < 0.15 && majmin_chord(s.chord) == Ok(want))
+    };
+    for w in labels.windows(2) {
+        let (Ok(a), Ok(b)) = (w[0].2, w[1].2) else { continue };
+        if a == b || b.is_none() || w[1].1 - w[1].0 < 0.5 {
+            continue;
+        }
+        // On the reference's beat nearest it: the network naming the reference's chords is a frame or two off.
+        let c = reference.iter().map(|r| r.0).min_by(|x, y| (x - w[1].0).abs().total_cmp(&(y - w[1].0).abs())).filter(|&r| (r - w[1].0).abs() < 0.2).unwrap_or(w[1].0);
+        score.changes += 1;
+        if let Some((_, spans)) = chords.iter().rev().find(|(ready, _)| *ready <= c - 1.0)
+            && on_time(spans, c, b, false)
+        {
+            score.changes_ahead += 1;
+        }
+        let frame = c * SR as f64;
+        if let Some((_, spans)) = chords.iter().rev().find(|(_, spans)| spans.iter().any(|s| !s.predicted && s.from <= frame + 0.2 * SR as f64 && frame + 0.2 * (SR as f64) < s.to))
+            && on_time(spans, c, b, true)
+        {
+            score.changes_late += 1;
+        }
+    }
     score
 }
 
@@ -214,7 +248,7 @@ fn main() {
     for (path, s) in files.iter().zip(&scores) {
         let name: String = path.rsplit('/').next().unwrap().chars().take(44).collect();
         println!(
-            "{name:<44} beats {:>3.0}% tempo {:>3.0}% 1s {:>3.0}% | lock {:>5.1}s | chords {:>3.0}% (hindsight {:>3.0}%, predicted {:>3.0}% of the time, {:>3.0}% right) | {:.0} ms a run",
+            "{name:<44} beats {:>3.0}% tempo {:>3.0}% 1s {:>3.0}% | lock {:>5.1}s | chords {:>3.0}% (hindsight {:>3.0}%, predicted {:>3.0}% of the time, {:>3.0}% right) | changes ahead {:>3.0}% hindsight {:>3.0}% | {:.0} ms a run",
             pct(s.hit, s.beats),
             pct(s.tempo, s.beats),
             pct(s.ones_right, s.ones),
@@ -223,6 +257,8 @@ fn main() {
             pct(s.hindsight_right, s.chord_n),
             pct(s.predicted_n, s.chord_n),
             pct(s.predicted_right, s.predicted_n),
+            pct(s.changes_ahead, s.changes),
+            pct(s.changes_late, s.changes),
             1000.0 * s.compute_s / s.runs.max(1) as f64,
         );
         all.beats += s.beats;
@@ -235,6 +271,9 @@ fn main() {
         all.hindsight_right += s.hindsight_right;
         all.predicted_n += s.predicted_n;
         all.predicted_right += s.predicted_right;
+        all.changes += s.changes;
+        all.changes_ahead += s.changes_ahead;
+        all.changes_late += s.changes_late;
         all.runs += s.runs;
         all.compute_s += s.compute_s;
         all.seconds += s.seconds;
@@ -242,7 +281,7 @@ fn main() {
     }
     locks.sort_by(f64::total_cmp);
     println!(
-        "ALL: beats {:.0}% tempo {:.0}% 1s {:.0}% | median lock {:.1}s | chords {:.0}% (hindsight {:.0}%, predicted {:.0}% of the time, {:.0}% right) | busy {:.0}% of the time",
+        "ALL: beats {:.0}% tempo {:.0}% 1s {:.0}% | median lock {:.1}s | chords {:.0}% (hindsight {:.0}%, predicted {:.0}% of the time, {:.0}% right) | changes ahead {:.0}% hindsight {:.0}% | busy {:.0}% of the time",
         pct(all.hit, all.beats),
         pct(all.tempo, all.beats),
         pct(all.ones_right, all.ones),
@@ -251,6 +290,8 @@ fn main() {
         pct(all.hindsight_right, all.chord_n),
         pct(all.predicted_n, all.chord_n),
         pct(all.predicted_right, all.predicted_n),
+        pct(all.changes_ahead, all.changes),
+        pct(all.changes_late, all.changes),
         100.0 * all.compute_s / all.seconds,
     );
 }

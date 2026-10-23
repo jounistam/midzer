@@ -8,12 +8,15 @@
 //!   can't see what follows) are fitted with a straight grid, which says where
 //!   the next beats fall; the downbeats vote for which beat is the 1, and the
 //!   votes carry over from run to run. A new tempo far from the last must be
-//!   heard twice in a row.
+//!   heard twice in a row. Chords tend to change on the 1, so where the
+//!   chords heard change in the bar votes for the 1 too.
 //! - BTC over the last 10 s names a chord per frame (about 11 a second);
 //!   flickers shorter than two frames are smoothed away. What it hears is
 //!   about a second old by the time it is shown, so once the grid is sure,
-//!   the chords of the last bars are read beat by beat, and if they repeat
-//!   (a loop of 1 to 8 bars), the coming beats are predicted from the loop.
+//!   the chords are read beat by beat (each beat takes the chord heard
+//!   longest in it, so changes fall on the beats), and if the last bars
+//!   repeat (a loop of 1 to 8 bars), the coming beats are predicted from the
+//!   loop, beat by beat.
 //!
 //! The results are in the engine's frames, so the engine can line them up
 //! with what it hears however late they arrive. This runs off the audio
@@ -41,15 +44,13 @@ const TEMPO_JUMP: f64 = 0.04;
 /// Chords heard are kept this long (seconds), for finding the song's loop.
 const CHORD_KEEP_S: f64 = 40.0;
 /// Loops tried, in beats (short ones first); the most and least seconds
-/// compared, and the share that must agree; beats predicted, and in what
-/// steps (seconds). The chords heard in the last `CHORD_EDGE_S` are the
+/// compared, and the share that must agree; beats predicted. The chords heard in the last `CHORD_EDGE_S` are the
 /// least sure, so the loop doesn't lean on them.
 const LOOPS: [i64; 8] = [3, 4, 6, 8, 12, 16, 24, 32];
 const LOOP_SPAN_S: f64 = 16.0;
 const LOOP_MIN_S: f64 = 4.0;
 const LOOP_AGREE: f32 = 0.75;
 const PREDICT_BEATS: i64 = 8;
-const PREDICT_STEP_S: f64 = 0.02;
 const CHORD_EDGE_S: f64 = 0.3;
 /// A grid must be this sure before chords are read beat by beat.
 const BEAT_CHORDS_SURE: f32 = 0.5;
@@ -75,11 +76,14 @@ pub struct Settings {
     pub edge_s: f64,
     /// Seconds of beats the grid is fitted to (the newest).
     pub fit_s: f64,
+    /// How much where the chords change counts for the 1, against the
+    /// network's downbeats.
+    pub change_weight: f32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { beat_window_s: 8.0, beat_min_s: 3.0, beat_every_s: 1.0, beat_steady_every_s: 2.5, chord_every_s: 0.5, edge_s: 0.12, fit_s: 6.0 }
+        Self { beat_window_s: 8.0, beat_min_s: 3.0, beat_every_s: 1.0, beat_steady_every_s: 2.5, chord_every_s: 0.5, edge_s: 0.12, fit_s: 6.0, change_weight: 2.0 }
     }
 }
 
@@ -355,9 +359,13 @@ impl Hearing {
                 state.votes[(-(n as i64)).rem_euclid(4) as usize] += crate::nn::sigmoid(logit);
             }
         }
+        // Where the chords change: a share of the changes on each beat of the bar.
+        let changes = self.changes(state.anchor, state.period);
+        let total: f32 = changes.iter().sum();
+        let votes: [f32; 4] = std::array::from_fn(|v| state.votes[v] + if total > 0.0 { self.settings.change_weight * changes[v] / total } else { 0.0 });
         let mut order = [0usize, 1, 2, 3];
-        order.sort_by(|&a, &b| state.votes[b].total_cmp(&state.votes[a]));
-        let (best, second) = (state.votes[order[0]], state.votes[order[1]]);
+        order.sort_by(|&a, &b| votes[b].total_cmp(&votes[a]));
+        let (best, second) = (votes[order[0]], votes[order[1]]);
         if best >= 1.0 && best > 1.5 * second {
             state.one = Some(order[0] as u8);
         }
@@ -410,31 +418,85 @@ impl Hearing {
         let keep_from = to - CHORD_KEEP_S * RATE;
         self.chords.retain(|c| c.1 > keep_from);
 
-        let heard = self.chords.iter().filter(|c| c.1 > from).map(|&(a, b, chord)| ChordSpan { from: self.frame_of(a.max(from)), to: self.frame_of(b), chord, predicted: false });
-        let predicted = self.predict(to).into_iter().map(|(a, b, chord)| ChordSpan { from: self.frame_of(a), to: self.frame_of(b), chord, predicted: true });
-        heard.chain(predicted).collect()
+        let span = |(a, b, chord): (f64, f64, Option<Chord>), predicted: bool| ChordSpan { from: self.frame_of(a), to: self.frame_of(b), chord, predicted };
+        let Some(state) = self.state.filter(|s| s.confidence >= BEAT_CHORDS_SURE) else {
+            return self.chords.iter().filter(|c| c.1 > from).map(|&(a, b, chord)| span((a.max(from), b, chord), false)).collect();
+        };
+        // Beat by beat: each takes the chord heard longest in it. The beat
+        // at or after the least sure last moments is where the loop's chords
+        // take over; the chord heard last carries on to it.
+        let beat = |k: i64| state.anchor + k as f64 * state.period;
+        let edge = to - CHORD_EDGE_S * RATE;
+        let mut k = ((from - state.anchor) / state.period).ceil() as i64;
+        let mut cuts = vec![from];
+        while beat(k) < edge {
+            if beat(k) > from {
+                cuts.push(beat(k));
+            }
+            k += 1;
+        }
+        let held = beat(k).max(from);
+        let mut heard: Vec<(f64, f64, Option<Chord>)> = Vec::new();
+        for (i, &a) in cuts.iter().enumerate() {
+            let b = cuts.get(i + 1).copied().unwrap_or(held);
+            let Some(chord) = chord_over(&self.chords, a, b.min(to)) else { continue };
+            match heard.last_mut() {
+                Some(last) if last.2 == chord => last.1 = b,
+                _ => heard.push((a, b, chord)),
+            }
+        }
+        if let Some(last) = heard.last_mut() {
+            last.1 = last.1.max(to);
+        }
+        let predicted = self.predict(state, k, to);
+        if let (Some(last), Some(first)) = (heard.last_mut(), predicted.first()) {
+            last.1 = first.0;
+        }
+        heard.into_iter().map(|c| span(c, false)).chain(predicted.into_iter().map(|c| span(c, true))).collect()
     }
 
-    /// The chords of the coming beats, from the song's loop, if the last
-    /// seconds repeat clearly: from, to (stream samples, the first from `end`) and chord.
-    fn predict(&self, end: f64) -> Vec<(f64, f64, Option<Chord>)> {
-        let Some(state) = self.state.filter(|s| s.confidence >= BEAT_CHORDS_SURE) else { return Vec::new() };
+    /// The chords of the coming beats (from beat `first` on `state`'s grid),
+    /// from the song's loop, if the last seconds repeat clearly: from, to
+    /// (stream samples) and chord, a beat at a time.
+    fn predict(&self, state: State, first: i64, end: f64) -> Vec<(f64, f64, Option<Chord>)> {
         let Some(length) = find_loop(&self.chords, state.period, end) else { return Vec::new() };
         let heard = end - CHORD_EDGE_S * RATE;
-        let step = PREDICT_STEP_S * RATE;
+        let beat = |k: i64| state.anchor + k as f64 * state.period;
         let mut out: Vec<(f64, f64, Option<Chord>)> = Vec::new();
-        let mut t = end;
-        while t < end + PREDICT_BEATS as f64 * state.period {
-            let mut then = t - length;
-            while then >= heard {
+        for k in first..first + PREDICT_BEATS {
+            // The same beat a loop or more earlier, heard in full.
+            let mut then = k - length;
+            while beat(then + 1) > heard {
                 then -= length;
             }
-            let Some(chord) = chord_at(&self.chords, then) else { break };
+            let Some(chord) = chord_over(&self.chords, beat(then), beat(then + 1)) else { break };
             match out.last_mut() {
-                Some(last) if last.2 == chord => last.1 = t + step,
-                _ => out.push((t, t + step, chord)),
+                Some(last) if last.2 == chord => last.1 = beat(k + 1),
+                _ => out.push((beat(k), beat(k + 1), chord)),
             }
-            t += step;
+        }
+        out
+    }
+
+    /// How often the chords heard in the last seconds changed on each beat
+    /// of the bar, read beat by beat on the grid through `anchor`: index `v`
+    /// counts the changes a bar starting `v` beats before the anchor puts on its 1.
+    fn changes(&self, anchor: f64, period: f64) -> [f32; 4] {
+        let mut out = [0.0; 4];
+        let (Some(f), Some(l)) = (self.chords.first(), self.chords.last()) else { return out };
+        let (first, last) = (f.0, l.1 - CHORD_EDGE_S * RATE);
+        let beat = |k: i64| anchor + k as f64 * period;
+        let mut k = ((first.max(last - LOOP_SPAN_S * RATE) - anchor) / period).ceil() as i64;
+        let mut before = None;
+        while beat(k + 1) <= last {
+            let now = chord_over(&self.chords, beat(k), beat(k + 1)).flatten().map(triad);
+            if let (Some(a), Some(b)) = (before, now)
+                && a != b
+            {
+                out[(-k).rem_euclid(4) as usize] += 1.0;
+            }
+            before = now;
+            k += 1;
         }
         out
     }
@@ -447,24 +509,50 @@ fn triad(c: Chord) -> (u8, bool) {
     (c.root, matches!(c.quality, Minor | Minor6 | Minor7 | HalfDiminished7 | Diminished | Diminished7))
 }
 
+/// The chord heard longest from stream sample `a` to `b`, or `None` when
+/// less than half of that was heard.
+fn chord_over(chords: &[(f64, f64, Option<Chord>)], a: f64, b: f64) -> Option<Option<Chord>> {
+    let mut tally: Vec<(Option<Chord>, f64)> = Vec::new();
+    let mut heard = 0.0;
+    for c in &chords[chords.partition_point(|c| c.1 <= a)..] {
+        if c.0 >= b {
+            break;
+        }
+        let d = c.1.min(b) - c.0.max(a);
+        if d <= 0.0 {
+            continue;
+        }
+        heard += d;
+        match tally.iter_mut().find(|t| t.0 == c.2) {
+            Some(t) => t.1 += d,
+            None => tally.push((c.2, d)),
+        }
+    }
+    if heard < 0.5 * (b - a) {
+        return None;
+    }
+    tally.into_iter().max_by(|x, y| x.1.total_cmp(&y.1)).map(|t| t.0)
+}
+
 /// The chord kept for stream sample `t`, or `None` when nothing was heard then.
 fn chord_at(chords: &[(f64, f64, Option<Chord>)], t: f64) -> Option<Option<Chord>> {
     let i = chords.partition_point(|c| c.1 <= t);
     chords.get(i).filter(|c| c.0 <= t).map(|c| c.2)
 }
 
-/// The shortest loop (a whole number of beats, in stream samples) the
+/// The shortest loop (a whole number of beats) the
 /// chords of the last seconds repeat with: sampled every tenth of a second,
 /// most moments with a chord match the chord a loop earlier. Compared in
 /// time rather than beat by beat, so a slightly wrong tempo blurs nothing.
 /// Chords count as the same with the same root and third.
-fn find_loop(chords: &[(f64, f64, Option<Chord>)], period: f64, end: f64) -> Option<f64> {
+fn find_loop(chords: &[(f64, f64, Option<Chord>)], period: f64, end: f64) -> Option<i64> {
     let first = chords.first()?.0;
     let last = end - CHORD_EDGE_S * RATE;
     let step = 0.1 * RATE;
-    LOOPS.into_iter().map(|beats| beats as f64 * period).find(|&length| {
+    LOOPS.into_iter().find(|&beats| {
+        let length = beats as f64 * period;
         let from = (first + length).max(last - LOOP_SPAN_S * RATE);
-        if last - from < LOOP_MIN_S * RATE {
+        if last - from < tune("LOOP_MIN", LOOP_MIN_S as f32) as f64 * RATE {
             return false;
         }
         let (mut pairs, mut same) = (0usize, 0usize);
@@ -478,9 +566,11 @@ fn find_loop(chords: &[(f64, f64, Option<Chord>)], period: f64, end: f64) -> Opt
             }
             t += step;
         }
-        pairs > 0 && same as f32 >= LOOP_AGREE * pairs as f32
+        pairs > 0 && same as f32 >= tune("LOOP_AGREE", LOOP_AGREE) * pairs as f32
     })
 }
+
+fn tune(k: &str, d: f32) -> f32 { std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d) }
 
 /// Beat This!'s own peak picking: frames above zero that are the highest
 /// within three frames each way, neighbours merged. (frame, logit).
@@ -569,9 +659,9 @@ mod tests {
         // C for a bar, G for a bar, over and over for 16 s: a loop of 8 beats, not 4.
         let song: Vec<_> = (0..8).map(|i| (i as f64 * 4.0 * beat, (i + 1) as f64 * 4.0 * beat, if i % 2 == 0 { c(0) } else { c(7) })).collect();
         let end = 16.0 * RATE;
-        assert_eq!(find_loop(&song, beat, end), Some(8.0 * beat));
+        assert_eq!(find_loop(&song, beat, end), Some(8));
         // Slightly off in tempo, it still holds.
-        assert_eq!(find_loop(&song, beat * 1.005, end), Some(8.0 * beat * 1.005));
+        assert_eq!(find_loop(&song, beat * 1.005, end), Some(8));
         let mut seed = 7u32;
         let muddle: Vec<_> = (0..32)
             .map(|i| {
@@ -582,6 +672,17 @@ mod tests {
         assert_eq!(find_loop(&muddle, beat, end), None);
         assert_eq!(chord_at(&song, 4.5 * beat), Some(c(7)));
         assert_eq!(chord_at(&song, 40.0 * beat), None);
+    }
+
+    #[test]
+    fn a_beat_takes_the_chord_heard_longest_in_it() {
+        use midzer_core::Quality;
+        let c = |root: u8| Some(Chord { root, quality: Quality::Major, bass: root });
+        let heard = [(0.0, 1.2, c(0)), (1.2, 1.4, c(2)), (1.4, 3.0, c(7))];
+        assert_eq!(chord_over(&heard, 1.0, 2.0), Some(c(7)));
+        assert_eq!(chord_over(&heard, 0.0, 1.0), Some(c(0)));
+        // Less than half of it heard.
+        assert_eq!(chord_over(&heard, 2.6, 4.0), None);
     }
 
     #[test]

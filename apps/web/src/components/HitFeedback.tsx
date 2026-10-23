@@ -38,7 +38,7 @@ const laneX = (ms: number) => 50 + (Math.max(-LANE_MS, Math.min(LANE_MS, ms)) / 
  * recent hits on time, rushing or dragging, and every hit on an early/late
  * lane. The panel flashes green, amber or red as each hit is judged.
  */
-export function HitFeedback({ against = 'the track', lagging = false }: { against?: string; lagging?: boolean }) {
+export function HitFeedback({ against = 'the track', lagging = false, compact = false }: { against?: string; lagging?: boolean; compact?: boolean }) {
   const [view, setView] = useState<View>(read);
   const panel = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -69,7 +69,7 @@ export function HitFeedback({ against = 'the track', lagging = false }: { agains
   const needle = view.count >= 4 ? laneX(live.timing.average) : null;
 
   return (
-    <section className="panel hit-feedback" ref={panel} data-level={level} aria-live="off">
+    <section className={`panel hit-feedback ${compact ? 'compact' : ''}`} ref={panel} data-level={level} aria-live="off">
       <div className="hit-score">
         <p className="eyebrow">On time</p>
         <p className="hit-percent" data-testid="hit-percent" role="meter" aria-label={`Hits on time against ${against}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct ?? 0}>
@@ -99,7 +99,7 @@ export function HitFeedback({ against = 'the track', lagging = false }: { agains
         {needle !== null && <div className="hit-needle" style={{ left: `${needle}%` }} />}
         <span className="hit-lane-end right">Late</span>
       </div>
-      {lagging && <p className="setting-note hit-note">Hits are timed against the beats around them, so each shows up about a beat after you play it.</p>}
+      {lagging && !compact && <p className="setting-note hit-note">Hits are timed against the beats around them, so each shows up about a beat after you play it.</p>}
     </section>
   );
 }

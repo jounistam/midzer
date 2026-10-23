@@ -162,3 +162,39 @@ test('play along: follows the beat of an audio input and times drums and keys ag
   expect(Object.keys(prefs.liveOffsets ?? {})).toHaveLength(1);
   expect(errors).toEqual([]);
 });
+
+test('play along on keys: the keys of each chord fall onto the keyboard, by level', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  await page.addInitScript(() => localStorage.setItem('midzer.onboarded', '1'));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Play along/ }).click();
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeEnabled({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Keys', exact: true }).click();
+  await expect(page.getByTestId('chord-lanes')).toBeVisible();
+  // A beginner starts with one key.
+  await expect(page.getByTestId('along-level')).toContainText('One key');
+  await expect(page.locator('.along-legend')).not.toContainText('Left hand');
+
+  await page.getByRole('button', { name: 'Listen' }).click();
+  await expect(page.getByTestId('along-chord')).toHaveText(/^(C|G)$/, { timeout: 30_000 });
+  await page.getByRole('button', { name: '4', exact: true }).click();
+  await expect(page.getByTestId('along-level')).toContainText('Both hands');
+  await expect(page.locator('.along-legend')).toContainText('Left hand');
+  // Once the loop comes round again, the chord coming is known.
+  await expect(page.getByTestId('along-chord-trail')).toContainText(/next (C|G) in/, { timeout: 30_000 });
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/15-play-along-chords.png` });
+
+  // Playing: the timing shrinks to make room for the chords.
+  await drumOnTheBeat(page, ['a+d+g', 'a', 'a+d+g', 'a'], 8);
+  await expect(page.locator('.hit-feedback.compact')).toBeVisible();
+  await expect(page.getByTestId('chord-lanes')).toBeVisible();
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/16-play-along-chords-playing.png` });
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
+
+  const prefs = await page.evaluate(() => JSON.parse(localStorage.getItem('midzer.prefs') ?? '{}'));
+  expect(prefs.alongLevel).toBe(4);
+  expect(errors).toEqual([]);
+});

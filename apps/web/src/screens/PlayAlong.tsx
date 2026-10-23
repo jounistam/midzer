@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { LiveDevice } from '@midzer/audio-web';
+import { ChordLanes } from '../components/ChordLanes';
 import { PlayButton } from '../components/ControlPanel';
 import { HitFeedback } from '../components/HitFeedback';
 import { Keyboard } from '../components/Keyboard';
@@ -8,6 +9,7 @@ import { TimingReport } from '../components/TimingReport';
 import { TopBar } from '../components/TopBar';
 import type { ChordNow } from '../playalong/chords';
 import { MISS_SOUND_OPTIONS } from '../playalong/feedback';
+import { ALONG_LEVELS } from '../playalong/levels';
 import { SYNC_TAPS } from '../playalong/sync';
 import { useStageHeight } from '../components/stageHeight';
 import {
@@ -18,6 +20,7 @@ import {
   liveSourceKey,
   liveTempo,
   refreshLiveDevices,
+  setAlongLevel,
   setInstrument,
   setMissSound,
   startLiveSource,
@@ -43,6 +46,7 @@ export function PlayAlong() {
       <main className="jam-main">
         <div className="jam-stage along-main">
           <AlongStage />
+          {!drums && <AlongChords split={split} />}
           <AlongTiming />
           <LoadingStatus />
         </div>
@@ -50,12 +54,13 @@ export function PlayAlong() {
           <SourcePicker />
           <PlayButton className="full" />
           <InstrumentPicker />
+          {!drums && <LevelPicker />}
           <BeatFixes />
           <SyncControl />
           <MissSoundControl />
         </aside>
       </main>
-      {drums ? <KitView height={height} /> : <Keyboard split={split} height={Math.min(height, 220)} />}
+      {drums && <KitView height={height} />}
     </div>
   );
 }
@@ -126,7 +131,8 @@ function Meter({ label, value }: { label: string; value: number }) {
 function AlongTiming() {
   const playing = useSession((s) => s.playing);
   const drums = useSession((s) => s.instrument === 'drums');
-  if (playing) return <HitFeedback against="the track" lagging />;
+  // On keys the chords coming take the room; the timing stays in view, smaller.
+  if (playing) return <HitFeedback against="the track" lagging compact={!drums} />;
   return (
     <section className="panel song-timing">
       <div className="along-report">
@@ -138,6 +144,49 @@ function AlongTiming() {
         <TimingReport source="the track" />
       </div>
     </section>
+  );
+}
+
+/** The keys of each chord at the player's level falling onto the keyboard, as in Learn. */
+function AlongChords({ split }: { split: number }) {
+  const level = useSession((s) => s.alongLevel);
+  const twoHands = level >= 4;
+  return (
+    <section className="panel along-play">
+      <div className="along-play-head">
+        <p className="eyebrow">Chords</p>
+        <p className="along-legend">
+          {twoHands && <span className="hand left">Left hand</span>}
+          <span className="hand right">Right hand</span>
+          <span className="hand next">Next chord</span>
+        </p>
+      </div>
+      <ChordLanes />
+      <Keyboard split={split} height={150} />
+    </section>
+  );
+}
+
+/** How much to play along with the chords: one key up to full chords with both hands. */
+function LevelPicker() {
+  const level = useSession((s) => s.alongLevel);
+  const current = ALONG_LEVELS.find((l) => l.level === level)!;
+  return (
+    <div className="control-group">
+      <p className="label" id="along-level-label">
+        Level
+      </p>
+      <div className="segmented" role="group" aria-labelledby="along-level-label">
+        {ALONG_LEVELS.map((l) => (
+          <button key={l.level} className={`seg ${level === l.level ? 'on' : ''}`} aria-pressed={level === l.level} title={l.name} onClick={() => setAlongLevel(l.level)}>
+            {l.level}
+          </button>
+        ))}
+      </div>
+      <p className="setting-note" data-testid="along-level">
+        <strong>{current.name}.</strong> {current.detail}
+      </p>
+    </div>
   );
 }
 
