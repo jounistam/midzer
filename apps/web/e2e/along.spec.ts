@@ -7,7 +7,8 @@ const SHOTS = process.env.MIDZER_SHOTS;
 
 /**
  * A mono WAV of four bars at 120 BPM: a kick-like thump on 1 and 3, a snare-like
- * burst on 2 and 4 and a tick on the eighths. Chrome loops it as the audio input.
+ * burst on 2 and 4 and a tick on the eighths, over two bars of C and two of G
+ * (bright tones with a bass note). Chrome loops it as the audio input.
  */
 function grooveWav(): string {
   const rate = 48_000;
@@ -27,6 +28,12 @@ function grooveWav(): string {
       x = b === 0 ? 0.8 * Math.sin(2 * Math.PI * 60 * t) * Math.exp(-t * 25) : 0.5 * noise() * Math.exp(-t * 60);
     } else {
       x = 0.12 * noise() * Math.exp(-t * 200);
+    }
+    // C E G over C, then G B D over G, with a few harmonics each.
+    const chord = i < beat * 8 ? [48, 60, 64, 67] : [43, 55, 59, 62];
+    for (const key of chord) {
+      const hz = 440 * 2 ** ((key - 69) / 12);
+      for (let h = 1; h <= 4; h++) x += (0.035 / h) * Math.sin((2 * Math.PI * hz * h * i) / rate);
     }
     samples[i] = Math.round(Math.max(-1, Math.min(1, x)) * 32767);
   }
@@ -105,6 +112,8 @@ test('play along: follows the beat of an audio input and times drums and keys ag
   await expect(page.getByTestId('along-status')).toHaveText('Found the beat', { timeout: 20_000 });
   await expect(page.getByTestId('along-tempo')).toHaveText('120');
   await expect(page.getByRole('meter', { name: 'Sure of the beat' })).not.toHaveAttribute('aria-valuenow', '0');
+  // The listener names the chords as they come round.
+  await expect(page.getByTestId('along-chord')).toHaveText(/^(C|G)$/, { timeout: 20_000 });
 
   // Sync: a tap on every beat for three bars. Tapping on the dots, which follow
   // the sync, it can only show the taps' own lag, not take it away.

@@ -1,5 +1,8 @@
-import { decodeEvent, encodeCommand, type EngineCommand, type TimedEvent } from './protocol';
+import type { HearReply, HearRequest } from './hear.worker';
+import hearWorkerUrl from './hear.worker.ts?worker&url';
+import { chordName, decodeEvent, encodeCommand, type ChordInfo, type EngineCommand, type TimedEvent } from './protocol';
 import { RecordRing } from './ring';
+import { TapRing } from './tap';
 import type { PortMessage } from './worklet';
 import workletUrl from './worklet.ts?worker&url';
 
@@ -15,6 +18,39 @@ export type Transport = 'shared-memory' | 'message-port' | 'native';
  * `MIDIOutput.send` so external gear lines up with the built-in sound.
  */
 export type EventListener = (event: TimedEvent, timeMs: number) => void;
+
+/** A chord heard in the live source, from when to when (in the source's own time, as `performance.now()`). */
+export interface LiveChordSpan {
+  fromMs: number;
+  toMs: number;
+  chord: ChordInfo | null;
+  /** Not heard yet: what the song's loop says comes next. */
+  predicted: boolean;
+}
+
+/**
+ * Receives what the listener (crates/midzer-hear) heard of the live source:
+ * the chords of the last 10 s, oldest first, replacing what came before
+ * about that stretch. The source's time is when it reached midzer; the
+ * player may hear it a little later (see `setLiveOffset`).
+ */
+export type LiveChordListener = (spans: LiveChordSpan[]) => void;
+
+/**
+ * Chord spans as the listener sends them: [from, to, code, predicted] in
+ * engine frames, code root · 16 + quality or −1, predicted 1 or 0.
+ */
+export function decodeChordSpans(spans: ArrayLike<number>, timeOfFrame: (frame: number) => number): LiveChordSpan[] {
+  const out: LiveChordSpan[] = [];
+  for (let i = 0; i + 3 < spans.length; i += 4) {
+    const code = spans[i + 2]!;
+    const root = Math.floor(code / 16);
+    const quality = code % 16;
+    const chord = code < 0 ? null : { root, bass: root, quality, name: chordName(root, quality, root) };
+    out.push({ fromMs: timeOfFrame(spans[i]!), toMs: timeOfFrame(spans[i + 1]!), chord, predicted: spans[i + 3] === 1 });
+  }
+  return out;
+}
 
 export interface MicOptions {
   /** Off with headphones: echo cancellation blurs pitch, but with speakers it keeps the band out. */
@@ -58,6 +94,8 @@ export interface EngineHandle {
   send(cmd: EngineCommand): void;
   /** Returns an unsubscribe function. */
   onEvent(listener: EventListener): () => void;
+  /** Chords the listener hears in the live source; returns an unsubscribe function. Needs cross-origin isolation in the browser. */
+  onLiveChords(listener: LiveChordListener): () => void;
   /** Loads an SF2 file; resolves false if it could not be parsed. */
   loadSoundFont(bytes: ArrayBuffer): Promise<boolean>;
   /** Hands the engine a backing track (its sample arrays are moved), or frees it with null. Rejects if it can't be read. */
@@ -88,8 +126,13 @@ export function isNativeHost(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
-/** Loads the Rust engine into an AudioWorklet. Call from a user gesture. */
-export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
+/**
+ * Loads the Rust engine into an AudioWorklet. Call from a user gesture.
+ * `hearUrl` is the listener (hear.wasm) that follows live sources with its
+ * networks; without it, or without cross-origin isolation, the engine's own
+ * beat tracker follows them alone.
+ */
+export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<EngineHandle> {
   const context = new AudioContext({ latencyHint: 'interactive' });
   const [module] = await Promise.all([
     WebAssembly.compileStreaming(fetch(wasmUrl)),
@@ -100,18 +143,20 @@ export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
   // Large enough for a whole song chart (see chartCommands) sent at once.
   const commands = shared ? RecordRing.create(8192) : null;
   const events = shared ? RecordRing.create(4096) : null;
+  const tap = shared && hearUrl ? TapRing.create() : null;
   // Input 0 is the microphone, input 1 the live source.
   const node = new AudioWorkletNode(context, PROCESSOR_NAME, {
     numberOfInputs: 2,
     channelCount: 1,
     channelCountMode: 'explicit',
     outputChannelCount: [2],
-    processorOptions: { module, commands: commands?.buffer ?? null, events: events?.buffer ?? null },
+    processorOptions: { module, commands: commands?.buffer ?? null, events: events?.buffer ?? null, tap: tap?.buffer ?? null },
   });
   node.connect(context.destination);
   await context.resume();
 
   const listeners = new Set<EventListener>();
+  const chordListeners = new Set<LiveChordListener>();
   const sampleRate = context.sampleRate;
 
   /** Maps an AudioContext frame to the performance.now() time it is heard. */
@@ -155,22 +200,49 @@ export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
       }, POLL_MS)
     : undefined;
 
+  const send = (cmd: EngineCommand) => {
+    const words = encodeCommand(cmd);
+    if (commands) {
+      if (!commands.push(words)) console.warn('midzer: command ring full, dropped', cmd);
+    } else {
+      node.port.postMessage({ type: 'command', words } satisfies PortMessage);
+    }
+  };
+
+  // The listener starts with the first live source and stays for the session.
+  let hearing: Worker | null = null;
+  const startHearing = () => {
+    if (!tap || !hearUrl || hearing) return;
+    hearing = new Worker(hearWorkerUrl, { type: 'module' });
+    hearing.onmessage = (e: MessageEvent<HearReply>) => {
+      const msg = e.data;
+      if (msg.type === 'grid') {
+        send({ type: 'liveGuide', frame: msg.frame, period: msg.period, one: msg.one, confidence: msg.confidence });
+      } else if (msg.type === 'chords') {
+        const offset = tap.frameOffset;
+        const spans = decodeChordSpans(msg.spans, (frame) => timeOfFrame(frame + offset));
+        for (const listener of chordListeners) listener(spans);
+      } else {
+        console.warn(`midzer: the listener stopped: ${msg.message}`);
+        tap.enabled = false;
+      }
+    };
+    hearing.postMessage({ type: 'start', wasmUrl: hearUrl, tap: tap.buffer, sampleRate } satisfies HearRequest);
+  };
+
   const { outputLatency = 0, baseLatency = 0 } = context;
   return {
     sampleRate,
     outputLatencyMs: Math.round((outputLatency || baseLatency) * 1000),
     transport: shared ? 'shared-memory' : 'message-port',
-    send(cmd) {
-      const words = encodeCommand(cmd);
-      if (commands) {
-        if (!commands.push(words)) console.warn('midzer: command ring full, dropped', cmd);
-      } else {
-        node.port.postMessage({ type: 'command', words } satisfies PortMessage);
-      }
-    },
+    send,
     onEvent(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    onLiveChords(listener) {
+      chordListeners.add(listener);
+      return () => chordListeners.delete(listener);
     },
     loadSoundFont(bytes) {
       return new Promise((resolve) => {
@@ -234,10 +306,15 @@ export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
       }
       const input = new MediaStreamAudioSourceNode(context, { mediaStream: stream });
       input.connect(node, 0, 1);
+      startHearing();
+      hearing?.postMessage({ type: 'reset' } satisfies HearRequest);
+      if (tap) tap.enabled = true;
       let open = true;
       const stop = () => {
         if (!open) return;
         open = false;
+        if (tap) tap.enabled = false;
+        hearing?.postMessage({ type: 'reset' } satisfies HearRequest);
         input.disconnect();
         for (const track of stream.getTracks()) track.stop();
       };
@@ -250,7 +327,9 @@ export async function startEngine(wasmUrl: string): Promise<EngineHandle> {
     },
     async close() {
       clearInterval(poll);
+      hearing?.terminate();
       listeners.clear();
+      chordListeners.clear();
       node.disconnect();
       await context.close();
     },

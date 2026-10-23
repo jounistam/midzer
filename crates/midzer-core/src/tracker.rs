@@ -11,6 +11,10 @@
 //!   frame gives the beats, each confirmed a quarter of a beat after it.
 //! - The confirmed beats go through a phase-locked loop, so the grid a drummer
 //!   is judged against is smooth rather than following every onset.
+//! - A guide from outside ([`BeatTracker::guide`]: a network that heard the
+//!   last seconds, see `midzer-hear`) overrides the programme while it is
+//!   fresh: the beats come from its grid, still through the loop, and the
+//!   tempo estimate is pulled to it so the programme carries on from there.
 //!
 //! Every buffer is allocated in [`BeatTracker::new`]; [`BeatTracker::push`]
 //! never allocates.
@@ -69,6 +73,24 @@ const LOCK_READS: u32 = 12;
 const UNLOCK_CONFIDENCE: f32 = 0.05;
 /// Confidence follows the periodicity with this time constant.
 const CONFIDENCE_SECONDS: f32 = 1.0;
+/// A guide steers for this long after it came, if it is at least this sure.
+const GUIDE_KEEP_S: f32 = 5.0;
+const GUIDE_SURE: f32 = 0.3;
+/// A guided beat moves to a clear onset (this many times the usual onset
+/// strength) at most this far from it: the guide says which beat, the onset
+/// says exactly when.
+const GUIDE_SNAP_S: f32 = 0.025;
+const GUIDE_SNAP_ONSET: f32 = 3.0;
+
+/// A grid from outside: a beat's engine frame, the period in frames, how
+/// sure it is (0..=1) and the engine frame it came at.
+#[derive(Debug, Clone, Copy)]
+struct Guide {
+    at: f64,
+    period: f64,
+    confidence: f32,
+    since: u64,
+}
 
 /// A confirmed beat of the input.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -173,6 +195,8 @@ pub struct BeatTracker {
     quiet_frames: u32,
     lost_after: u32,
     level_db: f32,
+    guide: Option<Guide>,
+    guide_keep: u64,
 }
 
 impl BeatTracker {
@@ -247,6 +271,8 @@ impl BeatTracker {
             quiet_frames: 0,
             lost_after: (LOST_AFTER_S * rate) as u32,
             level_db: -100.0,
+            guide: None,
+            guide_keep: (GUIDE_KEEP_S * sample_rate) as u64,
         }
     }
 
@@ -275,6 +301,7 @@ impl BeatTracker {
         self.confidence = 0.0;
         self.locked = false;
         self.quiet_frames = 0;
+        self.guide = None;
     }
 
     pub fn locked(&self) -> bool {
@@ -384,6 +411,10 @@ impl BeatTracker {
         }
         if let Some(period) = self.period {
             self.programme(m, period);
+        }
+        if let Some(guide) = self.fresh_guide() {
+            self.confirm_guided(guide, out);
+        } else if let Some(period) = self.period {
             self.confirm(m, period, out);
         }
     }
@@ -467,10 +498,40 @@ impl BeatTracker {
         }
     }
 
+    /// A grid from outside: a beat at engine frame `at`, `period` frames
+    /// apart, `confidence` 0..=1. While it is fresh, the beats come from it.
+    pub fn guide(&mut self, at: f64, period: f64, confidence: f32) {
+        if confidence < GUIDE_SURE || period <= 0.0 {
+            return;
+        }
+        let onset_period = (period / self.hop as f64) as f32;
+        if !(self.min_lag as f32..=self.max_lag as f32).contains(&onset_period) {
+            return;
+        }
+        // The programme follows the guide's tempo, so it carries on when the guide stops.
+        self.prior_bpm = 60.0 * self.rate / onset_period;
+        self.prior_octaves = TOLD_OCTAVES;
+        self.candidate = None;
+        if self.period.is_none_or(|p| (onset_period / p - 1.0).abs() > TEMPO_JUMP) {
+            self.set_period(onset_period);
+        }
+        self.guide = Some(Guide { at, period, confidence, since: self.clock });
+        // Sure enough to show beats now; the loop moves to the guide's grid with its next beat.
+        if self.beat.is_some() {
+            self.locked = true;
+        }
+    }
+
+    fn fresh_guide(&self) -> Option<Guide> {
+        self.guide.filter(|g| self.clock < g.since + self.guide_keep)
+    }
+
     /// The player says the beat is `factor` (2 or ½) times what was found:
     /// the tempo moves there and stays near it until the input is lost.
     pub fn scale_tempo(&mut self, factor: f32) {
         let Some(period) = self.period else { return };
+        // The player knows better than the guide.
+        self.guide = None;
         let next = (period / factor).clamp(self.min_lag as f32, self.max_lag as f32);
         self.prior_bpm = 60.0 * self.rate / next;
         self.prior_octaves = TOLD_OCTAVES;
@@ -607,6 +668,80 @@ impl BeatTracker {
         out.push(TrackedBeat { at, index, period: self.beat_period, low, high });
     }
 
+    /// Confirms the guide's beats just after they pass, in order: the
+    /// listener has already settled them, so unlike the programme's they only
+    /// wait for the onset that may pin them down.
+    fn confirm_guided(&mut self, g: Guide, out: &mut BeatList) {
+        let ready = self.clock as f64 - (GUIDE_SNAP_S as f64 + 0.01) * self.sample_rate as f64;
+        let mut k = match self.beat {
+            Some((last, _)) => ((last + 0.5 * g.period - g.at) / g.period).ceil(),
+            // Starting: the newest beat only.
+            None => ((ready - g.at) / g.period).floor(),
+        };
+        while g.at + k * g.period <= ready {
+            self.guided_beat(g.at + k * g.period, g, out);
+            k += 1.0;
+        }
+    }
+
+    /// A beat of the guide's grid at engine frame `t`, through the loop.
+    fn guided_beat(&mut self, t: f64, g: Guide, out: &mut BeatList) {
+        // The onsets around it, for the downbeat guess: the frame nearest `t`.
+        let back = ((self.clock as f64 - t) / self.hop as f64).round().max(0.0) as u64;
+        let f = self.frames.saturating_sub(1 + back);
+        let t = self.snap(t, f);
+        let peak = |ring: &[f32]| {
+            let lo = f.saturating_sub(2).max(self.frames.saturating_sub(RING as u64 - 1));
+            (lo..=(f + 2).min(self.frames.saturating_sub(1))).map(|k| ring[(k as usize) % RING]).fold(0.0f32, f32::max)
+        };
+        let (low, high) = (peak(&self.low), peak(&self.high));
+        let (at, index) = match self.beat {
+            None => {
+                self.beat_period = g.period;
+                (t, 0)
+            }
+            Some((last, index)) => {
+                let steps = ((t - last) / self.beat_period).round().clamp(1.0, 4.0);
+                let predicted = last + steps * self.beat_period;
+                let error = t - predicted;
+                if error.abs() > PLL_RESYNC * self.beat_period {
+                    self.beat_period = g.period;
+                    (t, index + steps as u32)
+                } else {
+                    for k in 1..steps as u32 {
+                        let at = last + k as f64 * self.beat_period;
+                        out.push(TrackedBeat { at, index: index + k, period: self.beat_period, low: 0.0, high: 0.0 });
+                    }
+                    self.beat_period += PLL_PERIOD * error / steps;
+                    self.beat_period = self.beat_period.clamp(g.period * 0.97, g.period * 1.03);
+                    (predicted + PLL_PHASE * error, index + steps as u32)
+                }
+            }
+        };
+        self.beat = Some((at, index));
+        self.beats_in_lock += 1;
+        self.locked = true;
+        self.confidence = self.confidence.max(g.confidence);
+        out.push(TrackedBeat { at, index, period: self.beat_period, low, high });
+    }
+
+    /// `t` moved to the clear onset nearest it (onset frame `f`), if there is one close by.
+    fn snap(&self, t: f64, f: u64) -> f64 {
+        let reach = (GUIDE_SNAP_S * self.rate).round() as u64;
+        let oldest = self.frames.saturating_sub(RING as u64 - 1);
+        let (lo, hi) = (f.saturating_sub(reach).max(oldest).max(1), (f + reach).min(self.frames.saturating_sub(2)));
+        let o = |k: u64| self.ring(&self.onset, k);
+        let Some(best) = (lo..=hi).filter(|&k| o(k) >= o(k - 1) && o(k) >= o(k + 1)).max_by(|&a, &b| o(a).total_cmp(&o(b))) else { return t };
+        if o(best) < GUIDE_SNAP_ONSET * self.onset_mean.max(1e-6) {
+            return t;
+        }
+        let (a, b, c) = (o(best - 1), o(best), o(best + 1));
+        let curve = a - 2.0 * b + c;
+        let delta = if curve < 0.0 { (0.5 * (a - c) / curve).clamp(-0.5, 0.5) as f64 } else { 0.0 };
+        let at = self.ring_time(best) as f64 + (delta - ONSET_HOPS) * self.hop as f64;
+        if (at - t).abs() <= GUIDE_SNAP_S as f64 * self.sample_rate as f64 { at } else { t }
+    }
+
     fn ring_time(&self, f: u64) -> u64 {
         self.time[(f as usize) % RING]
     }
@@ -686,6 +821,60 @@ mod tests {
 
     fn first_lock_s(beats: &[(TrackedBeat, bool)]) -> f64 {
         beats.iter().find(|(_, l)| *l).map_or(f64::INFINITY, |(b, _)| b.at / SR as f64)
+    }
+
+    /// Tracks `signal`, given `guide` (at seconds, beat frame, period frames, confidence) once.
+    fn track_guided(signal: &[f32], guides: &[(f32, f64, f64, f32)]) -> Vec<(TrackedBeat, bool)> {
+        let mut tracker = BeatTracker::new(SR);
+        let mut beats = Vec::new();
+        for (i, block) in signal.chunks(128).enumerate() {
+            for &(at, frame, period, confidence) in guides {
+                if i == (at * SR) as usize / 128 {
+                    tracker.guide(frame, period, confidence);
+                }
+            }
+            let mut out = BeatList::default();
+            tracker.push(block, (i * 128) as u64, &mut out);
+            beats.extend(out.as_slice().iter().map(|b| (*b, tracker.locked())));
+        }
+        beats
+    }
+
+    #[test]
+    fn a_guide_locks_at_once_and_wins_over_the_programme() {
+        // 174 BPM, which the programme alone hears as 87 (see below), guided at
+        // 4 s, a little late, by a listener that heard it right.
+        let beat = 60.0 / 174.0;
+        let (signal, truth) = clicks(12.0, 0.0, |i| 0.3 + i as f32 * beat);
+        let period = beat as f64 * SR as f64;
+        let beats = track_guided(&signal, &[(4.0, truth[8], period, 0.9)]);
+        let lock = first_lock_s(&beats);
+        assert!(lock < 4.3, "locked at {lock} s");
+        let after: Vec<_> = beats.iter().filter(|(b, _)| b.at > 4.5 * SR as f64).copied().collect();
+        let e = errors(&after, &truth);
+        let worst = e.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(worst < 3.0, "worst {worst} ms");
+        let found = 60.0 * SR as f64 / after.last().unwrap().0.period;
+        assert!((found - 174.0).abs() < 1.0, "found {found}");
+        // Every beat of the guide, none skipped.
+        assert!(after.windows(2).all(|w| w[1].0.index == w[0].0.index + 1));
+    }
+
+    #[test]
+    fn an_unsure_guide_is_ignored_and_an_old_one_lets_go() {
+        let beat = 0.5;
+        let (signal, truth) = clicks(16.0, 0.0, |i| 0.3 + i as f32 * beat);
+        // Off by a third of a beat: ignored when unsure.
+        let wrong = truth[4] + (beat / 3.0 * SR) as f64;
+        let beats = track_guided(&signal, &[(2.0, wrong, beat as f64 * SR as f64, 0.1)]);
+        let e = errors(&beats, &truth);
+        assert!(e.iter().all(|x| x.abs() < 5.0));
+        // Sure but wrong: followed while fresh, and the programme takes over once it is old.
+        let beats = track_guided(&signal, &[(2.0, wrong, beat as f64 * SR as f64, 0.9)]);
+        let guided: Vec<_> = beats.iter().filter(|(b, _)| b.at > 3.0 * SR as f64 && b.at < 6.5 * SR as f64).copied().collect();
+        assert!(errors(&guided, &truth).iter().all(|x| x.abs() > 100.0));
+        let later: Vec<_> = beats.iter().filter(|(b, _)| b.at > 12.0 * SR as f64).copied().collect();
+        assert!(errors(&later, &truth).iter().all(|x| x.abs() < 5.0), "{:?}", errors(&later, &truth));
     }
 
     #[test]

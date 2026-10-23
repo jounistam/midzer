@@ -26,6 +26,7 @@ import {
   type KitAction,
   type KitTrigger,
   type ListenMode,
+  type LiveChordSpan,
   type LiveDevice,
   type LiveSource,
   type NativeMidi,
@@ -47,6 +48,7 @@ import {
   type KitTriggers,
 } from './drums/kit';
 import { pickProgression, progressionCommands } from './drums/progressions';
+import { ChordTimeline, type ChordNow } from './playalong/chords';
 import { MISS_SOUND_OPTIONS, missOf, playMiss, type MissSound } from './playalong/feedback';
 import type { JudgedHit } from './drums/judging';
 import { COUNT_IN_OPTIONS, countInPieces, type CountInChoice } from './drums/stage';
@@ -188,6 +190,8 @@ interface SessionState {
   judgedCount: number;
   liveSource: LiveSourceState;
   liveTracker: LiveTracker;
+  /** The chord heard in the live source now, and the ones before it. */
+  liveChord: ChordNow;
   /** Inputs to play along with; names may be missing until audio input is allowed. */
   liveDevices: LiveDevice[];
   /** How much later the player hears each source than midzer does, in ms, by `liveSourceKey`. */
@@ -373,6 +377,7 @@ export const useSession = create<SessionState>(() => ({
   judgedCount: 0,
   liveSource: { status: 'none' },
   liveTracker: { locked: false, confidence: 0, level: 0 },
+  liveChord: { current: null, before: [], next: null },
   liveDevices: [],
   liveOffsets: prefs.liveOffsets,
   missSound: prefs.missSound,
@@ -431,9 +436,10 @@ export async function startAudio(): Promise<void> {
       nativeMidi = native.midi;
       engine = native;
     } else {
-      engine = await startEngine('/wasm/midzer.wasm');
+      engine = await startEngine('/wasm/midzer.wasm', '/wasm/hear.wasm');
     }
     engine.onEvent(onEngineEvent);
+    engine.onLiveChords(onLiveChords);
     const { bpm, volume, split, muted, style, idleMode, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers } = get();
     set({ outputLatencyMs: engine.outputLatencyMs });
     engine.send({ type: 'setBandDrums', mode: bandDrums });
@@ -1049,6 +1055,30 @@ export function playsRecording(): boolean {
 // ---- Playing along with live audio ---------------------------------------------
 
 let closeLiveSource: (() => void) | null = null;
+const liveChords = new ChordTimeline();
+let liveChordTimer: ReturnType<typeof setInterval> | undefined;
+
+/** The listener's chords, moved to when the player hears them: like the live beats, without midzer's output latency. */
+function onLiveChords(spans: LiveChordSpan[]): void {
+  const { liveSource, liveOffsets, outputLatencyMs } = get();
+  if (liveSource.status !== 'on') return;
+  liveChords.add(spans, (liveOffsets[liveSource.key] ?? 0) - outputLatencyMs);
+}
+
+/** Shows the chord heard now, a few times a second, while a source is followed. */
+function followLiveChords(on: boolean): void {
+  clearInterval(liveChordTimer);
+  liveChords.clear();
+  set({ liveChord: { current: null, before: [], next: null } });
+  if (!on) return;
+  liveChordTimer = setInterval(() => {
+    const now = liveChords.at(performance.now());
+    const shown = get().liveChord;
+    // The countdown to the next chord changes every tenth of a second, not on every tick.
+    const nextKey = (c: typeof now) => (c.next ? `${c.next.name}@${Math.ceil(c.next.inMs / 100)}` : '');
+    if (now.current !== shown.current || now.before.join() !== shown.before.join() || nextKey(now) !== nextKey(shown)) set({ liveChord: now });
+  }, 50);
+}
 /** Counts opens, so one that finishes after another started is dropped. */
 let liveRequest = 0;
 /** Taps on the beat while syncing. */
@@ -1104,6 +1134,7 @@ export async function startLiveSource(source: LiveSource): Promise<void> {
       closeLiveSource = null;
       send({ type: 'stop' });
       set({ liveSource: { status: 'ended', key } });
+      followLiveChords(false);
     });
     if (request !== liveRequest) {
       close();
@@ -1115,6 +1146,7 @@ export async function startLiveSource(source: LiveSource): Promise<void> {
     send({ type: 'setLiveOffset', ms: get().liveOffsets[key] ?? 0 });
     send({ type: 'setLive', on: true });
     set({ liveSource: { status: 'on', key }, liveTracker: { locked: false, confidence: 0, level: 0 } });
+    followLiveChords(true);
     // Names show once audio input is allowed.
     if (source.kind === 'device') void refreshLiveDevices();
   } catch (e) {
@@ -1131,6 +1163,7 @@ export function stopLiveSource(): void {
     send({ type: 'stop' });
     set({ liveSource: { status: 'none' }, liveTracker: { locked: false, confidence: 0, level: 0 } });
   }
+  followLiveChords(false);
 }
 
 function liveErrorText(e: unknown): string {

@@ -1,0 +1,3 @@
+# All browsers midzer targets run wasm SIMD; the networks in midzer-hear need it.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

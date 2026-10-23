@@ -6,6 +6,7 @@ import { Keyboard } from '../components/Keyboard';
 import { KitView } from '../components/KitView';
 import { TimingReport } from '../components/TimingReport';
 import { TopBar } from '../components/TopBar';
+import type { ChordNow } from '../playalong/chords';
 import { MISS_SOUND_OPTIONS } from '../playalong/feedback';
 import { SYNC_TAPS } from '../playalong/sync';
 import { useStageHeight } from '../components/stageHeight';
@@ -59,10 +60,11 @@ export function PlayAlong() {
   );
 }
 
-/** The tempo found, how sure it is, and the beat: a strip above the accuracy, readable from a distance. */
+/** The tempo found, the chord, how sure it is, and the beat: a strip above the accuracy, readable from a distance. */
 function AlongStage() {
   const source = useSession((s) => s.liveSource);
   const tracker = useSession((s) => s.liveTracker);
+  const chord = useSession((s) => s.liveChord);
   const bpm = useSession((s) => s.bpm);
   const beat = useSession((s) => s.beat);
   const listening = source.status === 'on';
@@ -79,6 +81,15 @@ function AlongStage() {
           {status}
         </p>
       </div>
+      <div className="along-chord">
+        <p className="eyebrow">Chord</p>
+        <p className={`along-chord-name ${chord.current ? '' : 'empty'}`} data-testid="along-chord">
+          {listening && chord.current ? chord.current : '—'}
+        </p>
+        <p className="stage-sub" data-testid="along-chord-trail">
+          {chordLine(listening, chord)}
+        </p>
+      </div>
       <div className={`stage-beats ${locked ? '' : 'waiting'}`} aria-label={locked ? `Beat ${beat + 1}` : 'No beat yet'}>
         {[0, 1, 2, 3].map((b) => (
           <span key={b} className={`stage-beat ${locked && b === beat ? 'active' : ''} ${b === 0 ? 'one' : ''}`} />
@@ -90,6 +101,14 @@ function AlongStage() {
       </div>
     </section>
   );
+}
+
+/** Under the chord: what comes next once the song's loop is clear, else what came before. */
+function chordLine(listening: boolean, chord: ChordNow): string {
+  if (!listening) return '\u00a0';
+  if (chord.next) return `next ${chord.next.name} in ${Math.max(0, chord.next.inMs / 1000).toFixed(1)} s`;
+  if (chord.before.length > 0) return `after ${[...chord.before].reverse().join(' · ')}`;
+  return 'Listening for chords…';
 }
 
 function Meter({ label, value }: { label: string; value: number }) {

@@ -4,6 +4,7 @@
 // main thread. Must not allocate in process().
 
 import { RecordRing } from './ring';
+import { TapRing } from './tap';
 
 export const PROCESSOR_NAME = 'midzer-engine';
 
@@ -13,6 +14,8 @@ export interface ProcessorOptions {
   commands: SharedArrayBuffer | null;
   /** Engine → UI events; null when not cross-origin isolated. */
   events: SharedArrayBuffer | null;
+  /** The live source for the listening worker (see tap.ts); null when not cross-origin isolated. */
+  tap: SharedArrayBuffer | null;
 }
 
 /** Messages on the node's port, both directions. */
@@ -41,6 +44,7 @@ interface MidzerExports {
   mz_listen(host: number, frames: number): void;
   mz_live_ptr(host: number): number;
   mz_listen_live(host: number, frames: number): void;
+  mz_now(host: number): number;
   mz_command(host: number, w0: number, w1: number, w2: number, w3: number): number;
   mz_process(host: number, frames: number): number;
 }
@@ -53,6 +57,7 @@ class MidzerProcessor extends AudioWorkletProcessor {
   private readonly host: number;
   private readonly commands: RecordRing | null;
   private readonly events: RecordRing | null;
+  private readonly tap: TapRing | null;
   private readonly record = new Uint32Array(4);
   private left!: Float32Array;
   private right!: Float32Array;
@@ -68,6 +73,7 @@ class MidzerProcessor extends AudioWorkletProcessor {
     this.host = this.wasm.mz_create(sampleRate);
     this.commands = opts.commands ? new RecordRing(opts.commands) : null;
     this.events = opts.events ? new RecordRing(opts.events) : null;
+    this.tap = opts.tap ? new TapRing(opts.tap) : null;
     this.refreshViews();
     this.port.onmessage = (e: MessageEvent<PortMessage>) => this.onMessage(e.data);
   }
@@ -125,7 +131,14 @@ class MidzerProcessor extends AudioWorkletProcessor {
     if (live) {
       if (this.live.buffer !== wasm.memory.buffer) this.refreshViews();
       this.live.set(live.length === BLOCK ? live : live.subarray(0, Math.min(live.length, BLOCK)));
-      wasm.mz_listen_live(host, Math.min(live.length, BLOCK));
+      const n = Math.min(live.length, BLOCK);
+      const tap = this.tap;
+      if (tap?.enabled) {
+        const now = wasm.mz_now(host);
+        tap.frameOffset = currentFrame - now;
+        tap.push(live, n, now);
+      }
+      wasm.mz_listen_live(host, n);
     }
     const count = wasm.mz_process(host, frames);
 

@@ -9,6 +9,10 @@
 //! engine with different delays; a calibrated offset says how much later the
 //! player hears it.
 //!
+//! A listener off the audio thread (`midzer-hear`) can send a guide: the
+//! grid it heard and which beat is the 1. The tracker then takes its beats
+//! from that grid, and the 1 is the guide's unless the player said otherwise.
+//!
 //! Nothing here allocates after [`Live::new`].
 
 use crate::drummer::keeps_time;
@@ -82,6 +86,14 @@ pub struct Live {
     /// Beat indices that are a 1, modulo 4, and whether the player set it.
     downbeat: u32,
     downbeat_told: bool,
+    /// The guide's latest 1: a beat's engine frame and its place in the bar,
+    /// waiting for a confirmed beat to count from; and whether a guide has
+    /// said where the 1 is (then the cues don't move it).
+    guide_one: Option<(f64, u8)>,
+    guided_one: bool,
+    /// The player's word on the tempo against the guide's: the guide's
+    /// period is multiplied by this (½ when they said twice as fast).
+    guide_scale: f64,
     low: [f32; 4],
     high: [f32; 4],
     beats_heard: u32,
@@ -117,6 +129,9 @@ impl Live {
             pending_count: 0,
             downbeat: 0,
             downbeat_told: false,
+            guide_one: None,
+            guided_one: false,
+            guide_scale: 1.0,
             low: [0.0; 4],
             high: [0.0; 4],
             beats_heard: 0,
@@ -157,6 +172,9 @@ impl Live {
         self.pending_count = 0;
         self.downbeat = 0;
         self.downbeat_told = false;
+        self.guide_one = None;
+        self.guided_one = false;
+        self.guide_scale = 1.0;
         self.low = [0.0; 4];
         self.high = [0.0; 4];
         self.beats_heard = 0;
@@ -178,8 +196,38 @@ impl Live {
     /// The player says the beat is twice (or half) as fast as the one found.
     pub fn scale_tempo(&mut self, double: bool) {
         self.tracker.scale_tempo(if double { 2.0 } else { 0.5 });
+        self.guide_scale *= if double { 0.5 } else { 2.0 };
+        self.guided_one = false;
         self.beat_count = 0;
         self.next_shown = None;
+    }
+
+    /// A grid from a listener that heard the last seconds (see
+    /// [`crate::Command::LiveGuide`]); `frame` is the low 32 bits of a beat's
+    /// engine frame, which lies within a day of `now`.
+    pub fn guide(&mut self, frame: u32, period: f32, one: Option<u8>, confidence: u8, now: u64) {
+        if !self.active {
+            return;
+        }
+        let at = now as f64 + (frame.wrapping_sub(now as u32) as i32) as f64;
+        self.tracker.guide(at, period as f64 * self.guide_scale, confidence as f32 / 255.0);
+        // At another tempo than the guide's, its 1 may fall between the beats.
+        if let Some(one) = one.filter(|_| self.guide_scale == 1.0) {
+            self.guide_one = Some((at, one % BEATS as u8));
+            self.apply_guide_one();
+        }
+    }
+
+    /// Counts the guide's 1 from the tracker's beats.
+    fn apply_guide_one(&mut self) {
+        let (Some((at, one)), Some((last, index, period))) = (self.guide_one, self.tracker.last_beat()) else { return };
+        self.guide_one = None;
+        self.guided_one = true;
+        if self.downbeat_told {
+            return;
+        }
+        let beat = index as i64 + ((at - last) / period).round() as i64;
+        self.downbeat = (beat - one as i64).rem_euclid(BEATS as i64) as u32;
     }
 
     /// The index of the beat the player hears nearest to engine frame `now`.
@@ -283,6 +331,7 @@ impl Live {
         }
         self.beats[self.beat_count] = (beat.at, beat.index);
         self.beat_count += 1;
+        self.apply_guide_one();
         self.guess_downbeat(beat);
 
         if self.running {
@@ -323,7 +372,7 @@ impl Live {
             }
         }
         self.beats_heard += 1;
-        if self.downbeat_told || self.beats_heard < DOWNBEAT_AFTER {
+        if self.downbeat_told || self.guided_one || self.beats_heard < DOWNBEAT_AFTER {
             return;
         }
         let (low, high) = (self.low, self.high);
@@ -602,6 +651,49 @@ mod tests {
         let tempo = events.iter().rev().find_map(|(_, e)| if let EngineEvent::Tempo { bpm } = e { Some(*bpm) } else { None }).unwrap();
         assert!((tempo - 120.0).abs() < 0.5, "{tempo}");
         assert!(!events.iter().any(|(_, e)| matches!(e, EngineEvent::Transport { .. })), "no run without hits");
+    }
+
+    #[test]
+    fn a_guide_brings_the_beat_and_its_1() {
+        let mut live = Live::new(SR);
+        live.set_active(true, &mut EventBuffer::default());
+        let signal = source(10.0);
+        // At 3 s a listener says the beat at 2.25 s (a thump) is the 3rd of its bar.
+        let (head, tail) = signal.split_at(frame(3.0) as usize);
+        let mut events = run(&mut live, head, 0, &[]);
+        live.guide(frame(2.25) as u32, 0.5 * SR, Some(2), 230, frame(3.0));
+        events.extend(run(&mut live, tail, frame(3.0), &[]));
+        let beats: Vec<_> = events.iter().filter_map(|(f, e)| if let EngineEvent::Beat { beat, .. } = e { Some((*f, *beat)) } else { None }).collect();
+        let first = beats.first().map_or(f64::INFINITY, |b| b.0 as f64 / SR as f64);
+        assert!(first < 3.6, "first beat shown at {first} s");
+        for (f, b) in beats {
+            let k = ((f as f64 / SR as f64 - 2.25) / 0.5).round() as i64;
+            let err = f as f64 / SR as f64 - 2.25 - k as f64 * 0.5;
+            assert!(err.abs() < 0.003, "beat {err} s off");
+            // The guide's 1, not the thump's.
+            assert_eq!(b as i64, (2 + k).rem_euclid(4), "beat at {} s", f as f64 / SR as f64);
+        }
+    }
+
+    #[test]
+    fn the_player_s_tempo_holds_against_later_guides() {
+        let mut live = Live::new(SR);
+        live.set_active(true, &mut EventBuffer::default());
+        let signal = source(12.0);
+        let mut events = Vec::new();
+        for (i, block) in signal.chunks(frame(1.0) as usize).enumerate() {
+            let now = frame(i as f64);
+            if i >= 3 {
+                // A guide every second, at 120 BPM.
+                live.guide(frame(0.25 + 0.5 * (2 * i - 2) as f64) as u32, 0.5 * SR, Some(0), 230, now);
+            }
+            if i == 5 {
+                live.scale_tempo(false);
+            }
+            events.extend(run(&mut live, block, now, &[]));
+        }
+        let tempo = events.iter().rev().find_map(|(_, e)| if let EngineEvent::Tempo { bpm } = e { Some(*bpm) } else { None }).unwrap();
+        assert!((tempo - 60.0).abs() < 1.0, "{tempo}");
     }
 
     #[test]

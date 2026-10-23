@@ -4,7 +4,7 @@
 // as the AudioWorklet, plus native MIDI, since desktop webviews lack Web MIDI.
 
 import { Channel, invoke } from '@tauri-apps/api/core';
-import type { EngineHandle, EventListener, LiveDevice, TrackLoaded } from './engine';
+import { decodeChordSpans, type EngineHandle, type EventListener, type LiveChordListener, type LiveDevice, type TrackLoaded } from './engine';
 import { decodeEvent, encodeCommand, type EngineCommand } from './protocol';
 
 export { isNativeHost } from './engine';
@@ -33,7 +33,9 @@ export type NativeEngineHandle = EngineHandle & { readonly midi: NativeMidi };
 type Update =
   | { type: 'events'; words: number[]; heardFrame: number }
   | { type: 'input'; words: number[] }
-  | ({ type: 'ports' } & MidiPorts);
+  | ({ type: 'ports' } & MidiPorts)
+  /** What the listener heard in the live source; see `decodeChordSpans`. */
+  | { type: 'chords'; spans: number[]; heardFrame: number };
 
 interface Started {
   sampleRate: number;
@@ -70,6 +72,7 @@ export function frameTime(frame: number, heardFrame: number, sampleRate: number,
 
 export async function startNativeEngine(): Promise<NativeEngineHandle> {
   const listeners = new Set<EventListener>();
+  const chordListeners = new Set<LiveChordListener>();
   const portListeners = new Set<(ports: MidiPorts) => void>();
   const inputListeners = new Set<(cmd: EngineCommand) => void>();
   let ports: MidiPorts = { inputs: [], outputs: [] };
@@ -86,6 +89,10 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
         const timeMs = frameTime(event.frame, update.heardFrame, sampleRate, now);
         for (const listener of listeners) listener(event, timeMs);
       }
+    } else if (update.type === 'chords') {
+      const now = performance.now();
+      const spans = decodeChordSpans(update.spans, (frame) => frameTime(frame, update.heardFrame, sampleRate, now));
+      for (const listener of chordListeners) listener(spans);
     } else if (update.type === 'input') {
       const w = update.words;
       for (let i = 0; i + 3 < w.length; i += 4) {
@@ -120,6 +127,10 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
     onEvent(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    onLiveChords(listener) {
+      chordListeners.add(listener);
+      return () => chordListeners.delete(listener);
     },
     async loadSoundFont(bytes) {
       try {
@@ -170,6 +181,7 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
     },
     async close() {
       listeners.clear();
+      chordListeners.clear();
       channel.onmessage = () => {};
     },
     midi: {

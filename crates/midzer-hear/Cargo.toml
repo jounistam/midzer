@@ -1,0 +1,16 @@
+[package]
+name = "midzer-hear"
+description = "Hears a song as it plays: beats, downbeats and chords from two small neural networks (Beat This! and BTC), in plain Rust for the browser and the desktop."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+midzer-core = { path = "../midzer-core" }
+realfft = "3.5"
+
+[dev-dependencies]
+midzer-analyze = { path = "../midzer-analyze" }

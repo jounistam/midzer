@@ -6,9 +6,12 @@
 //! AudioWorklet on the web: commands come in through lock-free queues, events
 //! go out through another, and nothing on the audio thread allocates or locks.
 //! A forwarder thread hands events to the UI, plays MIDI out at the time each
-//! event is heard, and watches for MIDI devices coming and going.
+//! event is heard, and watches for MIDI devices coming and going. While live
+//! audio is followed, a listening thread runs `midzer-hear`'s networks over
+//! it: its beat grids go to the engine, its chords to the UI.
 
 mod audio;
+mod hear;
 mod midi;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -42,6 +45,10 @@ pub enum Update {
     Input { words: Vec<u32> },
     /// MIDI devices changed.
     Ports(Ports),
+    /// Chords the listener heard in the live source: [from, to, code,
+    /// predicted] per span, in engine frames, code root · 16 + quality or −1
+    /// (see `midzer-hear`'s ffi).
+    Chords { spans: Vec<f64>, heard_frame: f64 },
 }
 
 pub type UpdateFn = Box<dyn FnMut(Update) + Send>;
@@ -57,6 +64,10 @@ struct Shared {
     /// The live source to play along with, like the microphone.
     live: ArrayQueue<f32>,
     live_open: AtomicBool,
+    /// The live source again, block by block with engine frames, for the listener.
+    tap: ArrayQueue<hear::TapBlock>,
+    /// Bumped whenever live audio opens or closes: the listener starts afresh.
+    live_generation: AtomicU32,
     /// A freshly loaded synth for the audio thread, and old ones to drop elsewhere.
     synth_in: ArrayQueue<Box<Synth>>,
     synth_out: ArrayQueue<Box<Synth>>,
@@ -120,11 +131,19 @@ impl NativeEngine {
         let shared = ready_rx.recv().map_err(|_| "the audio thread stopped".to_string())??;
 
         let midi = Arc::new(Mutex::new(midi::Midi::new(shared.clone())));
+        let (chords_tx, chords_rx) = mpsc::channel();
         let forwarder = {
             let (shared, midi) = (shared.clone(), midi.clone());
             std::thread::Builder::new()
                 .name("midzer-forwarder".into())
-                .spawn(move || forward(shared, midi, on_update))
+                .spawn(move || forward(shared, midi, chords_rx, on_update))
+                .map_err(|e| e.to_string())?
+        };
+        let listener = {
+            let shared = shared.clone();
+            std::thread::Builder::new()
+                .name("midzer-listener".into())
+                .spawn(move || hear::listen(shared, chords_tx))
                 .map_err(|e| e.to_string())?
         };
         // Give the first callback a moment to measure the latency.
@@ -132,7 +151,7 @@ impl NativeEngine {
         while shared.latency_us.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
-        Ok(Self { shared, control, midi, threads: vec![audio_thread, forwarder] })
+        Ok(Self { shared, control, midi, threads: vec![audio_thread, forwarder, listener] })
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -213,7 +232,7 @@ impl Drop for NativeEngine {
 
 /// Moves events to the UI and MIDI out, drops replaced synths and rescans
 /// MIDI devices, until the engine stops.
-fn forward(shared: Arc<Shared>, midi: Arc<Mutex<midi::Midi>>, mut on_update: UpdateFn) {
+fn forward(shared: Arc<Shared>, midi: Arc<Mutex<midi::Midi>>, chords: mpsc::Receiver<Vec<f64>>, mut on_update: UpdateFn) {
     let mut last_scan = Instant::now() - PORT_SCAN_EVERY;
     let mut words = Vec::new();
     let mut inputs = Vec::new();
@@ -240,6 +259,9 @@ fn forward(shared: Arc<Shared>, midi: Arc<Mutex<midi::Midi>>, mut on_update: Upd
         }
         if !inputs.is_empty() {
             on_update(Update::Input { words: std::mem::take(&mut inputs) });
+        }
+        while let Ok(spans) = chords.try_recv() {
+            on_update(Update::Chords { spans, heard_frame: shared.heard_frame() });
         }
         while shared.synth_out.pop().is_some() {}
         while shared.track_out.pop().is_some() {}

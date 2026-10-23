@@ -97,6 +97,11 @@ pub enum Command {
     LiveDownbeat,
     /// The live beat is twice (or half) as fast as the one found.
     LiveTempo { double: bool },
+    /// Where the live beats fall, as a listener that heard the last seconds
+    /// says (`midzer-hear`): a beat at engine `frame` (its low 32 bits), the
+    /// beat's length in frames, which beat of the bar it is if known (0 is
+    /// the 1), and how sure it is (0–255).
+    LiveGuide { frame: u32, period: f32, one: Option<u8>, confidence: u8 },
 }
 
 mod op {
@@ -144,6 +149,7 @@ mod op {
     pub const SET_LIVE_OFFSET: u32 = 42;
     pub const LIVE_DOWNBEAT: u32 = 43;
     pub const LIVE_TEMPO: u32 = 44;
+    pub const LIVE_GUIDE: u32 = 45;
 }
 
 /// MIDI channel 10, where e-kits and drum pads send.
@@ -274,6 +280,7 @@ impl Command {
             Command::SetLiveOffset { ms } => [op::SET_LIVE_OFFSET, ms.to_bits(), 0, 0],
             Command::LiveDownbeat => [op::LIVE_DOWNBEAT, 0, 0, 0],
             Command::LiveTempo { double } => [op::LIVE_TEMPO, double as u32, 0, 0],
+            Command::LiveGuide { frame, period, one, confidence } => [op::LIVE_GUIDE, frame, period.to_bits(), one.map_or(0, |o| o as u32 + 1) | (confidence as u32) << 8],
         }
     }
 
@@ -361,6 +368,16 @@ impl Command {
             op::SET_LIVE_OFFSET => Some(Command::SetLiveOffset { ms: float(a).filter(|ms| ms.abs() <= 1000.0)? }),
             op::LIVE_DOWNBEAT => Some(Command::LiveDownbeat),
             op::LIVE_TEMPO => Some(Command::LiveTempo { double: a != 0 }),
+            op::LIVE_GUIDE => Some(Command::LiveGuide {
+                frame: a,
+                period: float(b).filter(|p| *p > 0.0)?,
+                one: match c & 0xff {
+                    0 => None,
+                    o @ 1..=4 => Some(o as u8 - 1),
+                    _ => return None,
+                },
+                confidence: (c >> 8) as u8,
+            }),
             _ => None,
         }
     }
@@ -433,6 +450,8 @@ mod tests {
             Command::SetLiveOffset { ms: -35.5 },
             Command::LiveDownbeat,
             Command::LiveTempo { double: true },
+            Command::LiveGuide { frame: 4_000_000_000, period: 22_050.5, one: Some(3), confidence: 200 },
+            Command::LiveGuide { frame: 7, period: 24_000.0, one: None, confidence: 0 },
         ] {
             assert_eq!(Command::decode(cmd.encode()), Some(cmd));
         }

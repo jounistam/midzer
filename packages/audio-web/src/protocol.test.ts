@@ -75,6 +75,11 @@ describe('encodeCommand', () => {
     expect(encodeCommand({ type: 'liveDownbeat' })).toEqual([43, 0, 0, 0]);
     expect(encodeCommand({ type: 'liveTempo', double: true })).toEqual([44, 1, 0, 0]);
     expect(encodeCommand({ type: 'liveTempo', double: false })).toEqual([44, 0, 0, 0]);
+    const guide = encodeCommand({ type: 'liveGuide', frame: 2 ** 32 + 7.4, period: 24_000, one: 3, confidence: 1 });
+    expect(guide.slice(0, 2)).toEqual([45, 7]);
+    expect(new Float32Array(new Uint32Array([guide[2]!]).buffer)[0]).toBe(24_000);
+    expect(guide[3]).toBe(4 | (255 << 8));
+    expect(encodeCommand({ type: 'liveGuide', frame: 10, period: 1, one: null, confidence: 0 })[3]).toBe(0);
   });
 
   it('knows each piece by its General MIDI key', () => {

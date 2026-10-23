@@ -204,6 +204,15 @@ pub unsafe extern "C" fn mz_live_ptr(host: *mut Host) -> *mut f32 {
     unsafe { (*host).live.as_mut_ptr() }
 }
 
+/// The engine frame of the next block's first sample (for the listener's input, see `midzer-hear`).
+///
+/// # Safety
+/// `host` must be a live pointer from [`mz_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mz_now(host: *const Host) -> f64 {
+    unsafe { (*host).engine.now() as f64 }
+}
+
 /// Tracks the beat of `frames` of the live source from [`mz_live_ptr`]; call before [`mz_process`].
 ///
 /// # Safety

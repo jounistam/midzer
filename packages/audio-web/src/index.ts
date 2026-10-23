@@ -1,8 +1,11 @@
 export {
+  decodeChordSpans,
   isNativeHost,
   startEngine,
   type EngineHandle,
   type EventListener,
+  type LiveChordListener,
+  type LiveChordSpan,
   type LiveDevice,
   type LiveSource,
   type MicOptions,
@@ -46,4 +49,5 @@ export {
   type TimedEvent,
 } from './protocol';
 export { RecordRing } from './ring';
+export { TapRing } from './tap';
 export type { MidiPort, MidiPorts, NativeEngineHandle, NativeMidi } from './native';

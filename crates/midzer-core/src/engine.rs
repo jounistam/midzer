@@ -219,6 +219,7 @@ impl Engine {
             Command::SetLiveOffset { ms } => self.live.set_offset(ms),
             Command::LiveDownbeat => self.live.set_downbeat(self.now),
             Command::LiveTempo { double } => self.live.scale_tempo(double),
+            Command::LiveGuide { frame, period, one, confidence } => self.live.guide(frame, period, one, confidence, self.now),
             Command::TrackClear { beats } => self.backing.clear_beats(beats as u32),
             Command::TrackBeat { index, seconds } => self.backing.set_beat(index as u32, seconds),
             Command::SetTrackDrums { on } => self.backing.set_drums(on),
@@ -238,6 +239,11 @@ impl Engine {
         let mut heard = HeardList::default();
         self.listener.push(input, &mut heard);
         self.on_heard(&heard);
+    }
+
+    /// The engine frame of the next block's first sample.
+    pub fn now(&self) -> u64 {
+        self.now
     }
 
     /// Feeds this block of the live source (see [`Command::SetLive`]), before [`Engine::process`].

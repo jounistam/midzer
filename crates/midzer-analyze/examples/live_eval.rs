@@ -3,6 +3,11 @@
 //!   cargo run --release -p midzer-analyze --example live_eval -- a.mp3 b.mp3 …
 //!
 //! The analysis is cached in `$EVAL_CACHE` (default: the system's temp dir).
+//! `BT_REF=<dir>` reads the reference from `<dir>/<name>.bt` instead ("time
+//! is_downbeat" per line, e.g. Beat This! on the whole song). `HEAR=1` runs
+//! the listener (`midzer-hear`) alongside, as the app's worker does, and
+//! sends its guides to the engine once each run would be done: the audio it
+//! heard plus its compute time here times `SLOW` (default 2, for wasm).
 //! Per file: when it first locks, the tempo it ends on, the share of the
 //! song's time it is locked at the reference tempo (or twice/half it), how
 //! many beats shown fall on a reference beat (±70 ms), and how many of the
@@ -22,7 +27,21 @@ struct Reference {
     oracle: Vec<(f32, bool)>,
 }
 
+/// A hand-made or neural reference (`$BT_REF/<name>.bt`: "time is_downbeat" per line), if given.
+fn external_reference(path: &str) -> Option<Reference> {
+    let dir = std::env::var("BT_REF").ok()?;
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let text = std::fs::read_to_string(format!("{dir}/{name}.bt")).ok()?;
+    let beats: Vec<(f32, bool)> = text.lines().filter_map(|l| l.split_once(' ')).map(|(t, d)| (t.parse().unwrap(), d == "1")).collect();
+    let mut iv: Vec<f32> = beats.windows(2).map(|w| w[1].0 - w[0].0).collect();
+    iv.sort_by(f32::total_cmp);
+    Some(Reference { bpm: 60.0 / iv[iv.len() / 2], oracle: beats.clone(), beats })
+}
+
 fn reference(path: &str, bytes: &[u8]) -> Reference {
+    if let Some(r) = external_reference(path) {
+        return r;
+    }
     let dir = std::env::var("EVAL_CACHE").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
     let name = path.rsplit('/').next().unwrap_or(path);
     let cache = format!("{dir}/{name}.ref");
@@ -110,6 +129,11 @@ fn evaluate(path: &str) -> Score {
 
     let mut engine = Engine::new(SR as f32);
     engine.handle(Command::SetLive { on: true });
+    let slow: f64 = std::env::var("SLOW").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
+    let mut hearing = (std::env::var("HEAR").as_deref() == Ok("1")).then(|| midzer_hear::Hearing::with_models(SR as f32).unwrap());
+    // Guides waiting for their run to finish: (ready at, in samples, command).
+    let mut guides: std::collections::VecDeque<(u64, Command)> = Default::default();
+    let mut busy_until = 0u64;
     let (mut locked, mut bpm, mut since) = (false, 0.0f32, 0.0f32);
     let tally = |locked: bool, bpm: f32, from: f32, to: f32, score: &mut Score| {
         if !locked {
@@ -127,6 +151,24 @@ fn evaluate(path: &str) -> Score {
         }
     };
     for (i, block) in audio.chunks(128).enumerate() {
+        let now = (i * 128 + block.len()) as u64;
+        if let Some(h) = hearing.as_mut() {
+            h.push(block, (i * 128) as u64);
+            // A busy worker takes the audio that came meanwhile when it is free again.
+            while busy_until <= now {
+                let start = std::time::Instant::now();
+                let Some(heard) = h.step() else { break };
+                let took = (start.elapsed().as_secs_f64() * slow * SR as f64) as u64;
+                busy_until = now + took;
+                if let midzer_hear::Heard::Grid(g) = heard {
+                    let command = Command::LiveGuide { frame: g.beat.round() as u64 as u32, period: g.period as f32, one: g.one, confidence: (g.confidence * 255.0) as u8 };
+                    guides.push_back((busy_until, command));
+                }
+            }
+            while guides.front().is_some_and(|g| g.0 <= now) {
+                engine.handle(guides.pop_front().unwrap().1);
+            }
+        }
         engine.listen_live(block);
         let events = engine.process(block.len() as u32);
         for t in events {

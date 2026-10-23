@@ -10,6 +10,7 @@ An interactive backing band: play a MIDI keyboard (or your computer keyboard) an
 | `crates/midzer-synth` | SoundFont playback of engine events (rustysynth). |
 | `crates/midzer-wasm` | Raw C-ABI wasm exports for the AudioWorklet; includes the no-allocation test. |
 | `crates/midzer-analyze` | Recordings → songs, plain DSP: decoding (mp3, m4a, FLAC, WAV, Ogg), beat tracking, tuning, key, a chord per beat (chroma + HMM), downbeats, sections and a rough melody. Built to wasm for the web app's worker and used natively by the desktop app. |
+| `crates/midzer-hear` | Hears live audio as it plays: beats, downbeats (Beat This! small) and chords (BTC), two small MIT networks ported to plain Rust, with their f16 weights in `models/` (converted by `scripts/models/export.py`). Built to wasm for the Play along worker and used natively by the desktop app. |
 | `crates/midzer-stems` | Desktop only: stem separation (HT-Demucs) and note transcription (basic-pitch) through ONNX Runtime, feeding cleaner sources into `midzer-analyze`. Models are downloaded on first use. |
 | `crates/midzer-native` | Native host for the desktop app: the engine in a cpal audio callback, MIDI through midir, the microphone and live audio. |
 | `apps/desktop` | Tauri 2 desktop app: the web UI with the native engine (`src-tauri`). |
@@ -60,6 +61,7 @@ In Learn, notes and chords fall onto the keyboard. With "Wait for me" on, the ba
 
 `cargo run --release -p midzer-analyze --example analyze -- song.mp3` prints what the analysis reads from a recording, and
 `cargo run --release -p midzer-stems --example transcribe -- song.mp3 models-dir [stems-dir]` runs the full desktop pipeline.
+`cargo run --release -p midzer-hear --example chord_dump -- song.mp3` prints the chords the live listener hears, run by run.
 
 `pnpm demo [out.wav] [bpm] [style]` renders any style (0 Pop, 1 Rock, 2 Funk, 3 Bossa, 4 Ballad, 5 Blues) with an intro, a variation change and the ending.
 

@@ -48,6 +48,7 @@ enum UiUpdate {
     Events { words: Vec<u32>, heard_frame: f64 },
     Input { words: Vec<u32> },
     Ports { inputs: Vec<Port>, outputs: Vec<Port> },
+    Chords { spans: Vec<f64>, heard_frame: f64 },
 }
 
 impl From<Ports> for UiUpdate {
@@ -79,6 +80,7 @@ fn engine_start(state: State<AppEngine>, on_update: Channel<UiUpdate>) -> Result
             Update::Events { words, heard_frame } => UiUpdate::Events { words, heard_frame },
             Update::Input { words } => UiUpdate::Input { words },
             Update::Ports(ports) => ports.into(),
+            Update::Chords { spans, heard_frame } => UiUpdate::Chords { spans, heard_frame },
         };
         let _ = on_update.send(update);
     }))?;

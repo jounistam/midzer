@@ -50,6 +50,7 @@ const Cmd = {
   SetLiveOffset: 42,
   LiveDownbeat: 43,
   LiveTempo: 44,
+  LiveGuide: 45,
 } as const;
 
 /** Ticks per beat in song positions; mirrors `PPQ` in style.rs. */
@@ -219,7 +220,13 @@ export type EngineCommand =
   /** The live beat heard nearest to now is a 1. */
   | { type: 'liveDownbeat' }
   /** The live beat is twice (or half) as fast as the one found. */
-  | { type: 'liveTempo'; double: boolean };
+  | { type: 'liveTempo'; double: boolean }
+  /**
+   * Where the live beats fall, as the listener heard them (crates/midzer-hear):
+   * a beat at engine `frame`, `period` frames apart, which beat of the bar it
+   * is (0 is the 1; null unknown) and how sure it is, 0..1.
+   */
+  | { type: 'liveGuide'; frame: number; period: number; one: number | null; confidence: number };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -332,6 +339,11 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.LiveDownbeat, 0, 0, 0];
     case 'liveTempo':
       return [Cmd.LiveTempo, cmd.double ? 1 : 0, 0, 0];
+    case 'liveGuide': {
+      const one = cmd.one === null ? 0 : (cmd.one & 3) + 1;
+      const confidence = Math.round(Math.min(Math.max(cmd.confidence, 0), 1) * 255);
+      return [Cmd.LiveGuide, Math.round(cmd.frame) >>> 0, floatBits(cmd.period), one | (confidence << 8)];
+    }
   }
 }
 

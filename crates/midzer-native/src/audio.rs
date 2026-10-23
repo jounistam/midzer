@@ -66,6 +66,7 @@ pub(crate) fn own_streams(control: mpsc::Receiver<Control>, ready: mpsc::Sender<
             }
             Control::OpenLive(id, reply) => {
                 shared.live_open.store(false, Ordering::Release);
+                shared.live_generation.fetch_add(1, Ordering::AcqRel);
                 // The old stream closes first: some devices take one stream at a time.
                 drop(live.take());
                 while shared.live.pop().is_some() {}
@@ -82,6 +83,7 @@ pub(crate) fn own_streams(control: mpsc::Receiver<Control>, ready: mpsc::Sender<
             }
             Control::CloseLive => {
                 shared.live_open.store(false, Ordering::Release);
+                shared.live_generation.fetch_add(1, Ordering::AcqRel);
                 drop(live.take());
                 while shared.live.pop().is_some() {}
             }
@@ -121,6 +123,8 @@ fn open_output(host: &cpal::Host) -> Result<(Arc<Shared>, Stream), String> {
         mic_open: AtomicBool::new(false),
         live: ArrayQueue::new(MIC_QUEUE),
         live_open: AtomicBool::new(false),
+        tap: ArrayQueue::new(crate::hear::TAP_BLOCKS),
+        live_generation: AtomicU32::new(0),
         synth_in: ArrayQueue::new(1),
         synth_out: ArrayQueue::new(4),
         track_in: ArrayQueue::new(1),
@@ -329,6 +333,8 @@ impl Renderer {
             if following {
                 let got = take_input(&shared.live, &mut self.live[..n]);
                 if got > 0 {
+                    // The listener gets it too; if it is behind, it misses a block.
+                    let _ = shared.tap.push(crate::hear::TapBlock::new(self.engine.now(), &self.live[..got]));
                     self.engine.listen_live(&self.live[..got]);
                 }
             }

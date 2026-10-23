@@ -2027,7 +2027,7 @@ code {
 .jam-stage .along-strip {
   flex: none;
   display: grid;
-  grid-template-columns: minmax(160px, auto) 1fr minmax(180px, 260px);
+  grid-template-columns: minmax(160px, auto) minmax(160px, auto) 1fr minmax(180px, 260px);
   align-items: center;
   gap: var(--space-6);
   padding: var(--space-4) var(--space-6);
@@ -2049,6 +2049,27 @@ code {
 }
 
 .along-bpm.empty {
+  color: var(--color-text-muted);
+}
+
+.along-chord {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.along-chord-name {
+  margin: 0;
+  font-family: var(--font-family-display);
+  font-size: clamp(40px, 4vw, 64px);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--color-accent-default);
+  white-space: nowrap;
+}
+
+.along-chord-name.empty {
   color: var(--color-text-muted);
 }
 

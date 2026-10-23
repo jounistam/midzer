@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/midzer-core", "crates/midzer-synth", "crates/midzer-wasm", "crates/midzer-analyze", "crates/midzer-stems", "crates/midzer-native", "apps/desktop/src-tauri"]
+members = ["crates/midzer-core", "crates/midzer-synth", "crates/midzer-wasm", "crates/midzer-analyze", "crates/midzer-hear", "crates/midzer-stems", "crates/midzer-native", "apps/desktop/src-tauri"]
 # The native host and the desktop app need system audio and webview libraries;
 # plain `cargo build`/`cargo test` leave them out (see README).
-default-members = ["crates/midzer-core", "crates/midzer-synth", "crates/midzer-wasm", "crates/midzer-analyze"]
+default-members = ["crates/midzer-core", "crates/midzer-synth", "crates/midzer-wasm", "crates/midzer-analyze", "crates/midzer-hear"]
 
 [workspace.package]
 version = "0.1.0"

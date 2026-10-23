@@ -2115,6 +2115,7 @@ name = "midzer-analyze"
 version = "0.1.0"
 dependencies = [
  "midzer-core",
+ "midzer-hear",
  "midzer-synth",
  "realfft",
  "serde",
@@ -2140,6 +2141,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "midzer-hear"
+version = "0.1.0"
+dependencies = [
+ "midzer-analyze",
+ "midzer-core",
+ "realfft",
+]
+
+[[package]]
 name = "midzer-native"
 version = "0.1.0"
 dependencies = [
@@ -2147,6 +2157,7 @@ dependencies = [
  "crossbeam-queue",
  "midir",
  "midzer-core",
+ "midzer-hear",
  "midzer-synth",
 ]
 
