@@ -1,8 +1,10 @@
 //! Offline analysis of a recording into a song for the band: the beat grid
 //! and tempo, the key, a chord per beat, bars and sections, and a melody.
 //!
-//! Everything here is plain DSP with no models, so it runs the same in the
-//! browser (as wasm in a worker, see `ffi`) and in the desktop app. The
+//! The beats, the 1s and the chords come from the networks of `midzer-hear`
+//! run over the whole song (plain DSP when they find no steady beat); the
+//! key, tuning, sections and melody are plain DSP. It all runs the same in
+//! the browser (as wasm in a worker, see `ffi`) and in the desktop app. The
 //! desktop app's stem separation (`midzer-stems`) feeds cleaner sources into
 //! [`analyze`]: the harmony without drums and vocals, and transcribed notes.
 
@@ -36,6 +38,9 @@ pub const RATE: u32 = 22_050;
 pub const MAX_BARS: usize = 512;
 const MAX_MELODY_NOTES: usize = 8192;
 const MIN_BEATS: usize = 16;
+/// The share of [`analyze`]'s progress done after the beats and the chords.
+const BEATS_DONE: f32 = 0.35;
+const CHORDS_DONE: f32 = 0.6;
 
 /// What the analysis is doing, for progress reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,14 +179,24 @@ pub fn analyze_file(bytes: Vec<u8>, progress: Progress) -> Result<Analysis, Stri
 pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analysis, String> {
     let mut warnings = Vec::new();
     progress(0.0, Step::Beats);
-    let onsets = beats::onsets(mix);
-    let period = beats::tempo_period(&onsets.all);
-    let beat_frames = beats::track(&onsets.all, period);
-    if beat_frames.len() < MIN_BEATS {
-        return Err("No steady beat was found in this recording.".into());
-    }
-    let fps = beats::frames_per_second();
-    let beat_times: Vec<f32> = beat_frames.iter().map(|&f| f as f32 / fps).collect();
+    // The networks hear the beats and the 1s; plain DSP when they find too few.
+    let heard = midzer_hear::hear_beats(mix, &mut |f| progress(BEATS_DONE * f, Step::Beats)).unwrap_or_else(|e| {
+        eprintln!("midzer: the beat network did not run: {e}");
+        Default::default()
+    });
+    let neural = heard.0.len() >= MIN_BEATS;
+    let (beat_times, dsp) = if neural {
+        (heard.0.iter().map(|&t| t as f32).collect::<Vec<f32>>(), None)
+    } else {
+        let onsets = beats::onsets(mix);
+        let period = beats::tempo_period(&onsets.all);
+        let beat_frames = beats::track(&onsets.all, period);
+        if beat_frames.len() < MIN_BEATS {
+            return Err("No steady beat was found in this recording.".into());
+        }
+        let fps = beats::frames_per_second();
+        (beat_frames.iter().map(|&f| f as f32 / fps).collect(), Some((onsets, beat_frames)))
+    };
     let mut intervals: Vec<f32> = beat_times.windows(2).map(|w| w[1] - w[0]).collect();
     intervals.sort_by(f32::total_cmp);
     let beat_seconds = intervals[intervals.len() / 2];
@@ -189,7 +204,7 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
     if spread > 1.15 {
         warnings.push("The tempo changes during the recording: the band plays at its usual tempo, the recording keeps its own.".into());
     }
-    progress(0.3, Step::Chords);
+    progress(BEATS_DONE, Step::Chords);
 
     let harmony = extras.harmony.as_deref().unwrap_or(mix);
     let frames = chroma::frame_peaks(harmony);
@@ -197,15 +212,29 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
     let per_beat = chroma::per_beat(&frames, tuning, &beat_times);
     drop(frames);
     let key = chords::key(&per_beat);
-    let first_pass = chords::decode(&per_beat, key, chords::Meter::Unknown);
-    let strength = |env: &[f32]| -> Vec<f32> {
-        beat_frames.iter().map(|&f| env[f.saturating_sub(2)..(f + 3).min(env.len())].iter().fold(0.0f32, |m, &v| m.max(v))).collect()
+    let (phase, mut beat_chords) = match dsp {
+        None => {
+            let (beats, downbeats) = &heard;
+            let (phase, waltz) = bar_phase(beats, downbeats);
+            if waltz {
+                warnings.push("The song sounds like it has three beats to the bar; midzer counts four.".into());
+            }
+            let spans = midzer_hear::hear_chords(harmony, &mut |f| progress(BEATS_DONE + (CHORDS_DONE - BEATS_DONE) * f, Step::Chords))?;
+            let chords = beats.iter().enumerate().map(|(i, &t)| midzer_hear::chord_over(&spans, t, beats.get(i + 1).copied().unwrap_or(t + beat_seconds as f64)).flatten()).collect();
+            (phase, chords)
+        }
+        Some((onsets, beat_frames)) => {
+            let first_pass = chords::decode(&per_beat, key, chords::Meter::Unknown);
+            let strength = |env: &[f32]| -> Vec<f32> {
+                beat_frames.iter().map(|&f| env[f.saturating_sub(2)..(f + 3).min(env.len())].iter().fold(0.0f32, |m, &v| m.max(v))).collect()
+            };
+            let phase = structure::downbeat_phase(&first_pass, &strength(&onsets.low), &strength(&onsets.all));
+            (phase, chords::decode(&per_beat, key, chords::Meter::Bars { phase }))
+        }
     };
-    let phase = structure::downbeat_phase(&first_pass, &strength(&onsets.low), &strength(&onsets.all));
-    let mut beat_chords = chords::decode(&per_beat, key, chords::Meter::Bars { phase });
     chords::hold_short_gaps(&mut beat_chords, 8);
     chords::with_bass(&mut beat_chords, &per_beat);
-    progress(0.55, Step::Sections);
+    progress(CHORDS_DONE, Step::Sections);
 
     // Bars start at the first downbeat; beats before it are a pickup and left out.
     let first = phase;
@@ -238,7 +267,7 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
         })
         .collect();
     let sections = structure::sections(&bars, &loudness).into_iter().map(|(bar, p)| SectionOut { bar, part: p.name() }).collect();
-    progress(0.65, Step::Melody);
+    progress(CHORDS_DONE + 0.1, Step::Melody);
 
     // Times in the recording to beats from the first downbeat.
     let to_beats = |t: f32| -> f32 {
@@ -305,6 +334,20 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
     })
 }
 
+/// Which beat (mod 4) the bars start on, by the downbeats' majority, and
+/// whether they mostly come three beats apart.
+fn bar_phase(beats: &[f64], downbeats: &[f64]) -> (usize, bool) {
+    let index: Vec<usize> = downbeats.iter().filter_map(|d| beats.iter().position(|b| b == d)).collect();
+    let mut votes = [0usize; 4];
+    for &i in &index {
+        votes[i % 4] += 1;
+    }
+    let phase = (0..4).max_by_key(|&p| (votes[p], std::cmp::Reverse(p))).unwrap_or(0);
+    let gaps: Vec<usize> = index.windows(2).map(|w| w[1] - w[0]).collect();
+    let threes = gaps.iter().filter(|&&g| g == 3).count();
+    (phase, gaps.len() >= 4 && threes * 2 > gaps.len())
+}
+
 fn velocity(level: f32) -> u8 {
     (40.0 + 80.0 * level.clamp(0.0, 1.0)).round() as u8
 }
@@ -336,4 +379,22 @@ fn quantize_melody(notes: &[TimedNote], to_beats: &dyn Fn(f32) -> f32, total_bea
         out.push(NoteOut { at, len, key: n.key, velocity: velocity(n.level) });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bars_start_where_most_downbeats_fall() {
+        let beats: Vec<f64> = (0..40).map(|i| i as f64 * 0.5).collect();
+        // The 1s on beats 2, 6, 10…, one stray on 7.
+        let mut downbeats: Vec<f64> = (0..10).map(|b| beats[2 + 4 * b]).filter(|&t| t < 20.0).collect();
+        downbeats.push(beats[7]);
+        downbeats.sort_by(f64::total_cmp);
+        assert_eq!(bar_phase(&beats, &downbeats), (2, false));
+        let waltz: Vec<f64> = (0..13).map(|b| beats[1 + 3 * b]).collect();
+        assert!(bar_phase(&beats, &waltz).1, "three beats to the bar");
+        assert_eq!(bar_phase(&beats, &[]), (0, false));
+    }
 }

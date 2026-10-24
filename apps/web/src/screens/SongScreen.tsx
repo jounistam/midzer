@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChartView, type Selection } from '../components/ChartView';
 import { BandMutes, EnergyControl, PlayButton, TakeButton, TempoControl } from '../components/ControlPanel';
 import { Keyboard } from '../components/Keyboard';
@@ -9,6 +9,7 @@ import { useStageHeight } from '../components/stageHeight';
 import { TimingReport } from '../components/TimingReport';
 import { TopBar } from '../components/TopBar';
 import {
+  analyzeSongAgain,
   closeSong,
   editSong,
   saveSong,
@@ -21,6 +22,7 @@ import {
   useSession,
   type LoopRange,
 } from '../session';
+import { STEP_LABELS } from '../songs/audio';
 import { isBuiltin } from '../songs/library';
 import {
   emptyBar,
@@ -84,6 +86,7 @@ export function SongScreen() {
         <aside className="panel control-panel">
           <PlayButton className="full" />
           {song.backing && <RecordingControl />}
+          {song.backing && !isBuiltin(song) && <AnalyseAgain />}
           {recording && <MissSoundControl />}
           <LoopControl song={song} selection={selection} />
           {!recording && (
@@ -150,6 +153,71 @@ function RecordingControl() {
         <p className="setting-note">
           The recording keeps its own tempo; the chart follows its beat.
           {!recording.drumStem && ' Separate the instruments on import (desktop app) to play it without its drums.'}
+        </p>
+      )}
+    </div>
+  );
+}
+
+type Reading = { type: 'idle' } | { type: 'confirm' } | { type: 'working'; fraction: number; step: number } | { type: 'error'; message: string };
+
+/** Reads the song's recording again with the current analysis; it replaces the chords and beat map, hand edits included. */
+function AnalyseAgain() {
+  const [state, setState] = useState<Reading>({ type: 'idle' });
+  const abort = useRef<AbortController | null>(null);
+  useEffect(() => () => abort.current?.abort(), []);
+  const start = () => {
+    const controller = new AbortController();
+    abort.current = controller;
+    setState({ type: 'working', fraction: 0, step: 0 });
+    analyzeSongAgain((fraction, step) => !controller.signal.aborted && setState({ type: 'working', fraction, step }), controller.signal)
+      .then(() => !controller.signal.aborted && setState({ type: 'idle' }))
+      .catch((e: unknown) => !controller.signal.aborted && setState({ type: 'error', message: e instanceof Error ? e.message : String(e) }));
+  };
+  const cancel = () => {
+    abort.current?.abort();
+    setState({ type: 'idle' });
+  };
+  const pct = state.type === 'working' ? Math.round(state.fraction * 100) : 0;
+  return (
+    <div className="control-group">
+      <p className="label">Beat and chords</p>
+      {(state.type === 'idle' || state.type === 'error') && (
+        <button className="btn btn-secondary" onClick={() => setState({ type: 'confirm' })}>
+          Analyse again
+        </button>
+      )}
+      {state.type === 'confirm' && (
+        <>
+          <p className="setting-note">Reads the recording again for the beat, chords and sections. Your changes to the chords are replaced.</p>
+          <div className="actions">
+            <button className="btn btn-primary" onClick={start}>
+              Replace them
+            </button>
+            <button className="btn btn-ghost" onClick={cancel}>
+              Cancel
+            </button>
+          </div>
+        </>
+      )}
+      {state.type === 'working' && (
+        <>
+          <div className="status-line" role="status">
+            <span>
+              {STEP_LABELS[state.step] ?? 'Listening'}… {pct}%
+            </span>
+            <span className="progress" aria-hidden>
+              <span style={{ width: `${pct}%` }} />
+            </span>
+          </div>
+          <button className="btn btn-ghost" onClick={cancel}>
+            Cancel
+          </button>
+        </>
+      )}
+      {state.type === 'error' && (
+        <p className="status-line error" role="alert">
+          {state.message}
         </p>
       )}
     </div>

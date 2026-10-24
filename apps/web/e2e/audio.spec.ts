@@ -60,6 +60,18 @@ test('songs: a recording becomes a chart', async ({ page }) => {
   for (const [bar, chord] of [[1, 'C'], [2, 'Am'], [3, 'F'], [4, 'G'], [5, 'C']] as const) {
     await expect(page.getByRole('button', { name: new RegExp(`^Bar ${bar}: ${chord}($|[ ,])`) })).toBeVisible();
   }
+  // Reading it again asks first, then puts the chart back as read.
+  await page.getByRole('button', { name: 'Edit chart' }).click();
+  await page.getByRole('button', { name: 'Edit as text' }).click();
+  await page.getByLabel('Chart as text').fill('D | D | D | D');
+  await page.getByRole('button', { name: 'Apply' }).click();
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.getByRole('button', { name: /^Bar 1: D($|[ ,])/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Analyse again' }).click();
+  await page.getByRole('button', { name: 'Replace them' }).click();
+  await expect(page.getByRole('button', { name: /^Bar 2: Am($|[ ,])/ })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole('button', { name: 'Analyse again' })).toBeVisible();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   // It is saved to My songs.
   await page.getByRole('button', { name: 'Back' }).click();
   await expect(page.getByRole('button', { name: /^band take/ })).toBeVisible();

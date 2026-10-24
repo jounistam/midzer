@@ -75,7 +75,7 @@ export function AudioImport({
             <p className="setting-note">
               {stems
                 ? 'Splits the recording into drums, bass, other instruments and vocals first: cleaner chords, the melody from the voice and the parts as MIDI. Takes a few minutes; the first time it downloads 166 MB of models.'
-                : 'Beat, chords and sections in a few seconds, with a rough guess at the melody.'}
+                : 'Beat, chords and sections in under a minute, with a rough guess at the melody.'}
             </p>
             <div className="actions">
               <button className="btn btn-primary" onClick={() => start(stems)}>

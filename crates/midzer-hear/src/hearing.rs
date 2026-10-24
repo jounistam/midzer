@@ -560,9 +560,9 @@ fn triad(c: Chord) -> (u8, bool) {
     (c.root, matches!(c.quality, Minor | Minor6 | Minor7 | HalfDiminished7 | Diminished | Diminished7))
 }
 
-/// The chord heard longest from stream sample `a` to `b`, or `None` when
-/// less than half of that was heard.
-fn chord_over(chords: &[(f64, f64, Option<Chord>)], a: f64, b: f64) -> Option<Option<Chord>> {
+/// The chord heard longest from `a` to `b` (in the chords' own time unit),
+/// or `None` when less than half of that was heard.
+pub fn chord_over(chords: &[(f64, f64, Option<Chord>)], a: f64, b: f64) -> Option<Option<Chord>> {
     let mut tally: Vec<(Option<Chord>, f64)> = Vec::new();
     let mut heard = 0.0;
     for c in &chords[chords.partition_point(|c| c.1 <= a)..] {
@@ -625,7 +625,7 @@ fn tune(k: &str, d: f32) -> f32 { std::env::var(k).ok().and_then(|v| v.parse().o
 
 /// Beat This!'s own peak picking: frames above zero that are the highest
 /// within three frames each way, neighbours merged. (frame, logit).
-fn peaks(logits: &[f32]) -> Vec<(f64, f32)> {
+pub(crate) fn peaks(logits: &[f32]) -> Vec<(f64, f32)> {
     let n = logits.len();
     let mut out: Vec<(f64, f32, usize)> = Vec::new();
     for j in 0..n {
@@ -690,7 +690,7 @@ fn fit(beats: &[f64]) -> Option<(f64, f64, f32)> {
 }
 
 /// Chords that last a single frame take their neighbour's.
-fn smooth(classes: &mut [usize]) {
+pub(crate) fn smooth(classes: &mut [usize]) {
     for t in 1..classes.len().saturating_sub(1) {
         if classes[t] != classes[t - 1] && classes[t] != classes[t + 1] {
             classes[t] = classes[t - 1];

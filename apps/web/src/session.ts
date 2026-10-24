@@ -56,8 +56,8 @@ import { COUNT_IN_OPTIONS, countInPieces, type CountInChoice } from './drums/sta
 import { offsetToBeat, SYNC_TAPS, syncedOffset } from './playalong/sync';
 import { qwertyToNote } from './qwerty';
 import { isBuiltin, saveUserSong } from './songs/library';
-import { decodeRecording } from './songs/analyzeAudio';
-import { transcriptionMidi } from './songs/audio';
+import { analyzeAudio, decodeRecording } from './songs/analyzeAudio';
+import { songFromAnalysis, transcriptionMidi } from './songs/audio';
 import { Recorder } from './songs/recorder';
 import { loadRecording } from './songs/recordings';
 import { chartCommands, newSongId, trackCommands, type Song } from './songs/song';
@@ -1039,6 +1039,38 @@ async function loadSongRecording(): Promise<void> {
   } catch (e) {
     if (current()) set({ recording: { status: 'error', message: e instanceof Error ? e.message : String(e) } });
   }
+}
+
+/**
+ * Reads the open song's stored recording again and replaces what was read
+ * from it: the beat map, tempo, chords and sections, and a melody guessed
+ * from the mix. Title, style, lyrics where the bars line up, separated stems
+ * and their parts stay. The song is then unsaved, like any edit.
+ */
+export async function analyzeSongAgain(onProgress: (fraction: number, step: number) => void, signal?: AbortSignal): Promise<void> {
+  const song = get().song;
+  if (!song?.backing) throw new Error('This song was not read from a recording.');
+  const bytes = await loadRecording(song.id);
+  if (!bytes) throw new Error('The recording is no longer kept on this device. Import it again to read it again.');
+  const analysis = await analyzeAudio(bytes, { stems: false, onProgress, signal });
+  const current = get().song;
+  if (signal?.aborted || current?.id !== song.id || !current.backing) return;
+  const { song: fresh, notes } = songFromAnalysis(analysis, current.title);
+  const next: Song = {
+    ...current,
+    bpm: fresh.bpm,
+    bars: fresh.bars.map((b, i) => (current.bars[i]?.lyric ? { ...b, lyric: current.bars[i]!.lyric } : b)),
+    backing: { ...current.backing, ...fresh.backing },
+  };
+  // A melody from the separated vocals beats one guessed from the mix.
+  if (!current.backing.stemsDir) {
+    if (fresh.melody) next.melody = fresh.melody;
+    else delete next.melody;
+  }
+  editSong(next);
+  set({ songNotes: notes });
+  setTempo(next.bpm);
+  if (get().recording.status === 'ready') for (const cmd of trackCommands(next.backing!)) send(cmd);
 }
 
 function unloadRecording(): void {
