@@ -20,6 +20,13 @@ Existing pieces this builds on:
 
 ---
 
+## Status (2026-10-24)
+- Slices 1 and 2 are built; results and what is open are in `docs/PLAN.md` Status ("Accurate stored songs").
+- Changes from the plan:
+  - Slice 1: `Live` ignores guides whose beat is before the last start-over, because a network run already under way re-locked the tracker to the old song.
+  - Slice 2: downbeats were 0.58 → 0.63 F only. The network's own downbeats score 0.91, but one bar phase for the whole song misplaces the 1 after odd bars (2, 3 or 5 beats) that most of the test songs have. Undecided: let the phase change mid-song (the 4-beats-per-bar `Analysis` and chart can't show an odd bar), or leave it to slice 5's downbeat editing. Ask the user.
+- Measuring slice 2 again: `offline_dump` on `files24.txt` (24 songs, ~20 s each natively, under a 4 GB cap) → `score.py` with the Python in `~/.claude/jobs/05b3b04b/tmp/venv` (it has mir_eval; `~/venv` doesn't).
+
 ## Slice 1: reset after silence + a reset button
 
 **Core (`crates/midzer-core`)**
