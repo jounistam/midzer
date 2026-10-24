@@ -6,7 +6,7 @@ Live play-along guesses everything from the last 8–16 s. Beat This! and BTC se
 
 The goal is super-accurate beats. The way there is to analyse a song once, with full context, store it, then recognise it and follow the stored grid.
 
-The user chose to build it in slices. This plan details slices 1–4; slice 5 is outlined and gets its own plan later.
+The user chose to build it in slices. This plan details all five slices; slice 5 was planned after slice 4 was built.
 - Songs are identified by **metadata when available, and a local audio fingerprint otherwise**.
 - Songs learned from live audio store **analysis + fingerprint only, no audio**.
 
@@ -21,7 +21,7 @@ Existing pieces this builds on:
 ---
 
 ## Status (2026-10-24)
-- Slices 1–4 are built; results and what is open are in `docs/PLAN.md` Status ("Accurate stored songs").
+- Slices 1–4 are built; results and what is open are in `docs/PLAN.md` Status ("Accurate stored songs"). Slice 5 is planned (below), to be built as 5a then 5b.
 - Changes from the plan:
   - Slice 1: `Live` ignores guides whose beat is before the last start-over, because a network run already under way re-locked the tracker to the old song.
   - Slice 2: downbeats were 0.58 → 0.63 F only. The network's own downbeats score 0.91, but one bar phase for the whole song misplaces the 1 after odd bars (2, 3 or 5 beats) that most of the test songs have. The user chose (2026-10-24) to keep one phase and leave wrong 1s to slice 5's downbeat editing.
@@ -240,15 +240,128 @@ What exists (slice 3): `midzer_hear::fingerprint(&[f32] at 22.05 kHz) -> Vec<(ha
 - A change between two unknown songs without a silence (gapless playlists) is still captured as one; novelty detection (tempo, key, chroma) is left for later.
 - The bar phase is one per song, as in slice 2; wrong 1s are fixed in slice 5.
 
-## Slice 5 (own plan later): fix beats and chords
-- Found in slice 4: stored maps have stray beats in places (`hear_eval KNOWN=1` prints how well each stored map matches the reference, as "stored"), and the one bar phase is often wrong. The listener gets fixed maps the next time a source opens: the library is sent then, and when a learned song is kept, but not on edits.
-- A timeline editor in `SongScreen` showing the waveform (stored recording) or the onset envelope (live-learned), with beat lines and chord blocks. It lets you:
-  - drag or nudge the downbeat;
-  - halve or double the tempo;
-  - add a tempo change point;
-  - tap along to re-grid a selection;
-  - drag a chord edge to a beat, and change a chord by picking or typing it.
-- The live-learned envelope is `Song.heard.envelope`: a `Uint8Array`, 100 frames a second, 0–255 for −60–0 dBFS (`envelope` in `crates/midzer-analyze/src/lib.rs`).
-- The bar phase is one per song (the user's choice for slice 2's open question): fixing wrong 1s by hand belongs here.
-- Edits are stored on the song and survive "Analyse again" (merge, or ask).
-- Corrections to live-learned songs also tune their fingerprint offset.
+## Slice 5: bars of any length, then fix beats and chords by hand
+The user chose (2026-10-24):
+- **bars of any length** (1–7 beats) in the chart, the engine, the tempo map and following, rather than squeezing odd bars into 4/4;
+- the **analysis places the odd bars itself** from the network's downbeats, in this slice;
+- **"Analyse again" asks** when a song has hand fixes: "Keep my fixes" or "Replace all".
+
+Why: wrong 1s come after odd bars (2, 3 or 5 beats), which one bar phase per song can't hold (downbeats 0.63 F against the network's own 0.91). A 4-beat chart can't hold them either, so an editor alone couldn't fix them.
+
+It is built in two parts, measured in between: **5a** bars of any length + bars from the network's downbeats; **5b** the timeline editor + keeping fixes.
+
+The rule throughout: **song beats stay numbered from the start of the song, one after another**. So `SongChord.beat`, `TrackBeat.index`, `SongPosition.beat`, `SongWait.tick`, `Song.backing/heard.beatTimes` and the library's per-beat chords keep their meaning. Only what turns bars into beats and back changes: `bar * 4` → `bar_start(bar)`, `beat / 4`, `beat % 4` → a lookup. Jam, the drill progressions and live sources with no stored song stay 4/4.
+
+### 5a. Bars of any length
+
+**Chart model (`apps/web/src/songs/song.ts`)**
+- A bar's length is `bar.beats.length`, 1–7. `BEATS_PER_BAR` stays as the default. New helpers: `barStarts(bars)` (prefix sums, with the total at the end), `totalBeats(bars)`, and `barAt(starts, beat) -> { bar, beat }`.
+- Notation: a `[3/4]` tag (any `[n/4]`, n 1–7) sets the length from its bar on, until the next one, as a time signature does. `%` copies the previous bar, its length included.
+- `spread(tokens, n)`: one chord fills the bar; two split it at n/2 when n is even; otherwise one per beat from the start (as today for 3 chords in 4/4).
+- `formatBar` is the inverse; `formatChart` writes `[n/4]` where the length changes. It round-trips with `parseChart`.
+- `emptyBar(n = 4)`. `chartCommands` sends chords at the bar's start beat and a `songBar` for each bar that isn't 4 beats long. `MAX_TRACK_BEATS` = `MAX_BARS * 7 + 1`, matched in Rust.
+- `library.ts` sanitise accepts lengths 1–7. Stored songs are all 4/4 and stay valid: no DB version.
+
+**Engine (`crates/midzer-core`)**
+- `command.rs`: a new `Command::SongBar { bar, beats }`, sent after `SongClear` (which resets every bar to 4). Encoded with the song ops, plus the round-trip test.
+- `song.rs` `SongPlayer`:
+  - adds `bar_beats: [u8; MAX_SONG_BARS]` and `bar_start: [u16; MAX_SONG_BARS + 1]`, recomputed on `SongBar` (that is a command, not the audio path). `slots` is sized `MAX_SONG_BARS * 7`.
+  - `bar_start(bar)`, `bar_of(beat)` (a binary search in `bar_start`; no allocation).
+  - `on_beat()` no longer takes `beat_in_bar` from the band. It returns it, with the bar's length, from its own `next_beat`. Seeks, loops, `upcoming`, `slot`, `chord_at` and `start` use `bar_start`.
+  - Marks are asked for on beat 1 as now, or beat 0 in a 1-beat bar.
+- `band.rs`: while a song plays, the bar comes from the song. The band keeps `bar_start_tick`, the bar's length and a pattern-bar counter, set on each downbeat:
+  - `schedule_range` and `restrike` schedule only the current bar, `bar_start_tick .. + beats·PPQ`. The walk is beat by beat, so a bar's length is known before it is scheduled.
+  - `Pattern::bar(index, beats)` (`style.rs`): a shorter bar plays the pattern's first `beats` beats. A longer one plays its 4 beats and then repeats its beats 3–4 (the second half) for the rest. Patterns stay written in 4/4.
+  - The `Beat` event, the click accent, `waits_on_beat` and the conductor get the song's bar and beat-in-bar.
+  - Without a song, nothing changes (4 per bar).
+- `conductor.rs`: the half-bar decision is at `beats / 2` (beat 0 in a 1-beat bar).
+- `drummer.rs`: a fill takes the last two beats of the bar (the whole bar if it is shorter). The count-in stays 4 hits.
+- `backing.rs`:
+  - starting a bar early, `jump_target`, `chart_beats`, seeks, loops and the `Beat` event go through `chart.bar_start` / `bar_of`. `play()` gets the chart.
+  - The bpm per bar is measured over that bar's beats.
+  - `judge()` maps the beat through the chart: `sixteenth = (k − bar_start) · 4 + nearest`, which goes up to 27 (it still fits the u8). `keys_strike` uses the absolute sixteenth.
+- `event.rs`: only docs change (`Beat.beat` up to 6, `Judged.sixteenth` up to 27).
+
+**Following a stored song with odd bars**
+- `live.rs` counts its bars mod 4 from the guide's 1. With odd bars that is wrong for up to a guide's interval after each one.
+- New `Command::LiveBar { frame, beats }`: "a bar of `beats` beats starts at the beat at `frame`".
+  - The listener sends each bar line from the stored map a few beats ahead, since it knows them.
+  - `Live` keeps up to 8 upcoming bar lines in a fixed ring. Its `Beat` events, its 1 and the judging use them, and fall back to mod 4 once they run out (the song ended, or a live source with no stored song).
+  - `LiveForgot`/`LiveReset` clear them.
+- `hearing.rs` follow mode: the stored 1s come from the song's bar starts, not `j % 4`. The vote for the 1 (stored 1s 0.3 each, the network's downbeats fully) becomes a vote for **which stored beat is beat 0 of the chart**, i.e. how the stored bars line up. The bars then come from the map.
+- `recognise.rs` `StoredSong` gains `bar_starts`. ffi `mzh_library_add` gains a `bar_beats` pointer and count; `hear.worker.ts`, `liveLibrary.ts`, native `decode_library` and the desktop `live_library` body gain the same. `Heard::Bars` / step result 4 carries upcoming bar lines.
+
+**Analysis: bars from the network's downbeats (`crates/midzer-analyze`)**
+- `bar_phase` → `bar_lines(beats, downbeats) -> Vec<usize>` (the beat each bar starts on):
+  - every network downbeat snaps to its nearest beat;
+  - a gap of 4 is a bar. Gaps of 1–3 or 5–7 are kept only when the next two gaps are 4 again (or the song ends), so a stray or missed downbeat doesn't make two odd bars in a row. Pieces that add up to 4 (2 + 2, 1 + 3) merge into one bar; gaps of 8 or more split into 4s from the first downbeat;
+  - before the first downbeat is a pickup, left out as now;
+  - a song mostly in 3 (the waltz check) gets bars of 3, and the "midzer counts four" warning goes.
+  - The thresholds are tuned on `files24`.
+- `Analysis` gains `bar_beats: Vec<u8>`; `beat_times` and `chords` stay one per beat, now `sum(bar_beats)` of them; `bar_times` are the bar starts.
+- `chords.rs` `Meter::Bars { phase }` → the place of each beat in its bar (`Vec<u8>`), with the same change costs at 0 and the half bar.
+- `structure.rs` sections: each bar's chroma resampled to 4 slots, so the 48-wide feature stays. The DSP fallback stays 4/4 with one phase.
+- `offline_dump.rs`, `analyze.rs`, `live_eval.rs`, `hear_eval.rs` take the 1s from `bar_beats`.
+
+**Everything else that walks a chart**
+- `audio.ts` `songFromAnalysis` groups the beats by `barBeats`. Transcription MIDI and `smf.ts` write a time-signature event where the length changes.
+- `midiImport.ts` reads the file's meters into bar lengths (n/4 directly; n/8 as n/2 beats when n is even, else warned as now).
+- `chordpro.ts`: `{time: n/4}` sets the length.
+- `session.ts`: `songPosition` and the store's bar from `barAt`; `editSong` resends `songBar`s.
+- Learn: `practice.ts` (loop range, song end), `targets.ts` (chord asked again on each bar line), `lanes.ts` `barLines(starts)`. `melody.ts` checks bars against the chart's lengths.
+- UI: `ChartView` bar progress and beat slots per bar (CSS for 1–7 slots), `NowPlaying` beat dots, the "one to four chords" help texts, "Add bar" with the selected bar's length. `drums/judging.ts` names spots by beat (`sixteenth % 4`) and treats "the backbeat" as beats 2 and 4 of 4-beat bars only.
+- `protocol.ts`: `songBar`, `liveBar`, the docs on `beat`/`judged`.
+
+**Tests (5a)**
+- core: a song of 4, 2, 4, 3, 4 beats plays its chords on the right beats, sends `Beat` with the right bar/beat, loops and seeks on its bar lines, its patterns cut and extend as above; a recording's tempo map against the same chart (judged bar/sixteenth); `SongBar`/`LiveBar` round-trips; `Live` with bar lines ahead counts the odd bar right and falls back to 4 after.
+- analyze: `bar_lines` on downbeats with an odd bar, a stray downbeat, a missed one, 2 + 2, a waltz; `analyze_mix` on a band signal with a 2-beat bar.
+- hear: following a tune with an odd bar sends its bar lines; the vote lines up the stored bars.
+- Vitest: notation round-trips with `[3/4]` and `%`; `barStarts`/`barAt`; sanitising; `songFromAnalysis` with `barBeats`; MIDI import of 3/4 (the "read as 4/4" test changes); ChordPro `{time}`; targets and lanes on odd bars; `liveLibrary` sends the bar lengths.
+- Playwright (rebuild first): a chart with `[2/4]` plays through with the bar count right.
+- **Measure**: `offline_dump` on `files24` → `score.py`. Expect downbeats from 0.63 towards the network's 0.91, beats and chords unchanged (0.93, 0.89 majmin). Then `KNOWN=1 START=60 hear_eval` for the 1 while following (87 % now).
+
+### 5b. The timeline editor, and keeping fixes
+
+**Drawing**
+- A timeline in `SongScreen`, under the chart, shown in edit mode for songs with a beat map (`backing ?? heard`). It is one canvas, scrolled and zoomed (pinch / ctrl-wheel), in the Stage/club style. From top to bottom:
+  - the level: `Song.heard.envelope` for live songs. Imports store it too, as `SongBacking.envelope` (it already comes out of every analysis). Older imports get it by decoding their stored recording in the browser (`decodeAudioData`, RMS per 10 ms) when the editor first opens, and save it;
+  - beat lines, with bar lines (and their numbers) brighter;
+  - chord blocks, one per chord held, on the beats.
+- While the recording plays, a playhead. Clicking the timeline outside a tool seeks to that bar.
+
+**Tools** (they act on the selected beat or beats; shift-click selects a range)
+- **The 1 is here**: the beat becomes a bar line. The bar it was in ends there, as a shorter bar (1–3 beats; if that is a 1-beat bar, the player is asked whether it is right). The bars after it are laid again in their length from the new line, up to the next bar line fixed by hand, or the end. Sections, fills and lyrics stay on their beat.
+- **Not a 1**: the bar line goes; the bar joins the one before (up to 7 beats).
+- **Nudge** (←/→, 10 ms; with shift, 1 ms) or **drag** a beat line; a selection moves together. Dragging snaps to the nearest onset in the level when close.
+- **Even out**: the selected beats are spaced evenly between the first and the last. This replaces the outline's "tempo change point": a change is evened out on each side of it.
+- **Half / double tempo** (selection, or the whole song): every other beat goes, or one goes between each pair. Bar lines are laid again in 4s from the first bar line in it; each chord stays where it was in time.
+- **Tap along** (songs with a recording): play from a bar and tap (space, or a pad/MIDI note) through the selection. The taps, moved by the player's sync (`tapOffsetMs`), become its beats and are evened out where taps are missing. Live-learned songs have no audio to tap with, so the tool is hidden for them.
+- **Chords**: drag a block's edge to another beat; click a block to type a chord (`parseChord`) or pick one from the key's chords. It edits `bar.beats` in place, so the chart grid and the timeline are one edit.
+- **Undo / redo** across both the chart grid and the timeline (an edit history in `session.ts`, 100 steps, cleared on closing the song).
+- Every edit goes through `editSong` (the chart and `songBar`s resent, the tempo map resent while the recording plays) and is saved with Save, as chart edits are now.
+
+**What the song remembers (`song.ts`)**
+- `Song.fixes?: { beats?: true; bars?: number[] /*bar lines set by hand, as song beats*/; chords?: number[] /*beats whose chord was set by hand*/ }`, filled in by the tools and the chart grid. Sanitised in `library.ts`.
+
+**Analyse again with fixes** (`AnalyseAgain` in `SongScreen`, `analyzeSongAgain` in `session.ts`)
+- Without `fixes`: as now.
+- With them, the confirm offers **Keep my fixes** or **Replace all**. Keep merges:
+  - if the beats were fixed, the old beat map and bars stay. The new chords move onto the old beats by time: each old beat takes the chord over its middle;
+  - otherwise the new beat map comes in, with bars laid from the new analysis but the bar lines fixed by hand kept (moved to the new beat nearest them in time);
+  - chords set by hand stay, moved by time onto the beats if those changed;
+  - sections, mix melody and the fingerprint are replaced as now.
+- **Replace all** drops `fixes`.
+
+**The listener gets the fixes**
+- The library is sent again (debounced, as when a song is kept) when an edited song is saved, so the next look-up follows the fixed map. Until then, the old one.
+- The outline's "corrections tune the fingerprint offset" isn't needed: a live song's beats and its fingerprint both count from the start of the capture, so moving beats moves them against the audio, which is what is wanted.
+
+**Tests (5b)**
+- Vitest, for each tool as a pure function on (`bars`, `beatTimes`, `fixes`) in a new `songs/timeline.ts`: the 1 is here (a short bar, bars laid again up to a fixed line); not a 1; nudge; even out; half/double keep chords in time; tap with a missing tap; chord edge and chord type; undo/redo; merging on "Keep my fixes" (beats fixed / not fixed, hand chords kept).
+- Playwright (rebuild first): import the test tune, open the editor, "The 1 is here" on a beat → the chart has a short bar and plays through; Save; "Analyse again" asks and Keep keeps it.
+- Desktop parts are type-checked only, as before.
+
+**Open, by design**
+- Meters with eighth-note beats (6/8 felt in 2) are counted in beats as heard: a 6/8 song is 2 beats a bar if the network hears 2.
+- Band patterns stay written in 4/4 and are cut or extended in odd bars. Patterns per meter (a real 3/4 waltz, 5/4) are later.
+- Live sources with no stored song stay 4/4.
