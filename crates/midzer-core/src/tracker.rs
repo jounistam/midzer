@@ -194,6 +194,9 @@ pub struct BeatTracker {
     power: f32,
     quiet_frames: u32,
     lost_after: u32,
+    /// Sound since the last reset, and whether silence then made it let go.
+    heard: bool,
+    lost: bool,
     level_db: f32,
     guide: Option<Guide>,
     guide_keep: u64,
@@ -270,6 +273,8 @@ impl BeatTracker {
             power: 0.0,
             quiet_frames: 0,
             lost_after: (LOST_AFTER_S * rate) as u32,
+            heard: false,
+            lost: false,
             level_db: -100.0,
             guide: None,
             guide_keep: (GUIDE_KEEP_S * sample_rate) as u64,
@@ -301,7 +306,15 @@ impl BeatTracker {
         self.confidence = 0.0;
         self.locked = false;
         self.quiet_frames = 0;
+        self.heard = false;
+        self.lost = false;
         self.guide = None;
+    }
+
+    /// Whether silence made the tracker let go of what it heard since the
+    /// last call: once per quiet stretch after sound.
+    pub fn take_lost(&mut self) -> bool {
+        std::mem::take(&mut self.lost)
     }
 
     pub fn locked(&self) -> bool {
@@ -395,12 +408,15 @@ impl BeatTracker {
             self.quiet_frames += 1;
             if self.quiet_frames >= self.lost_after {
                 if self.frames > 1 {
+                    let heard = self.heard;
                     self.reset();
+                    self.lost = heard;
                 }
                 return;
             }
         } else {
             self.quiet_frames = 0;
+            self.heard = true;
         }
 
         self.autocorrelate(m);

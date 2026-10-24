@@ -219,6 +219,7 @@ impl Engine {
             Command::SetLiveOffset { ms } => self.live.set_offset(ms),
             Command::LiveDownbeat => self.live.set_downbeat(self.now),
             Command::LiveTempo { double } => self.live.scale_tempo(double),
+            Command::LiveReset => self.live.reset(self.now, &mut self.events),
             Command::LiveGuide { frame, period, one, confidence } => self.live.guide(frame, period, one, confidence, self.now),
             Command::TrackClear { beats } => self.backing.clear_beats(beats as u32),
             Command::TrackBeat { index, seconds } => self.backing.set_beat(index as u32, seconds),

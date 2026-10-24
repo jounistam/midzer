@@ -223,7 +223,7 @@ fn playing_band_renders_without_allocating() {
     host.process(BLOCK_FRAMES);
 
     // Live audio: a 120 BPM pulse the tracker locks onto, told half and
-    // double, its 1 moved, hits judged a beat later, then silence.
+    // double, its 1 moved, hits judged a beat later, started over, then silence.
     command(&mut host, Command::SetLiveOffset { ms: 25.0 });
     command(&mut host, Command::SetLive { on: true });
     for block in 0..7000usize {
@@ -239,6 +239,7 @@ fn playing_band_renders_without_allocating() {
             3000 => command(&mut host, Command::LiveTempo { double: true }),
             3200 => command(&mut host, Command::LiveTempo { double: false }),
             3500 => command(&mut host, Command::LiveDownbeat),
+            4000 => command(&mut host, Command::LiveReset),
             _ => {}
         }
         host.listen_live(BLOCK_FRAMES);

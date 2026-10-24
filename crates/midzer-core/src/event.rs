@@ -54,6 +54,9 @@ pub enum EngineEvent {
     /// [`EngineEvent::Judged`]. `chord` says whether the notes fit the chart's
     /// chord there; `None` when it wasn't checked (a single note, no chart).
     KeysJudged { ms: f32, sixteenth: u8, bar: u16, chord: Option<bool> },
+    /// Live audio went quiet (or the player started over) and everything
+    /// heard was forgotten: the beat, the 1 and the harmony.
+    LiveForgot,
 }
 
 /// What the band is doing, for the UI.
@@ -95,6 +98,7 @@ mod op {
     pub const JUDGED: u32 = 14;
     pub const LIVE: u32 = 15;
     pub const KEYS_JUDGED: u32 = 16;
+    pub const LIVE_FORGOT: u32 = 17;
 }
 
 const NO_CHORD: u32 = 0xff;
@@ -133,6 +137,7 @@ impl EngineEvent {
             EngineEvent::Live { locked, confidence, level } => {
                 [op::LIVE, locked as u32 | (confidence as u32) << 8 | (level as u32) << 16, 0, frame]
             }
+            EngineEvent::LiveForgot => [op::LIVE_FORGOT, 0, 0, frame],
             EngineEvent::KeysJudged { ms, sixteenth, bar, chord } => {
                 let chord = match chord {
                     None => 0,
@@ -188,6 +193,7 @@ impl EngineEvent {
                 bar: (b >> 16) as u16,
             },
             op::LIVE => EngineEvent::Live { locked: a & 1 != 0, confidence: byte(a >> 8), level: byte(a >> 16) },
+            op::LIVE_FORGOT => EngineEvent::LiveForgot,
             op::KEYS_JUDGED => EngineEvent::KeysJudged {
                 ms: f32::from_bits(a),
                 sixteenth: byte(b),
@@ -387,6 +393,7 @@ mod tests {
             EngineEvent::Live { locked: true, confidence: 200, level: 17 },
             EngineEvent::KeysJudged { ms: -12.5, sixteenth: 15, bar: 300, chord: Some(false) },
             EngineEvent::KeysJudged { ms: 3.0, sixteenth: 0, bar: 0, chord: None },
+            EngineEvent::LiveForgot,
         ] {
             assert_eq!(EngineEvent::decode(event.encode(42)), Some((event, 42)));
         }

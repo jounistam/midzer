@@ -554,6 +554,9 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
     case 'live':
       set({ liveTracker: { locked: event.locked, confidence: event.confidence, level: event.level } });
       break;
+    case 'liveForgot':
+      forgetLiveSong();
+      break;
     case 'songPosition':
       if (event.beat % 4 === 0) setTimeout(() => set({ songBar: event.beat / 4 }), delay);
       break;
@@ -1096,12 +1099,25 @@ function setAlongHints(hints: Map<number, number>): void {
   live.version++;
 }
 
-/** Shows the chord heard now, a few times a second, while a source is followed, and lights its keys for a keys player. */
-function followLiveChords(on: boolean): void {
-  clearInterval(liveChordTimer);
+/** The source went quiet or the player started over: what was heard of the song goes. */
+function forgetLiveSong(): void {
   liveChords.clear();
   set({ liveChord: { current: null, before: [], next: null } });
   setAlongHints(new Map());
+  resetLive();
+}
+
+/** Starts the live song over: the engine and the listener forget it and listen afresh. */
+export function resetLiveSource(): void {
+  if (!engine || get().liveSource.status !== 'on') return;
+  engine.resetLive();
+  forgetLiveSong();
+}
+
+/** Shows the chord heard now, a few times a second, while a source is followed, and lights its keys for a keys player. */
+function followLiveChords(on: boolean): void {
+  clearInterval(liveChordTimer);
+  forgetLiveSong();
   if (!on) return;
   liveChordTimer = setInterval(() => {
     const ms = performance.now();

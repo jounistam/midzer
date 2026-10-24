@@ -151,6 +151,13 @@ test('play along: follows the beat of an audio input and times drums and keys ag
   // Moving the 1 and halving the tempo; then leaving turns it all off.
   await page.getByRole('button', { name: 'Half as fast' }).click();
   await expect(page.getByTestId('along-tempo')).toHaveText('60', { timeout: 20_000 });
+  // Starting over forgets the beat, the chords and the halving; they come back from what is heard.
+  await page.getByRole('button', { name: 'Start over' }).click();
+  await expect(page.getByTestId('along-chord')).toHaveText('—');
+  await expect(page.getByTestId('along-tempo')).toHaveText('—');
+  // A fresh lock may read a beat a minute off at first.
+  await expect(page.getByTestId('along-tempo')).toHaveText(/^1(19|20|21)$/, { timeout: 20_000 });
+  await expect(page.getByTestId('along-chord')).toHaveText(/^(C|G)$/, { timeout: 20_000 });
   await page.getByRole('button', { name: 'Stop listening' }).click();
   await expect(page.getByTestId('along-status')).toHaveText('Pick something to play along with');
   await page.getByRole('button', { name: 'Back' }).click();

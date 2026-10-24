@@ -51,6 +51,7 @@ const Cmd = {
   LiveDownbeat: 43,
   LiveTempo: 44,
   LiveGuide: 45,
+  LiveReset: 46,
 } as const;
 
 /** Ticks per beat in song positions; mirrors `PPQ` in style.rs. */
@@ -226,7 +227,9 @@ export type EngineCommand =
    * a beat at engine `frame`, `period` frames apart, which beat of the bar it
    * is (0 is the 1; null unknown) and how sure it is, 0..1.
    */
-  | { type: 'liveGuide'; frame: number; period: number; one: number | null; confidence: number };
+  | { type: 'liveGuide'; frame: number; period: number; one: number | null; confidence: number }
+  /** Forget everything heard live and listen afresh, as after silence. */
+  | { type: 'liveReset' };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -339,6 +342,8 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.LiveDownbeat, 0, 0, 0];
     case 'liveTempo':
       return [Cmd.LiveTempo, cmd.double ? 1 : 0, 0, 0];
+    case 'liveReset':
+      return [Cmd.LiveReset, 0, 0, 0];
     case 'liveGuide': {
       const one = cmd.one === null ? 0 : (cmd.one & 3) + 1;
       const confidence = Math.round(Math.min(Math.max(cmd.confidence, 0), 1) * 255);
@@ -424,7 +429,9 @@ export type EngineEvent =
    * A keys strike (a note, or a chord's notes played together) on a backing track's or live source's
    * grid, like `judged`. `chord`: whether the notes fit the chart's chord there; null when not checked.
    */
-  | { type: 'keysJudged'; ms: number; sixteenth: number; bar: number; chord: boolean | null };
+  | { type: 'keysJudged'; ms: number; sixteenth: number; bar: number; chord: boolean | null }
+  /** Live audio went quiet (or `liveReset`) and everything heard was forgotten: the beat, the 1 and the harmony. */
+  | { type: 'liveForgot' };
 
 /** An event plus the AudioContext frame at which it sounds. */
 export type TimedEvent = EngineEvent & { frame: number };
@@ -498,6 +505,8 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
       const chord = (b >> 8) & 0xff;
       return { type: 'keysJudged', ms: bitsFloat(a), sixteenth: b & 0xff, bar: b >>> 16, chord: chord === 0 ? null : chord === 1, frame };
     }
+    case 17:
+      return { type: 'liveForgot', frame };
     default:
       return null;
   }

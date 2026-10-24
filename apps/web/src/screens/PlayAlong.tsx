@@ -20,6 +20,7 @@ import {
   liveSourceKey,
   liveTempo,
   refreshLiveDevices,
+  resetLiveSource,
   setAlongLevel,
   setInstrument,
   setMissSound,
@@ -306,8 +307,9 @@ function deviceLabel(d: LiveDevice): string {
   return d.loopback ? `System audio · ${d.name}` : d.name;
 }
 
-/** When the beat found is off: the 1 in the wrong place, or twice or half the tempo. */
+/** When the beat found is off: the 1 in the wrong place, or twice or half the tempo; or start the song over. */
 function BeatFixes() {
+  const on = useSession((s) => s.liveSource.status === 'on');
   const locked = useSession((s) => s.liveSource.status === 'on' && s.liveTracker.locked);
   return (
     <div className="control-group">
@@ -323,6 +325,9 @@ function BeatFixes() {
           Twice as fast
         </button>
       </div>
+      <button className="btn btn-ghost" disabled={!on} onClick={resetLiveSource} title="Forget the beat and chords heard and listen afresh, as when a new song starts">
+        Start over
+      </button>
     </div>
   );
 }

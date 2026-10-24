@@ -115,6 +115,8 @@ export interface EngineHandle {
    * stops by itself (e.g. the browser's "Stop sharing").
    */
   openLive(source: LiveSource, onEnded: () => void): Promise<() => void>;
+  /** Forgets the live song, in the engine and the listener, and listens afresh (`liveReset`). */
+  resetLive(): void;
   close(): Promise<void>;
 }
 
@@ -324,6 +326,10 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
         onEnded();
       });
       return stop;
+    },
+    resetLive() {
+      hearing?.postMessage({ type: 'reset' } satisfies HearRequest);
+      send({ type: 'liveReset' });
     },
     async close() {
       clearInterval(poll);

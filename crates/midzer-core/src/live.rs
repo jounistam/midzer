@@ -115,6 +115,9 @@ pub struct Live {
     /// long the loop's has been far from it, in frames.
     shown_period: f64,
     far_for: f64,
+    /// The engine frame of the last start over: guides heard before it were
+    /// of the song forgotten.
+    fresh_from: f64,
 }
 
 impl Live {
@@ -153,6 +156,7 @@ impl Live {
             bpm: 0.0,
             shown_period: 0.0,
             far_for: 0.0,
+            fresh_from: 0.0,
         }
     }
 
@@ -170,6 +174,18 @@ impl Live {
         self.active = on;
         self.forget();
         out.push(0, self.status_event());
+    }
+
+    /// Forgets everything heard before engine frame `now` and starts
+    /// listening afresh, as after silence.
+    pub fn reset(&mut self, now: u64, out: &mut EventBuffer) {
+        if !self.active {
+            return;
+        }
+        self.stop(0, out);
+        self.forget();
+        self.fresh_from = now as f64;
+        out.push(0, EngineEvent::LiveForgot);
     }
 
     fn forget(&mut self) {
@@ -225,6 +241,10 @@ impl Live {
             return;
         }
         let at = now as f64 + (frame.wrapping_sub(now as u32) as i32) as f64;
+        if at < self.fresh_from {
+            // Heard before starting over (it was on its way).
+            return;
+        }
         self.tracker.guide(at, period as f64 * self.guide_scale, confidence as f32 / 255.0);
         // At another tempo than the guide's, its 1 may fall between the beats.
         if let Some(one) = one.filter(|_| self.guide_scale == 1.0) {
@@ -329,6 +349,11 @@ impl Live {
         }
         let mut beats = BeatList::default();
         self.tracker.push(input, start, &mut beats);
+        if self.tracker.take_lost() {
+            // The source went quiet: the next sound may be another song.
+            self.reset(start + input.len() as u64, out);
+            return;
+        }
         self.harmony.push(input, start);
         for beat in beats.as_slice() {
             self.on_beat(beat, out);
@@ -762,6 +787,40 @@ mod tests {
         assert!(!ones.is_empty() && ones.iter().all(|t| ((t - 10.75) / 2.0 - ((t - 10.75) / 2.0).round()).abs() < 0.01), "{ones:?}");
         assert!(rest.iter().any(|(_, e)| *e == EngineEvent::Transport { playing: false }), "the run ends in silence");
         assert!(!live.is_running());
+    }
+
+    #[test]
+    fn silence_or_starting_over_forgets_the_beat_and_the_1() {
+        let forgot = |events: &[(u64, EngineEvent)]| events.iter().filter(|(_, e)| *e == EngineEvent::LiveForgot).count();
+        let mut live = Live::new(SR);
+        live.set_active(true, &mut EventBuffer::default());
+        let mut signal = source(12.0);
+        signal.extend(std::iter::repeat_n(0.0, (6.0 * SR) as usize));
+        let heard = run(&mut live, &signal[..frame(10.0) as usize], 0, &[]);
+        assert!(live.tracker.locked() && forgot(&heard) == 0);
+        live.set_downbeat(frame(10.75));
+        assert!(live.downbeat_told);
+        let rest = run(&mut live, &signal[frame(10.0) as usize..], frame(10.0), &[]);
+        // Once per quiet stretch, however long it lasts.
+        assert_eq!(forgot(&rest), 1);
+        assert!(!live.downbeat_told && live.tracker.last_beat().is_none() && live.beat_count == 0);
+
+        let mut live = Live::new(SR);
+        live.set_active(true, &mut EventBuffer::default());
+        run(&mut live, &signal[..frame(10.0) as usize], 0, &[]);
+        live.set_downbeat(frame(10.75));
+        let mut out = EventBuffer::default();
+        live.play(frame(10.0), &mut out);
+        live.reset(frame(10.0), &mut out);
+        assert!(out.as_slice().iter().any(|t| t.event == EngineEvent::LiveForgot));
+        assert!(out.as_slice().iter().any(|t| t.event == EngineEvent::Transport { playing: false }));
+        assert!(!live.is_running() && !live.downbeat_told && !live.tracker.locked());
+        // A guide heard before starting over is the old song's.
+        live.guide(frame(9.75) as u32, 0.5 * SR, Some(0), 255, frame(10.0));
+        assert!(live.tracker.last_beat().is_none() && live.guide_one.is_none());
+        // It listens on: the song's beat comes back.
+        run(&mut live, &signal[frame(2.0) as usize..frame(12.0) as usize], frame(10.0), &[]);
+        assert!(live.tracker.locked());
     }
 
     #[test]

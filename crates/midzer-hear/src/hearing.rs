@@ -56,6 +56,10 @@ const CHORD_EDGE_S: f64 = 0.3;
 const BEAT_CHORDS_SURE: f32 = 0.5;
 /// Gaps in the input up to this long (seconds) are filled with silence.
 const MAX_GAP_S: f64 = 0.25;
+/// Below this level (dBFS) the input counts as silent; after this long the
+/// song is forgotten, as the engine's beat tracker does.
+const SILENT_DB: f32 = -60.0;
+const SILENT_S: f64 = 2.5;
 /// Runs in a row that agree before the grid counts as steady.
 const STEADY_RUNS: u32 = 3;
 /// Beats within this many seconds of the fitted grid count as on it.
@@ -161,6 +165,11 @@ pub struct Hearing {
     candidate: Option<f64>,
     /// The chords heard, oldest first: from, to (stream samples) and chord.
     chords: Vec<(f64, f64, Option<Chord>)>,
+    /// The input's power, smoothed; samples in a row below `SILENT_DB`; and
+    /// whether there was sound since the last reset.
+    power: f32,
+    quiet: u64,
+    heard: bool,
 }
 
 impl Hearing {
@@ -186,6 +195,9 @@ impl Hearing {
             state: None,
             candidate: None,
             chords: Vec::new(),
+            power: 0.0,
+            quiet: 0,
+            heard: false,
         }
     }
 
@@ -208,6 +220,28 @@ impl Hearing {
         self.state = None;
         self.candidate = None;
         self.chords.clear();
+        self.heard = false;
+    }
+
+    /// Forgets the song but not the stream: the audio so far, the grid, the
+    /// votes and the chords go, and the next input carries on from here.
+    fn forget(&mut self) {
+        let total = self.total();
+        self.audio.clear();
+        self.audio_base = total;
+        self.mels.clear();
+        self.cqt_cache.clear();
+        self.next_beat = total + (self.settings.beat_min_s * RATE) as u64;
+        self.next_chords = self.next_beat;
+        self.state = None;
+        self.candidate = None;
+        self.chords.clear();
+        self.heard = false;
+    }
+
+    /// Whether the input has been silent long enough to forget the song.
+    fn silent(&self) -> bool {
+        self.quiet as f64 >= SILENT_S * RATE
     }
 
     /// Samples received at 22.05 kHz.
@@ -237,7 +271,21 @@ impl Hearing {
         }
         self.expect = Some(frame + input.len() as u64);
         self.resampler.push(input, &mut out);
+        let floor = 10f32.powf(SILENT_DB / 10.0);
+        for &x in &out {
+            self.power += (x * x - self.power) * (1.0 / (0.05 * RATE as f32));
+            if self.power < floor {
+                self.quiet += 1;
+            } else {
+                self.quiet = 0;
+                self.heard = true;
+            }
+        }
         self.audio.extend_from_slice(&out);
+        if self.silent() && self.heard {
+            // The song stopped; what comes next may be another.
+            self.forget();
+        }
         if self.next_beat == 0 {
             self.next_beat = (self.settings.beat_min_s * RATE) as u64;
             self.next_chords = (self.settings.beat_min_s * RATE) as u64;
@@ -283,6 +331,9 @@ impl Hearing {
     /// Runs a network if one is due, and says what it heard. Call it after
     /// each [`Hearing::push`]; a run takes a while (up to about half a second).
     pub fn step(&mut self) -> Option<Heard> {
+        if self.silent() {
+            return None;
+        }
         let total = self.total();
         let beat_due = total >= self.next_beat && self.mels.len() / MELS >= (self.settings.beat_min_s * FPS as f64) as usize;
         let chords_due = total >= self.next_chords && total >= (self.settings.beat_min_s * RATE) as u64;
@@ -672,6 +723,58 @@ mod tests {
         assert_eq!(find_loop(&muddle, beat, end), None);
         assert_eq!(chord_at(&song, 4.5 * beat), Some(c(7)));
         assert_eq!(chord_at(&song, 40.0 * beat), None);
+    }
+
+    /// 120 BPM clicks over a held C major chord, then `quiet` seconds of silence.
+    fn song(seconds: f64, quiet: f64) -> Vec<f32> {
+        let len = (seconds * RATE) as usize;
+        let mut out: Vec<f32> = (0..len)
+            .map(|i| {
+                let t = i as f64 / RATE;
+                let tones: f64 = [130.8, 164.8, 196.0].iter().map(|hz| 0.08 * (std::f64::consts::TAU * hz * t).sin()).sum();
+                let click = (-(t % 0.5) / 0.01).exp() * (std::f64::consts::TAU * 1000.0 * t).sin() * 0.5;
+                (tones + click) as f32
+            })
+            .collect();
+        out.extend(std::iter::repeat_n(0.0, (quiet * RATE) as usize));
+        out
+    }
+
+    fn listen(hearing: &mut Hearing, signal: &[f32], from: u64) -> usize {
+        let mut runs = 0;
+        for (i, block) in signal.chunks(2048).enumerate() {
+            hearing.push(block, from + (i * 2048) as u64);
+            while hearing.step().is_some() {
+                runs += 1;
+            }
+        }
+        runs
+    }
+
+    #[test]
+    fn silence_forgets_the_song_and_a_short_dip_does_not() {
+        let mut hearing = Hearing::with_models(RATE as f32).unwrap();
+        let loud = song(8.0, 0.0);
+        listen(&mut hearing, &loud, 0);
+        assert!(!hearing.chords.is_empty() && hearing.state.is_some());
+        let dip = vec![0.0; (2.0 * RATE) as usize];
+        listen(&mut hearing, &dip, loud.len() as u64);
+        assert!(!hearing.chords.is_empty() && hearing.state.is_some(), "a 2 s dip keeps the song");
+
+        // A second more makes 2.5 s of silence (the level takes ~0.5 s to fall); then the networks rest.
+        let quiet = vec![0.0; (4.0 * RATE) as usize];
+        let at = (loud.len() + dip.len()) as u64;
+        let half = (1.0 * RATE) as usize;
+        listen(&mut hearing, &quiet[..half], at);
+        assert!(hearing.chords.is_empty() && hearing.state.is_none());
+        let runs = listen(&mut hearing, &quiet[half..], at + half as u64);
+        assert_eq!(runs, 0, "the networks rest in silence");
+        // The stream carries on: the next song is heard in the engine's frames.
+        let at = at + quiet.len() as u64;
+        assert_eq!(hearing.expect, Some(at));
+        listen(&mut hearing, &loud, at);
+        let before = |c: &(f64, f64, Option<Chord>)| c.2.is_some() && hearing.frame_of(c.1) < at as f64;
+        assert!(hearing.state.is_some() && !hearing.chords.is_empty() && !hearing.chords.iter().any(before));
     }
 
     #[test]

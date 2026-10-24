@@ -132,6 +132,14 @@ fn live_open(state: State<AppEngine>, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn live_reset(state: State<AppEngine>) -> Result<(), String> {
+    with_engine(&state, |engine| {
+        engine.reset_live();
+        Ok(())
+    })
+}
+
+#[tauri::command]
 fn live_close(state: State<AppEngine>) -> Result<(), String> {
     with_engine(&state, |engine| {
         engine.close_live();
@@ -279,6 +287,7 @@ pub fn run() {
             mic_close,
             live_devices,
             live_open,
+            live_reset,
             live_close,
             midi_ports,
             midi_set_output,

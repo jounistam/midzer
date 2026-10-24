@@ -206,6 +206,12 @@ impl NativeEngine {
         rx.recv().map_err(|e| e.to_string())?
     }
 
+    /// Forgets the live song, in the engine and the listener, and listens afresh.
+    pub fn reset_live(&self) {
+        self.shared.live_generation.fetch_add(1, Ordering::AcqRel);
+        self.send(Command::LiveReset.encode());
+    }
+
     pub fn close_live(&self) {
         let _ = self.control.send(Control::CloseLive);
     }

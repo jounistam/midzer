@@ -75,6 +75,7 @@ describe('encodeCommand', () => {
     expect(encodeCommand({ type: 'liveDownbeat' })).toEqual([43, 0, 0, 0]);
     expect(encodeCommand({ type: 'liveTempo', double: true })).toEqual([44, 1, 0, 0]);
     expect(encodeCommand({ type: 'liveTempo', double: false })).toEqual([44, 0, 0, 0]);
+    expect(encodeCommand({ type: 'liveReset' })).toEqual([46, 0, 0, 0]);
     const guide = encodeCommand({ type: 'liveGuide', frame: 2 ** 32 + 7.4, period: 24_000, one: 3, confidence: 1 });
     expect(guide.slice(0, 2)).toEqual([45, 7]);
     expect(new Float32Array(new Uint32Array([guide[2]!]).buffer)[0]).toBe(24_000);
@@ -157,6 +158,7 @@ describe('decodeEvent', () => {
     expect(decodeEvent(15, 0, 0, 4)).toEqual({ type: 'live', locked: false, confidence: 0, level: 0, frame: 4 });
     expect(decodeEvent(16, new Uint32Array(new Float32Array([-6.5]).buffer)[0]!, 3 | (2 << 8) | (7 << 16), 4)).toEqual({ type: 'keysJudged', ms: -6.5, sixteenth: 3, bar: 7, chord: false, frame: 4 });
     expect(decodeEvent(16, new Uint32Array(new Float32Array([1]).buffer)[0]!, 0, 4)).toEqual({ type: 'keysJudged', ms: 1, sixteenth: 0, bar: 0, chord: null, frame: 4 });
+    expect(decodeEvent(17, 0, 0, 4)).toEqual({ type: 'liveForgot', frame: 4 });
   });
 
   it('decodes song positions', () => {

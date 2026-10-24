@@ -102,6 +102,8 @@ pub enum Command {
     /// beat's length in frames, which beat of the bar it is if known (0 is
     /// the 1), and how sure it is (0–255).
     LiveGuide { frame: u32, period: f32, one: Option<u8>, confidence: u8 },
+    /// Forgets everything heard live and starts listening afresh, as after silence.
+    LiveReset,
 }
 
 mod op {
@@ -150,6 +152,7 @@ mod op {
     pub const LIVE_DOWNBEAT: u32 = 43;
     pub const LIVE_TEMPO: u32 = 44;
     pub const LIVE_GUIDE: u32 = 45;
+    pub const LIVE_RESET: u32 = 46;
 }
 
 /// MIDI channel 10, where e-kits and drum pads send.
@@ -280,6 +283,7 @@ impl Command {
             Command::SetLiveOffset { ms } => [op::SET_LIVE_OFFSET, ms.to_bits(), 0, 0],
             Command::LiveDownbeat => [op::LIVE_DOWNBEAT, 0, 0, 0],
             Command::LiveTempo { double } => [op::LIVE_TEMPO, double as u32, 0, 0],
+            Command::LiveReset => [op::LIVE_RESET, 0, 0, 0],
             Command::LiveGuide { frame, period, one, confidence } => [op::LIVE_GUIDE, frame, period.to_bits(), one.map_or(0, |o| o as u32 + 1) | (confidence as u32) << 8],
         }
     }
@@ -368,6 +372,7 @@ impl Command {
             op::SET_LIVE_OFFSET => Some(Command::SetLiveOffset { ms: float(a).filter(|ms| ms.abs() <= 1000.0)? }),
             op::LIVE_DOWNBEAT => Some(Command::LiveDownbeat),
             op::LIVE_TEMPO => Some(Command::LiveTempo { double: a != 0 }),
+            op::LIVE_RESET => Some(Command::LiveReset),
             op::LIVE_GUIDE => Some(Command::LiveGuide {
                 frame: a,
                 period: float(b).filter(|p| *p > 0.0)?,
@@ -450,6 +455,7 @@ mod tests {
             Command::SetLiveOffset { ms: -35.5 },
             Command::LiveDownbeat,
             Command::LiveTempo { double: true },
+            Command::LiveReset,
             Command::LiveGuide { frame: 4_000_000_000, period: 22_050.5, one: Some(3), confidence: 200 },
             Command::LiveGuide { frame: 7, period: 24_000.0, one: None, confidence: 0 },
         ] {

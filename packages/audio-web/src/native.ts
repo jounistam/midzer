@@ -179,6 +179,9 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
       });
       return () => void invoke('live_close');
     },
+    resetLive() {
+      void invoke('live_reset');
+    },
     async close() {
       listeners.clear();
       chordListeners.clear();
