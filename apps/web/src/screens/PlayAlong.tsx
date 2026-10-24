@@ -23,6 +23,7 @@ import {
   liveDownbeat,
   liveSourceKey,
   liveTempo,
+  notThisSong,
   refreshLiveDevices,
   resetLiveSource,
   saveLiveSong,
@@ -52,6 +53,7 @@ export function PlayAlong() {
       <main className="jam-main">
         <div className="jam-stage along-main">
           <AlongStage />
+          <FollowedSong />
           {!drums && <AlongChords split={split} />}
           <AlongTiming />
           <LearnedSongs />
@@ -313,6 +315,26 @@ function deviceLabel(d: LiveDevice): string {
   return d.loopback ? `System audio · ${d.name}` : d.name;
 }
 
+/** A song kept, recognised in the source: its stored beats and chords lead, known ahead. */
+function FollowedSong() {
+  const followed = useSession((s) => (s.liveSource.status === 'on' ? s.liveFollow : null));
+  if (!followed) return null;
+  return (
+    <section className="panel along-followed" aria-live="polite" data-testid="along-followed">
+      <span className="followed-dot" aria-hidden />
+      <div className="learned-info">
+        <span className="eyebrow">Following</span>
+        <span className="learned-title">
+          {followed.title} <span className="learned-meta">· {followed.bpm} BPM</span>
+        </span>
+      </div>
+      <button className="btn btn-ghost" onClick={notThisSong} title="It is another song: listen afresh until the music stops">
+        Not this song
+      </button>
+    </section>
+  );
+}
+
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.round(seconds % 60)).padStart(2, '0')}`;
 
 /**
@@ -325,8 +347,9 @@ function LearnedSongs() {
   const { analysing, offered, error } = useSession((s) => s.liveLearning);
   const [kept, setKept] = useState<string | null>(null);
   if (!analysing && offered.length === 0 && !error && !kept) return null;
-  const keep = async (id: string, title: string) => {
-    setKept((await keepLearnedSong(id)) ? `Kept “${title}” in My songs.` : 'It could not be kept on this device.');
+  const keep = async (id: string, title: string, update: boolean) => {
+    const ok = await keepLearnedSong(id);
+    setKept(!ok ? 'It could not be kept on this device.' : update ? `Updated “${title}” in My songs.` : `Kept “${title}” in My songs.`);
   };
   return (
     <section className="panel along-learned" aria-live="polite" data-testid="along-learned">
@@ -339,10 +362,10 @@ function LearnedSongs() {
           </span>
         </div>
       )}
-      {offered.map(({ song }) => (
+      {offered.map(({ song, extends: more }) => (
         <div key={song.id} className="learned-song">
           <div className="learned-info">
-            <span className="learned-title">{song.title}</span>
+            <span className="learned-title">{more ? `More of “${more.title}”` : song.title}</span>
             <span className="learned-meta">
               {clock(song.heard?.seconds ?? 0)} · {song.bpm} BPM · {song.bars.length} bars
               {song.heard && !song.heard.complete && (
@@ -352,8 +375,12 @@ function LearnedSongs() {
               )}
             </span>
           </div>
-          <button className="btn btn-secondary" onClick={() => void keep(song.id, song.title)}>
-            Keep
+          <button
+            className="btn btn-secondary"
+            onClick={() => void keep(song.id, more?.title ?? song.title, more !== undefined)}
+            title={more ? 'Replace the part kept with what was heard now: its chords and beats' : undefined}
+          >
+            {more ? 'Update' : 'Keep'}
           </button>
           <button className="btn btn-ghost" onClick={() => dismissLearnedSong(song.id)}>
             Dismiss

@@ -28,6 +28,8 @@ import {
   type ListenMode,
   type LiveChordSpan,
   type LiveDevice,
+  type LiveFollow,
+  type LiveLibrarySong,
   type LiveSongCapture,
   type LiveSource,
   type NativeMidi,
@@ -56,9 +58,10 @@ import type { JudgedHit } from './drums/judging';
 import { COUNT_IN_OPTIONS, countInPieces, type CountInChoice } from './drums/stage';
 import { offsetToBeat, SYNC_TAPS, syncedOffset } from './playalong/sync';
 import { qwertyToNote } from './qwerty';
-import { isBuiltin, saveUserSong } from './songs/library';
+import { isBuiltin, loadUserSongs, saveUserSong } from './songs/library';
+import { captureFate, LiveIds, liveLibrarySong } from './songs/liveLibrary';
 import { analyzeAudio, analyzeCapture, decodeRecording } from './songs/analyzeAudio';
-import { saveFingerprint } from './songs/fingerprints';
+import { loadFingerprint, saveFingerprint } from './songs/fingerprints';
 import { songFromAnalysis, transcriptionMidi } from './songs/audio';
 import { Recorder } from './songs/recorder';
 import { loadRecording } from './songs/recordings';
@@ -97,6 +100,15 @@ export interface LearnedSong {
   song: Song;
   notes: string[];
   fingerprint: Uint32Array;
+  /** More of a song kept only in part (its id and title): keeping it updates that song. */
+  extends?: { id: string; title: string };
+}
+
+/** A song kept that the listener recognised in the live source and follows. */
+export interface LiveFollowed {
+  songId: string;
+  title: string;
+  bpm: number;
 }
 
 /** Songs learned from the live source: the one being analysed, those offered (newest first), and why the last one failed. */
@@ -210,6 +222,8 @@ interface SessionState {
   /** The chord heard in the live source now, and the ones before it. */
   liveChord: ChordNow;
   liveLearning: LiveLearning;
+  /** The song kept that is recognised in the live source, if any. */
+  liveFollow: LiveFollowed | null;
   /** How much a keys player playing along is asked to play; see ALONG_LEVELS. */
   alongLevel: AlongLevel;
   /** Inputs to play along with; names may be missing until audio input is allowed. */
@@ -402,6 +416,7 @@ export const useSession = create<SessionState>(() => ({
   liveTracker: { locked: false, confidence: 0, level: 0 },
   liveChord: { current: null, before: [], next: null },
   liveLearning: { analysing: null, offered: [], error: null },
+  liveFollow: null,
   alongLevel: prefs.alongLevel,
   liveDevices: [],
   liveOffsets: prefs.liveOffsets,
@@ -466,6 +481,7 @@ export async function startAudio(): Promise<void> {
     engine.onEvent(onEngineEvent);
     engine.onLiveChords(onLiveChords);
     engine.onLiveSong(onLiveSong);
+    engine.onLiveFollow(onLiveFollow);
     const { bpm, volume, split, muted, style, idleMode, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers } = get();
     set({ outputLatencyMs: engine.outputLatencyMs });
     engine.send({ type: 'setBandDrums', mode: bandDrums });
@@ -1157,14 +1173,53 @@ function forgetLiveSong(): void {
   set({ liveChord: { current: null, before: [], next: null } });
   setAlongHints(new Map());
   resetLive();
+  set({ liveFollow: null });
+}
+
+// ---- Recognising songs kept ---------------------------------------------------------
+
+const liveIds = new LiveIds();
+/** The songs kept that the listener can recognise, by id, as last sent. */
+let recognisable = new Map<string, Song>();
+let libraryRequest = 0;
+
+/** Hands the listener the songs kept that it can recognise (with a fingerprint and a beat map). */
+async function sendLiveLibrary(): Promise<void> {
+  if (!engine) return;
+  const request = ++libraryRequest;
+  const songs = await loadUserSongs();
+  const entries: LiveLibrarySong[] = [];
+  const found = new Map<string, Song>();
+  for (const song of songs) {
+    const entry = liveLibrarySong(liveIds.of(song.id), song, await loadFingerprint(song.id));
+    if (!entry) continue;
+    entries.push(entry);
+    found.set(song.id, song);
+  }
+  if (request !== libraryRequest || !engine) return;
+  recognisable = found;
+  engine.setLiveLibrary(entries);
+}
+
+function onLiveFollow(follow: LiveFollow | null): void {
+  const song = follow ? recognisable.get(liveIds.songOf(follow.id) ?? '') : undefined;
+  set({ liveFollow: song ? { songId: song.id, title: song.title, bpm: song.bpm } : null });
+}
+
+/** "Not this song": stops following the song recognised until the music stops or starts over. */
+export function notThisSong(): void {
+  const followed = get().liveFollow;
+  if (!engine || !followed) return;
+  engine.ignoreLiveSong(liveIds.of(followed.songId));
+  set({ liveFollow: null });
 }
 
 // ---- Learning songs heard live ---------------------------------------------------
 
 /** At most this many learned songs wait to be kept. */
 const MAX_OFFERED = 5;
-/** The next song to analyse; a newer one replaces it. */
-let nextCapture: LiveSongCapture | null = null;
+/** The next song to analyse (and the song kept in part it is more of); a newer one replaces it. */
+let nextCapture: { capture: LiveSongCapture; extends?: Song } | null = null;
 let analysingCapture = false;
 
 /** Whether songs played along with can be learned here. */
@@ -1178,16 +1233,21 @@ export function saveLiveSong(): void {
 }
 
 function onLiveSong(capture: LiveSongCapture): void {
-  nextCapture = capture;
+  const followed = capture.followed === undefined ? undefined : recognisable.get(liveIds.songOf(capture.followed) ?? '');
+  const fate = captureFate(followed, capture);
+  // A song kept already, heard again.
+  if (fate === 'known') return;
+  nextCapture = fate === 'more' && followed ? { capture, extends: followed } : { capture };
   if (!analysingCapture) void learnNext();
 }
 
 const learning = () => get().liveLearning;
 
 async function learnNext(): Promise<void> {
-  const capture = nextCapture;
+  const next = nextCapture;
   nextCapture = null;
-  if (!capture) return;
+  if (!next) return;
+  const { capture, extends: more } = next;
   analysingCapture = true;
   const seconds = capture.seconds;
   set({ liveLearning: { ...learning(), analysing: { fraction: 0, seconds }, error: null } });
@@ -1197,7 +1257,8 @@ async function learnNext(): Promise<void> {
     });
     const heardAt = Date.now() - seconds * 1000;
     const when = new Date(heardAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const learned = songFromAnalysis(analysis, `Heard ${when}`, { complete: capture.complete, heardAt });
+    const learned: LearnedSong = songFromAnalysis(analysis, more?.title ?? `Heard ${when}`, { complete: capture.complete, heardAt });
+    if (more) learned.extends = { id: more.id, title: more.title };
     set({ liveLearning: { ...learning(), analysing: null, offered: [learned, ...learning().offered].slice(0, MAX_OFFERED) } });
   } catch (e) {
     set({ liveLearning: { ...learning(), analysing: null, error: e instanceof Error ? e.message : String(e) } });
@@ -1207,12 +1268,20 @@ async function learnNext(): Promise<void> {
   }
 }
 
-/** Keeps a learned song in My songs, with its fingerprint. Resolves false if it could not be stored. */
+/**
+ * Keeps a learned song in My songs, with its fingerprint; more of a song
+ * kept in part replaces that song's chart and beat map, keeping its title,
+ * artist and style. Resolves false if it could not be stored.
+ */
 export async function keepLearnedSong(id: string): Promise<boolean> {
   const learned = learning().offered.find((l) => l.song.id === id);
-  if (!learned || !(await saveUserSong(learned.song))) return false;
-  void saveFingerprint(id, learned.fingerprint);
+  if (!learned) return false;
+  const kept = learned.extends ? (await loadUserSongs()).find((s) => s.id === learned.extends!.id) : undefined;
+  const song: Song = kept ? { ...learned.song, id: kept.id, title: kept.title, style: kept.style, ...(kept.artist ? { artist: kept.artist } : {}) } : learned.song;
+  if (!(await saveUserSong(song))) return false;
+  await saveFingerprint(song.id, learned.fingerprint);
   dismissLearnedSong(id);
+  if (get().liveSource.status === 'on') void sendLiveLibrary();
   return true;
 }
 
@@ -1319,6 +1388,7 @@ export async function startLiveSource(source: LiveSource): Promise<void> {
     send({ type: 'setLive', on: true });
     set({ liveSource: { status: 'on', key }, liveTracker: { locked: false, confidence: 0, level: 0 } });
     followLiveChords(true);
+    void sendLiveLibrary();
     // Names show once audio input is allowed.
     if (source.kind === 'device') void refreshLiveDevices();
   } catch (e) {

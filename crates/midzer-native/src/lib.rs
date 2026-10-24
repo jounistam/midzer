@@ -51,7 +51,10 @@ pub enum Update {
     Chords { spans: Vec<f64>, heard_frame: f64 },
     /// A song heard in the live source, waiting in [`NativeEngine::take_live_song`];
     /// flags bit 0 heard from its start, bit 1 to its end.
-    LiveSong { seconds: f64, flags: u32 },
+    LiveSong { seconds: f64, flags: u32, followed: i32 },
+    /// A stored song followed from engine frame `frame`, `seconds` into it,
+    /// or (id −1) none any more.
+    LiveFollow { id: i32, frame: f64, seconds: f64, heard_frame: f64 },
 }
 
 pub type UpdateFn = Box<dyn FnMut(Update) + Send>;
@@ -74,6 +77,9 @@ struct Shared {
     /// Asks the listener to end the song being captured; the last song captured.
     song_finish: AtomicBool,
     live_song: Mutex<Option<midzer_hear::Capture>>,
+    /// Stored songs for the listener to take up, and songs not to follow.
+    library: Mutex<Option<midzer_hear::Library>>,
+    ignore: ArrayQueue<u32>,
     /// A freshly loaded synth for the audio thread, and old ones to drop elsewhere.
     synth_in: ArrayQueue<Box<Synth>>,
     synth_out: ArrayQueue<Box<Synth>>,
@@ -229,6 +235,18 @@ impl NativeEngine {
         self.shared.song_finish.store(true, Ordering::Release);
     }
 
+    /// The stored songs to recognise in the live source, as `encodeLibrary` in native.ts lays them out.
+    pub fn set_live_library(&self, bytes: &[u8]) -> Result<(), String> {
+        let library = hear::decode_library(bytes)?;
+        *self.shared.library.lock().map_err(|e| e.to_string())? = Some(library);
+        Ok(())
+    }
+
+    /// "Not this song": stops following it until the next silence or reset.
+    pub fn ignore_live_song(&self, id: u32) {
+        let _ = self.shared.ignore.push(id);
+    }
+
     /// The last song captured from the live source, once.
     pub fn take_live_song(&self) -> Option<midzer_hear::Capture> {
         self.shared.live_song.lock().ok()?.take()
@@ -287,7 +305,8 @@ fn forward(shared: Arc<Shared>, midi: Arc<Mutex<midi::Midi>>, heard: mpsc::Recei
         while let Ok(h) = heard.try_recv() {
             on_update(match h {
                 hear::Listened::Chords(spans) => Update::Chords { spans, heard_frame: shared.heard_frame() },
-                hear::Listened::Song { seconds, flags } => Update::LiveSong { seconds, flags },
+                hear::Listened::Song { seconds, flags, followed } => Update::LiveSong { seconds, flags, followed },
+                hear::Listened::Follow { id, frame, seconds } => Update::LiveFollow { id, frame, seconds, heard_frame: shared.heard_frame() },
             });
         }
         while shared.synth_out.pop().is_some() {}

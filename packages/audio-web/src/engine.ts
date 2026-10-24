@@ -63,18 +63,50 @@ export interface LiveSongCapture {
   complete: boolean;
   /** Mono 16-bit samples at 22.05 kHz, in the browser; the desktop app keeps them natively (see `analyzeLiveSong`). */
   samples?: Int16Array;
+  /** The stored song (its `LiveLibrarySong` id) followed for long in it: it is that song, heard again. */
+  followed?: number;
 }
 
 export type LiveSongListener = (song: LiveSongCapture) => void;
+
+/** A stored song for the listener to recognise in live sources and follow (see crates/midzer-hear recognise.rs). */
+export interface LiveLibrarySong {
+  /** The app's number for it: a whole number, unique in the session. */
+  id: number;
+  /** Its fingerprint: landmark hash, frame, hash, frame, … */
+  landmarks: Uint32Array;
+  /** When each chart beat falls, in seconds into the audio the fingerprint came from, plus the end of the last bar. */
+  beatTimes: Float64Array;
+  /** The chord of each beat: root · 16 + quality, or −1 for none. */
+  chords: Int32Array;
+  /** How long that audio was. */
+  seconds: number;
+}
+
+/** A stored song recognised in the live source: `seconds` into it at `timeMs` (the source's time, as for chords). */
+export interface LiveFollow {
+  id: number;
+  seconds: number;
+  timeMs: number;
+}
+
+/** Gets the song followed, or null when none is any more. */
+export type LiveFollowListener = (follow: LiveFollow | null) => void;
 
 /** The rate captured songs are in. */
 export const LIVE_SONG_RATE = 22_050;
 
 /** A captured song as the listener sends it. */
-export function liveSongOf(samples: Int16Array | null, seconds: number, flags: number): LiveSongCapture {
+export function liveSongOf(samples: Int16Array | null, seconds: number, flags: number, followed = -1): LiveSongCapture {
   const song: LiveSongCapture = { seconds, complete: (flags & 3) === 3 };
   if (samples) song.samples = samples;
+  if (followed >= 0) song.followed = followed;
   return song;
+}
+
+/** A follow as the listener sends it: id −1 for none. */
+export function liveFollowOf(id: number, seconds: number, timeMs: number): LiveFollow | null {
+  return id < 0 ? null : { id, seconds, timeMs };
 }
 
 export interface MicOptions {
@@ -127,6 +159,12 @@ export interface EngineHandle {
   readonly canLearnSongs: boolean;
   /** Ends the live song being captured here, so `onLiveSong` gets it now. */
   finishLiveSong(): void;
+  /** The stored songs to recognise in live sources, replacing those before. */
+  setLiveLibrary(songs: LiveLibrarySong[]): void;
+  /** The stored song recognised and followed; returns an unsubscribe function. */
+  onLiveFollow(listener: LiveFollowListener): () => void;
+  /** "Not this song": stops following it until the next silence or `resetLive`. */
+  ignoreLiveSong(id: number): void;
   /** Loads an SF2 file; resolves false if it could not be parsed. */
   loadSoundFont(bytes: ArrayBuffer): Promise<boolean>;
   /** Hands the engine a backing track (its sample arrays are moved), or frees it with null. Rejects if it can't be read. */
@@ -191,6 +229,7 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
   const listeners = new Set<EventListener>();
   const chordListeners = new Set<LiveChordListener>();
   const songListeners = new Set<LiveSongListener>();
+  const followListeners = new Set<LiveFollowListener>();
   const sampleRate = context.sampleRate;
 
   /** Maps an AudioContext frame to the performance.now() time it is heard. */
@@ -245,6 +284,7 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
 
   // The listener starts with the first live source and stays for the session.
   let hearing: Worker | null = null;
+  let library: LiveLibrarySong[] | null = null;
   const startHearing = () => {
     if (!tap || !hearUrl || hearing) return;
     hearing = new Worker(hearWorkerUrl, { type: 'module' });
@@ -257,8 +297,11 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
         const spans = decodeChordSpans(msg.spans, (frame) => timeOfFrame(frame + offset));
         for (const listener of chordListeners) listener(spans);
       } else if (msg.type === 'song') {
-        const song = liveSongOf(msg.samples, msg.samples.length / LIVE_SONG_RATE, msg.flags);
+        const song = liveSongOf(msg.samples, msg.samples.length / LIVE_SONG_RATE, msg.flags, msg.followed);
         for (const listener of songListeners) listener(song);
+      } else if (msg.type === 'follow') {
+        const follow = liveFollowOf(msg.id, msg.seconds, timeOfFrame(msg.frame + tap.frameOffset));
+        for (const listener of followListeners) listener(follow);
       } else {
         console.warn(`midzer: the listener stopped: ${msg.message}`);
         tap.enabled = false;
@@ -266,6 +309,7 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
     };
     hearing.postMessage({ type: 'start', wasmUrl: hearUrl, tap: tap.buffer, sampleRate } satisfies HearRequest);
     hearing.postMessage({ type: 'capture', on: true } satisfies HearRequest);
+    if (library) hearing.postMessage({ type: 'library', songs: library } satisfies HearRequest);
   };
 
   const { outputLatency = 0, baseLatency = 0 } = context;
@@ -289,6 +333,17 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
     canLearnSongs: tap !== null,
     finishLiveSong() {
       hearing?.postMessage({ type: 'finish' } satisfies HearRequest);
+    },
+    setLiveLibrary(songs) {
+      library = songs;
+      hearing?.postMessage({ type: 'library', songs } satisfies HearRequest);
+    },
+    onLiveFollow(listener) {
+      followListeners.add(listener);
+      return () => followListeners.delete(listener);
+    },
+    ignoreLiveSong(id) {
+      hearing?.postMessage({ type: 'ignore', id } satisfies HearRequest);
     },
     loadSoundFont(bytes) {
       return new Promise((resolve) => {
@@ -383,6 +438,7 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
       listeners.clear();
       chordListeners.clear();
       songListeners.clear();
+      followListeners.clear();
       node.disconnect();
       await context.close();
     },

@@ -18,6 +18,14 @@
 //!   repeat (a loop of 1 to 8 bars), the coming beats are predicted from the
 //!   loop, beat by beat.
 //!
+//! With a library of stored songs, the last seconds are also looked up in
+//! their fingerprints every couple of seconds. Once a song is recognised,
+//! the listener follows it: the grids come from its stored beat map (its
+//! beat, the tempo there and its 1) and the chords from its stored chart,
+//! known ahead, while Beat This! only keeps the place in the song exact.
+//! Losing the song, or hearing another, is a change of song: the capture
+//! is cut there.
+//!
 //! The results are in the engine's frames, so the engine can line them up
 //! with what it hears however late they arrive. This runs off the audio
 //! thread (a worker in the browser, a thread on the desktop) and allocates.
@@ -29,7 +37,10 @@ use midzer_core::Chord;
 use crate::beat_this::{BeatThis, FPS, MELS};
 use crate::btc::{BINS, Btc, CLASSES, FRAMES as CHORD_FRAMES, chord_of};
 use crate::cqt::{Cqt, HOP as CQT_HOP};
+use crate::fingerprint::{FPS as MARK_FPS, fingerprint};
 use crate::mel::{HOP as MEL_HOP, Mel, SIZE as MEL_SIZE};
+use crate::offline::refine;
+use crate::recognise::{Library, MATCH_VOTES, Match};
 use crate::resample::Resampler;
 
 pub const RATE: f64 = 22_050.0;
@@ -72,6 +83,30 @@ const PRE_ROLL_S: f64 = 0.5;
 const CAPTURE_MIN_S: f64 = 30.0;
 const CAPTURE_MAX_S: f64 = 15.0 * 60.0;
 const CLEAN_START_S: f64 = 0.25;
+/// Seconds of audio looked up in the library, and how often.
+const RECOGNISE_S: f64 = 8.0;
+const RECOGNISE_EVERY_S: f64 = 2.0;
+/// Looks-ups in a row that miss the song followed before it counts as lost;
+/// a look-up counts only with this many landmarks (music, not a quiet bit).
+const LOST_MISSES: u32 = 2;
+const MISS_MIN_MARKS: usize = 120;
+/// The landmark frames around the place expected that still count as it.
+const NEAR_FRAMES: i32 = 2;
+/// How often a song followed is told, in seconds; its chords are told from
+/// this far back and this many beats ahead.
+const FOLLOW_EVERY_S: f64 = 1.0;
+const FOLLOW_BACK_S: f64 = 10.0;
+const FOLLOW_AHEAD: usize = 8;
+/// Network beats this close to the stored ones (s) move the place in the
+/// song, when at least `REFINE_BEATS` are.
+const REFINE_S: f64 = 0.07;
+const REFINE_BEATS: usize = 4;
+/// How much a stored 1 counts for where the 1 is while following, against
+/// the network's downbeats (one bar phase is stored for a whole song, so
+/// it is wrong after odd bars).
+const STORED_ONE: f32 = 0.3;
+/// A capture is of a stored song if it was followed for this long (s).
+const FOLLOWED_MIN_S: f64 = 10.0;
 
 /// How the listening runs; the defaults are what `examples/hear_eval.rs` found best.
 #[derive(Clone, Copy, Debug)]
@@ -137,6 +172,8 @@ pub struct Capture {
     /// Heard from its start (quiet came before it), and to its end (quiet came after it).
     pub clean_start: bool,
     pub clean_end: bool,
+    /// The stored song followed for the most of it (the library's id), if any was for long.
+    pub followed: Option<u32>,
 }
 
 impl Capture {
@@ -149,11 +186,42 @@ impl Capture {
     }
 }
 
+/// A stored song being followed: where it was at an engine frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Following {
+    /// The library's id for it.
+    pub song: u32,
+    pub frame: f64,
+    /// Seconds into the song at `frame`.
+    pub seconds: f64,
+    pub votes: u32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Heard {
     Grid(Grid),
     /// The chords of the last 10 s, oldest first: they replace what was said before about that time.
     Chords(Vec<ChordSpan>),
+    /// A stored song is followed from here (on recognising it, or a jump in
+    /// it), or none is any more.
+    Follow(Option<Following>),
+}
+
+/// The song followed.
+#[derive(Clone, Copy)]
+struct Follow {
+    song: u32,
+    /// Seconds into the song at stream sample `i`: `i / RATE + delta`.
+    delta: f64,
+    /// Look-ups in a row that missed it, and the end of the last that found it (a stream sample).
+    misses: u32,
+    found_until: u64,
+    next_out: u64,
+    /// The last grid told (anchor and period in stream samples), the votes
+    /// for which beat of the bar its anchor is, and the 1 said.
+    grid: Option<(f64, f64)>,
+    votes: [f32; 4],
+    one: Option<u8>,
 }
 
 /// The grid in 22.05 kHz samples, as runs leave it.
@@ -204,6 +272,18 @@ pub struct Hearing {
     capturing: bool,
     capture: Option<Capture>,
     captured: Option<Capture>,
+    /// The stream sample of the capture's first, and how long each song was followed in it.
+    capture_at: u64,
+    followed: Vec<(u32, u64)>,
+    /// The songs kept, the one followed, and those not to recognise till the next silence.
+    library: Library,
+    follow: Option<Follow>,
+    ignore: Vec<u32>,
+    next_recognise: u64,
+    /// What `step` has still to say.
+    pending: Vec<Heard>,
+    /// The network's downbeats from its last run while following, not yet counted (stream sample, sureness).
+    follow_downbeats: Vec<(f64, f32)>,
 }
 
 impl Hearing {
@@ -235,6 +315,14 @@ impl Hearing {
             capturing: false,
             capture: None,
             captured: None,
+            capture_at: 0,
+            followed: Vec::new(),
+            library: Library::default(),
+            follow: None,
+            ignore: Vec::new(),
+            next_recognise: 0,
+            pending: Vec::new(),
+            follow_downbeats: Vec::new(),
         }
     }
 
@@ -261,6 +349,25 @@ impl Hearing {
         self.quiet = 0;
         self.heard = false;
         self.capture = None;
+        self.next_recognise = 0;
+        self.pending.clear();
+        self.unfollow();
+        self.ignore.clear();
+    }
+
+    /// The stored songs to recognise; changing them takes effect at the next look-up.
+    pub fn library(&mut self) -> &mut Library {
+        &mut self.library
+    }
+
+    /// Stops following `song` and doesn't recognise it again until the next silence or reset.
+    pub fn ignore(&mut self, song: u32) {
+        if !self.ignore.contains(&song) {
+            self.ignore.push(song);
+        }
+        if self.follow.is_some_and(|f| f.song == song) {
+            self.end_follow();
+        }
     }
 
     /// Captures the songs heard from now on (or stops, dropping the one
@@ -275,10 +382,32 @@ impl Hearing {
 
     /// Ends the song being captured here; if the music goes on, a new capture starts at once.
     pub fn finish(&mut self) {
+        self.finish_at(self.total());
+    }
+
+    /// Ends the capture at stream sample `cut`; what came after starts the next one.
+    fn finish_at(&mut self, cut: u64) {
+        let rest = match self.capture.as_mut() {
+            Some(c) => {
+                let keep = cut.saturating_sub(self.capture_at) as usize;
+                if keep < c.samples.len() { c.samples.split_off(keep) } else { Vec::new() }
+            }
+            None => Vec::new(),
+        };
+        let at = cut.max(self.capture_at);
         self.end_capture(None);
         if self.capturing && self.heard {
-            self.capture = Some(Capture { from: self.frame_of(self.total() as f64), ..Capture::default() });
+            self.start_capture(at, false);
+            if let Some(c) = self.capture.as_mut() {
+                c.samples = rest;
+            }
         }
+    }
+
+    fn start_capture(&mut self, at: u64, clean_start: bool) {
+        self.capture = Some(Capture { from: self.frame_of(at as f64), clean_start, ..Capture::default() });
+        self.capture_at = at;
+        self.followed.clear();
     }
 
     /// The last song captured, if long enough to keep.
@@ -295,6 +424,7 @@ impl Hearing {
             c.samples.truncate(keep as usize);
             c.clean_end = true;
         }
+        c.followed = self.followed.iter().filter(|f| f.1 as f64 >= FOLLOWED_MIN_S * RATE).max_by_key(|f| f.1).map(|f| f.0);
         if c.seconds() >= CAPTURE_MIN_S {
             self.captured = Some(c);
         }
@@ -323,6 +453,9 @@ impl Hearing {
         self.candidate = None;
         self.chords.clear();
         self.heard = false;
+        self.next_recognise = 0;
+        self.unfollow();
+        self.ignore.clear();
     }
 
     /// Whether the input has been silent long enough to forget the song.
@@ -377,10 +510,16 @@ impl Hearing {
         match sound {
             Some((i, quiet)) if self.capturing && self.capture.is_none() => {
                 let at = (start + i as u64).saturating_sub((PRE_ROLL_S * RATE) as u64).max(self.audio_base);
-                self.capture = Some(Capture { from: self.frame_of(at as f64), clean_start: quiet as f64 >= CLEAN_START_S * RATE, ..Capture::default() });
+                self.start_capture(at, quiet as f64 >= CLEAN_START_S * RATE);
                 self.add_to_capture(at);
             }
             _ => self.add_to_capture(start),
+        }
+        if let (Some(f), Some(_)) = (self.follow, &self.capture) {
+            match self.followed.iter_mut().find(|e| e.0 == f.song) {
+                Some(e) => e.1 += out.len() as u64,
+                None => self.followed.push((f.song, out.len() as u64)),
+            }
         }
         if self.silent() && self.heard {
             // The song stopped; what comes next may be another.
@@ -432,10 +571,30 @@ impl Hearing {
     /// Runs a network if one is due, and says what it heard. Call it after
     /// each [`Hearing::push`]; a run takes a while (up to about half a second).
     pub fn step(&mut self) -> Option<Heard> {
+        if !self.pending.is_empty() {
+            return Some(self.pending.remove(0));
+        }
         if self.silent() {
             return None;
         }
         let total = self.total();
+        if !self.library.is_empty() && self.heard && total >= self.next_recognise && self.audio.len() as f64 >= RECOGNISE_S * RATE {
+            self.next_recognise = total + (RECOGNISE_EVERY_S * RATE) as u64;
+            self.recognise();
+        }
+        if let Some(f) = self.follow {
+            if total >= f.next_out {
+                self.tell_follow();
+            } else if total >= self.next_beat && self.mels.len() / MELS >= (self.settings.beat_min_s * FPS as f64) as usize {
+                // Beat This! still runs, only to keep the place in the song exact.
+                self.next_beat = total + (self.settings.beat_steady_every_s * RATE) as u64;
+                self.refine_follow();
+            }
+            return (!self.pending.is_empty()).then(|| self.pending.remove(0));
+        }
+        if !self.pending.is_empty() {
+            return Some(self.pending.remove(0));
+        }
         let beat_due = total >= self.next_beat && self.mels.len() / MELS >= (self.settings.beat_min_s * FPS as f64) as usize;
         let chords_due = total >= self.next_chords && total >= (self.settings.beat_min_s * RATE) as u64;
         // Chords first: their run is short, and the beat grid carries on by itself meanwhile.
@@ -452,6 +611,191 @@ impl Hearing {
         } else {
             self.next_chords = total + (self.settings.chord_every_s * RATE) as u64;
             Some(Heard::Chords(self.hear_chords()))
+        }
+    }
+
+    /// Looks the last seconds up in the library: finds a song, keeps
+    /// following one, or notices it jumped, stopped or changed.
+    fn recognise(&mut self) {
+        let n = (RECOGNISE_S * RATE) as usize;
+        let total = self.total();
+        let window = total - n as u64;
+        let marks = fingerprint(&self.audio[self.audio.len() - n..]);
+        let votes = self.library.votes(&marks);
+        // A landmark frame is this many stream samples.
+        let frame = RATE / MARK_FPS;
+        let delta = |offset: f64| (offset * frame - window as f64) / RATE;
+        if let Some(f) = self.follow.as_mut() {
+            let expected = (f.delta * RATE + window as f64) / frame;
+            let (near, _) = self.library.near(&votes, f.song, expected, NEAR_FRAMES);
+            if near >= MATCH_VOTES / 2 {
+                f.misses = 0;
+                // Where it was last heard: the window may already hold the next song.
+                if let Some(t) = self.library.last_heard(&marks, f.song, expected, NEAR_FRAMES) {
+                    f.found_until = window + ((t as f64 + 1.0) * frame) as u64;
+                }
+                return;
+            }
+        }
+        match (self.library.recognise(&votes, &self.ignore), self.follow) {
+            // The same song somewhere else: a jump in it.
+            (Some(m), Some(f)) if m.song == f.song => self.start_follow(m, delta(m.offset)),
+            (Some(m), Some(f)) => {
+                self.change_song(f.found_until);
+                self.start_follow(m, delta(m.offset));
+            }
+            (Some(m), None) => self.start_follow(m, delta(m.offset)),
+            (None, Some(f)) if marks.len() >= MISS_MIN_MARKS => {
+                let misses = f.misses + 1;
+                if misses >= LOST_MISSES {
+                    self.end_follow();
+                    self.change_song(f.found_until);
+                } else if let Some(f) = self.follow.as_mut() {
+                    f.misses = misses;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn start_follow(&mut self, m: Match, delta: f64) {
+        let total = self.total();
+        self.follow = Some(Follow { song: m.song, delta, misses: 0, found_until: total, next_out: 0, grid: None, votes: [0.0; 4], one: None });
+        self.follow_downbeats.clear();
+        self.state = None;
+        self.candidate = None;
+        self.pending.push(Heard::Follow(Some(Following { song: m.song, frame: self.frame_of(total as f64), seconds: total as f64 / RATE + delta, votes: m.votes })));
+    }
+
+    /// Stops following; the networks listen afresh.
+    fn end_follow(&mut self) {
+        self.unfollow();
+        let total = self.total();
+        self.state = None;
+        self.candidate = None;
+        self.chords.clear();
+        self.next_beat = total;
+        self.next_chords = total;
+    }
+
+    /// Forgets the song followed, saying so if there was one.
+    fn unfollow(&mut self) {
+        if self.follow.take().is_some() {
+            self.pending.push(Heard::Follow(None));
+        }
+    }
+
+    /// Another song began around stream sample `cut`: the capture ends there.
+    fn change_song(&mut self, cut: u64) {
+        self.finish_at(cut);
+        self.state = None;
+        self.candidate = None;
+        self.chords.clear();
+    }
+
+    /// Says where the song followed is: a grid through its stored beats, the
+    /// 1 voted from its stored 1s and the network's downbeats, and its chords.
+    fn tell_follow(&mut self) {
+        let total = self.total();
+        let Some(mut f) = self.follow else { return };
+        f.next_out = total + (FOLLOW_EVERY_S * RATE) as u64;
+        let now = total as f64 / RATE + f.delta;
+        let Some(song) = self.library.song(f.song) else {
+            self.end_follow();
+            return;
+        };
+        let beats = &song.beats;
+        if beats.len() < 2 || now >= song.seconds.min(beats[beats.len() - 1]) {
+            // Past what was stored of it (a song heard in part before): listen afresh.
+            self.ignore(f.song);
+            return;
+        }
+        let k = beats.partition_point(|&b| b <= now);
+        if k == 0 {
+            self.follow = Some(f);
+            return;
+        }
+        let k = k - 1;
+        let stream = |s: f64| (s - f.delta) * RATE;
+        // A straight grid through the last stored beats: a stray beat in the map doesn't move it.
+        let from = beats.partition_point(|&b| b < now - self.settings.fit_s);
+        let near: Vec<f64> = beats[from..=k].iter().map(|&b| stream(b)).collect();
+        if let Some((anchor, period, _)) = fit(&near).filter(|g| g.2 >= 0.5) {
+            // The votes move with the anchor and fade; the stored 1s and the network's downbeats add to them.
+            if let Some((before, _)) = f.grid {
+                let n = ((anchor - before) / period).round() as i64;
+                let old = f.votes;
+                for v in 0..4 {
+                    f.votes[(v as i64 + n).rem_euclid(4) as usize] = old[v] * VOTE_DECAY;
+                }
+                f.one = f.one.map(|o| (o as i64 + n).rem_euclid(4) as u8);
+            }
+            let on = |t: f64| ((t - anchor) - ((t - anchor) / period).round() * period).abs() < ON_GRID_S * RATE;
+            let place = |t: f64| (-(((t - anchor) / period).round() as i64)).rem_euclid(4) as usize;
+            for (j, &t) in near.iter().enumerate() {
+                if (from + j) % 4 == 0 && on(t) {
+                    f.votes[place(t)] += STORED_ONE;
+                }
+            }
+            for (t, w) in self.follow_downbeats.drain(..) {
+                if on(t) {
+                    f.votes[place(t)] += w;
+                }
+            }
+            let mut order = [0usize, 1, 2, 3];
+            order.sort_by(|&a, &b| f.votes[b].total_cmp(&f.votes[a]));
+            if f.votes[order[0]] >= 1.0 && f.votes[order[0]] > 1.5 * f.votes[order[1]] {
+                f.one = Some(order[0] as u8);
+            }
+            f.grid = Some((anchor, period));
+        }
+        let (anchor, period) = f.grid.unwrap_or((stream(beats[k]), (beats[k + 1] - beats[k]) * RATE));
+        // Until the votes are clear, the stored 1.
+        let one = f.one.unwrap_or_else(|| place_of(&near, from, anchor, period));
+        let grid = Grid { beat: self.frame_of(anchor), period: period * self.input_rate / RATE, one: Some(one), confidence: 1.0 };
+        let first = beats.partition_point(|&b| b <= now - FOLLOW_BACK_S).saturating_sub(1);
+        let last = (k + FOLLOW_AHEAD).min(song.chords.len()).min(beats.len() - 1);
+        let mut spans: Vec<ChordSpan> = Vec::new();
+        for j in first..last {
+            let (from, to, chord) = (self.frame_of(stream(beats[j])), self.frame_of(stream(beats[j + 1])), song.chords[j]);
+            match spans.last_mut() {
+                Some(s) if s.chord == chord => s.to = to,
+                _ => spans.push(ChordSpan { from, to, chord, predicted: false }),
+            }
+        }
+        self.follow = Some(f);
+        self.pending.push(Heard::Grid(grid));
+        self.pending.push(Heard::Chords(spans));
+    }
+
+    /// Moves the place in the song followed halfway to where the network's beats put it.
+    fn refine_follow(&mut self) {
+        let available = self.mels.len() / MELS;
+        let n = available.min((self.settings.beat_window_s * FPS as f64) as usize);
+        let first = available - n;
+        let logits = self.beat_this.run(&self.mels[first * MELS..], n);
+        let edge = (self.settings.edge_s * FPS as f64).round() as usize;
+        let base = (self.mel_base + first as u64) as f64;
+        let Some(id) = self.follow.map(|f| f.song) else { return };
+        let (Some(f), Some(song)) = (self.follow.as_mut(), self.library.song(id)) else { return };
+        self.follow_downbeats = peaks(&logits.downbeat)
+            .into_iter()
+            .filter(|p| p.0 >= 6.0 && p.0 < (n - edge) as f64)
+            .map(|(j, v)| ((base + refine(&logits.downbeat, j)) * MEL_HOP as f64, crate::nn::sigmoid(v)))
+            .collect();
+        let mut off: Vec<f64> = peaks(&logits.beat)
+            .into_iter()
+            .filter(|p| p.0 >= 6.0 && p.0 < (n - edge) as f64)
+            .filter_map(|(j, _)| {
+                let t = (base + refine(&logits.beat, j)) * MEL_HOP as f64 / RATE + f.delta;
+                let i = song.beats.partition_point(|&b| b < t);
+                let near = [i.checked_sub(1), Some(i)].into_iter().flatten().filter_map(|i| song.beats.get(i)).map(|&b| b - t).min_by(|a, b| a.abs().total_cmp(&b.abs()))?;
+                (near.abs() < REFINE_S).then_some(near)
+            })
+            .collect();
+        if off.len() >= REFINE_BEATS {
+            off.sort_by(f64::total_cmp);
+            f.delta += 0.5 * off[off.len() / 2];
         }
     }
 
@@ -652,6 +996,14 @@ impl Hearing {
         }
         out
     }
+}
+
+/// Which beat of the bar the grid's anchor is, by the stored 1 nearest it
+/// (`near` are stored beats from chart beat `from` on, in stream samples).
+fn place_of(near: &[f64], from: usize, anchor: f64, period: f64) -> u8 {
+    let Some((j, &t)) = near.iter().enumerate().min_by(|a, b| (a.1 - anchor).abs().total_cmp(&(b.1 - anchor).abs())) else { return 0 };
+    let n = ((t - anchor) / period).round() as i64;
+    ((from + j) as i64 - n).rem_euclid(4) as u8
 }
 
 /// A chord's root and whether it is minor: what a loop must repeat (the
@@ -937,6 +1289,115 @@ mod tests {
         hearing.set_capture(false);
         feed(&mut hearing, &music, at + 200_000);
         assert!(hearing.take_song().is_none() && hearing.capture.is_none());
+    }
+
+    /// Pushes and steps, keeping all that is heard.
+    fn hear_all(hearing: &mut Hearing, signal: &[f32], from: u64) -> (u64, Vec<Heard>) {
+        let mut heard = Vec::new();
+        for (i, block) in signal.chunks(2048).enumerate() {
+            hearing.push(block, from + (i * 2048) as u64);
+            while let Some(h) = hearing.step() {
+                heard.push(h);
+            }
+        }
+        (from + signal.len() as u64, heard)
+    }
+
+    fn follows(heard: &[Heard]) -> Vec<Option<Following>> {
+        heard.iter().filter_map(|h| if let Heard::Follow(f) = h { Some(*f) } else { None }).collect()
+    }
+
+    /// A stored song of 60 s: the fingerprint test's tune, a beat every half second and C throughout.
+    fn stored(hearing: &mut Hearing, seconds: f64) -> Vec<f32> {
+        use crate::fingerprint::tests::tune;
+        use crate::recognise::StoredSong;
+        use midzer_core::Quality;
+        let music = tune(60.0, 1);
+        let beats: Vec<f64> = (0..=(seconds * 2.0) as usize).map(|i| i as f64 * 0.5).collect();
+        let chords = vec![Some(Chord { root: 0, quality: Quality::Major, bass: 0 }); beats.len() - 1];
+        let marks = fingerprint(&music[..(seconds * RATE) as usize]);
+        hearing.library().add(StoredSong { id: 7, beats, chords, seconds }, marks);
+        music
+    }
+
+    #[test]
+    fn a_stored_song_is_followed_on_its_beats_and_across_a_jump() {
+        let mut hearing = Hearing::with_models(RATE as f32).unwrap();
+        let music = stored(&mut hearing, 60.0);
+        // Opened 10 s into the song, at engine frame 1000.
+        let (at, heard) = hear_all(&mut hearing, &music[(10.0 * RATE) as usize..(30.0 * RATE) as usize], 1000);
+        let f = follows(&heard);
+        assert_eq!(f.len(), 1, "{f:?}");
+        let f = f[0].unwrap();
+        assert_eq!(f.song, 7);
+        // Song time s is engine frame 1000 + (s − 10) · RATE.
+        let frame = |s: f64| 1000.0 + (s - 10.0) * RATE;
+        assert!((frame(f.seconds) - f.frame).abs() < 0.03 * RATE, "{f:?}");
+        // The grids from the stored song: those after it was recognised.
+        let start = heard.iter().position(|h| matches!(h, Heard::Follow(_))).unwrap();
+        let grids: Vec<Grid> = heard[start..].iter().filter_map(|h| if let Heard::Grid(g) = h { Some(*g) } else { None }).collect();
+        assert!(grids.len() >= 5);
+        for (i, g) in grids.iter().enumerate() {
+            let s = 10.0 + (g.beat - 1000.0) / RATE;
+            let k = (s / 0.5).round();
+            assert!((s - k * 0.5).abs() < 0.01, "a grid at {s} s");
+            // The stored 1 first; then the network's downbeats have a say (this tune has no bars).
+            assert!(g.one.is_some());
+            if i == 0 {
+                assert_eq!(g.one, Some((k as i64 % 4) as u8));
+            }
+            assert!((g.period - 0.5 * RATE).abs() < 1.0 && g.confidence == 1.0);
+        }
+        assert!(heard.iter().any(|h| matches!(h, Heard::Chords(c) if !c.is_empty() && c.iter().all(|c| !c.predicted && c.chord.is_some_and(|c| c.root == 0)))));
+
+        // The player jumps to 45 s: followed there, with no change of song.
+        let (_, heard) = hear_all(&mut hearing, &music[(45.0 * RATE) as usize..(58.0 * RATE) as usize], at);
+        let f: Vec<_> = follows(&heard).into_iter().flatten().collect();
+        assert_eq!(f.len(), 1, "{f:?}");
+        let s = 45.0 + (f[0].frame - at as f64) / RATE;
+        assert!((f[0].seconds - s).abs() < 0.03, "{:?} at {s}", f[0]);
+        assert!(!follows(&heard).contains(&None));
+    }
+
+    #[test]
+    fn other_music_ends_the_song_and_cuts_the_capture_there() {
+        use crate::fingerprint::tests::tune;
+        let mut hearing = Hearing::with_models(RATE as f32).unwrap();
+        hearing.set_capture(true);
+        let music = stored(&mut hearing, 60.0);
+        let (at, _) = hear_all(&mut hearing, &vec![0.0; RATE as usize], 0);
+        let (at, heard) = hear_all(&mut hearing, &music[..(40.0 * RATE) as usize], at);
+        assert!(follows(&heard).first().is_some_and(|f| f.is_some()));
+        let (at, heard) = hear_all(&mut hearing, &tune(40.0, 2), at);
+        assert_eq!(follows(&heard), vec![None]);
+        let c = hearing.take_song().expect("the stored song's capture");
+        assert!(c.clean_start && !c.clean_end && c.followed == Some(7));
+        assert!((39.0..43.0).contains(&c.seconds()), "{} s", c.seconds());
+        hear_all(&mut hearing, &vec![0.0; 3 * RATE as usize], at);
+        let c = hearing.take_song().expect("the other music");
+        assert!(!c.clean_start && c.clean_end && c.followed.is_none());
+        assert!((36.0..42.0).contains(&c.seconds()), "{} s", c.seconds());
+    }
+
+    #[test]
+    fn not_this_song_and_the_end_of_a_partial_song_stop_following() {
+        let mut hearing = Hearing::with_models(RATE as f32).unwrap();
+        hearing.set_capture(true);
+        // Only its first 30 s were stored.
+        let music = stored(&mut hearing, 30.0);
+        let (at, heard) = hear_all(&mut hearing, &music[..(29.0 * RATE) as usize], 0);
+        assert!(follows(&heard).first().is_some_and(|f| f.is_some()));
+        let (at, heard) = hear_all(&mut hearing, &music[(29.0 * RATE) as usize..(45.0 * RATE) as usize], at);
+        assert_eq!(follows(&heard), vec![None], "stops quietly past the end");
+        assert!(hearing.take_song().is_none(), "the capture goes on");
+
+        hearing.reset();
+        let (at, heard) = hear_all(&mut hearing, &music[..(15.0 * RATE) as usize], at + 10_000);
+        assert!(follows(&heard).first().is_some_and(|f| f.is_some()));
+        hearing.ignore(7);
+        let (_, heard) = hear_all(&mut hearing, &music[(15.0 * RATE) as usize..(28.0 * RATE) as usize], at);
+        let f = follows(&heard);
+        assert!(f.first() == Some(&None) && f.len() == 1, "{f:?}");
     }
 
     #[test]

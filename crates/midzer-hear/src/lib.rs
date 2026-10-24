@@ -24,13 +24,15 @@ pub mod mel;
 pub mod mzm;
 pub mod nn;
 pub mod offline;
+pub mod recognise;
 pub mod resample;
 
 pub use beat_this::BeatThis;
 pub use btc::Btc;
 pub use fingerprint::{Landmark, fingerprint};
-pub use hearing::{Capture, ChordSpan, Grid, Heard, Hearing, Settings, chord_over};
+pub use hearing::{Capture, ChordSpan, Following, Grid, Heard, Hearing, Settings, chord_over};
 pub use offline::{SongHeard, TimedChord, hear_beats, hear_chords, hear_song};
+pub use recognise::{Library, Match, StoredSong};
 
 /// The weights, as converted.
 pub const BEAT_THIS: &[u8] = include_bytes!("../models/beat-this-small.mzm");

@@ -2032,6 +2032,29 @@ code {
   padding: var(--space-4) var(--space-6);
 }
 
+.along-followed {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-6);
+  border-left: 3px solid var(--color-accent-default);
+}
+
+.followed-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--color-accent-default);
+  box-shadow: 0 0 10px var(--color-accent-default);
+}
+
+.along-followed .learned-title .learned-meta {
+  display: inline;
+  font-weight: 400;
+}
+
 .learned-song {
   display: flex;
   align-items: center;

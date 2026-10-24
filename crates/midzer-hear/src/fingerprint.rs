@@ -129,13 +129,13 @@ fn peaks(spec: &[f32], frames: usize) -> Vec<(usize, usize)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
 
     use super::*;
 
     /// Random notes with a few harmonics, a new one every quarter second.
-    fn tune(seconds: f64, seed: u32) -> Vec<f32> {
+    pub(crate) fn tune(seconds: f64, seed: u32) -> Vec<f32> {
         let mut seed = seed;
         let mut next = || {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);

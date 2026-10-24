@@ -206,9 +206,9 @@ test('play along on keys: the keys of each chord fall onto the keyboard, by leve
   expect(errors).toEqual([]);
 });
 
-test('play along: a song heard is learned and kept, without its audio', async ({ page }) => {
-  // Half a minute of listening at least, then the analysis.
-  test.setTimeout(150_000);
+test('play along: a song heard is learned and kept, without its audio, and recognised again', async ({ page }) => {
+  // Half a minute of listening at least, then the analysis, then recognising it.
+  test.setTimeout(210_000);
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
@@ -231,6 +231,16 @@ test('play along: a song heard is learned and kept, without its audio', async ({
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/17-play-along-learned.png` });
   await learned.getByRole('button', { name: 'Keep' }).click();
   await expect(learned).toContainText('in My songs');
+
+  // Kept, it is recognised as it goes on, and followed from what was stored.
+  const followed = page.getByTestId('along-followed');
+  await expect(followed).toContainText(/Following\s*Heard /, { timeout: 30_000 });
+  await followed.getByRole('button', { name: 'Not this song' }).click();
+  await expect(followed).toBeHidden();
+  // Starting over, it is recognised again.
+  await page.getByRole('button', { name: 'Start over' }).click();
+  await expect(followed).toBeVisible({ timeout: 30_000 });
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/18-play-along-following.png` });
 
   await page.getByRole('button', { name: 'Stop listening' }).click();
   await page.getByRole('button', { name: 'Back' }).click();

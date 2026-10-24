@@ -109,7 +109,7 @@ fn beat_logits(model: &mut BeatThis, mels: &[f32], progress: &mut dyn FnMut(f32)
 
 /// A peak's frame to a fraction of a frame: the top of a parabola through
 /// the logits around it. Peaks already between two frames stay.
-fn refine(logits: &[f32], at: f64) -> f64 {
+pub(crate) fn refine(logits: &[f32], at: f64) -> f64 {
     let j = at as usize;
     if at.fract() != 0.0 || j == 0 || j + 1 >= logits.len() {
         return at;

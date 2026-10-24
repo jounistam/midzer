@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { liveSongOf } from './engine';
-import { decodeInputCommand, frameTime } from './native';
+import { liveFollowOf, liveSongOf } from './engine';
+import { decodeInputCommand, encodeLibrary, frameTime } from './native';
 import { encodeCommand } from './protocol';
 
 describe('native host', () => {
@@ -10,6 +10,26 @@ describe('native host', () => {
     expect(liveSongOf(null, 200, 2).complete).toBe(false);
     const samples = new Int16Array(4);
     expect(liveSongOf(samples, 1, 3).samples).toBe(samples);
+    expect(liveSongOf(null, 200, 3, 4).followed).toBe(4);
+    expect(liveSongOf(null, 200, 3, -1)).not.toHaveProperty('followed');
+  });
+
+  it('reads a follow, and −1 as none', () => {
+    expect(liveFollowOf(2, 31.5, 1000)).toEqual({ id: 2, seconds: 31.5, timeMs: 1000 });
+    expect(liveFollowOf(-1, 0, 0)).toBeNull();
+  });
+
+  it('lays the library out as live_library reads it', () => {
+    const bytes = encodeLibrary([
+      { id: 7, landmarks: new Uint32Array([1, 2, 3, 4]), beatTimes: new Float64Array([0.5, 1]), chords: new Int32Array([-1]), seconds: 30 },
+    ]);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    expect(bytes.byteLength).toBe(4 + 24 + 16 + 16 + 4);
+    expect([0, 4, 8, 12, 16].map((at) => view.getUint32(at, true))).toEqual([1, 7, 2, 2, 1]);
+    expect(view.getFloat64(20, true)).toBe(30);
+    expect(view.getUint32(28 + 12, true)).toBe(4);
+    expect(view.getFloat64(44, true)).toBe(0.5);
+    expect(view.getInt32(60, true)).toBe(-1);
   });
 
   it('times frames against the frame being heard', () => {

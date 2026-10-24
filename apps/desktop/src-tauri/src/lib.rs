@@ -49,7 +49,8 @@ enum UiUpdate {
     Input { words: Vec<u32> },
     Ports { inputs: Vec<Port>, outputs: Vec<Port> },
     Chords { spans: Vec<f64>, heard_frame: f64 },
-    LiveSong { seconds: f64, flags: u32 },
+    LiveSong { seconds: f64, flags: u32, followed: i32 },
+    LiveFollow { id: i32, frame: f64, seconds: f64, heard_frame: f64 },
 }
 
 impl From<Ports> for UiUpdate {
@@ -82,7 +83,8 @@ fn engine_start(state: State<AppEngine>, on_update: Channel<UiUpdate>) -> Result
             Update::Input { words } => UiUpdate::Input { words },
             Update::Ports(ports) => ports.into(),
             Update::Chords { spans, heard_frame } => UiUpdate::Chords { spans, heard_frame },
-            Update::LiveSong { seconds, flags } => UiUpdate::LiveSong { seconds, flags },
+            Update::LiveSong { seconds, flags, followed } => UiUpdate::LiveSong { seconds, flags, followed },
+            Update::LiveFollow { id, frame, seconds, heard_frame } => UiUpdate::LiveFollow { id, frame, seconds, heard_frame },
         };
         let _ = on_update.send(update);
     }))?;
@@ -153,6 +155,23 @@ fn live_close(state: State<AppEngine>) -> Result<(), String> {
 fn live_song_finish(state: State<AppEngine>) -> Result<(), String> {
     with_engine(&state, |engine| {
         engine.finish_live_song();
+        Ok(())
+    })
+}
+
+/// The stored songs to recognise in the live source, as the raw request body (`encodeLibrary` in native.ts).
+#[tauri::command]
+fn live_library(state: State<AppEngine>, request: Request) -> Result<(), String> {
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Expected the library as raw bytes.".into());
+    };
+    with_engine(&state, |engine| engine.set_live_library(bytes))
+}
+
+#[tauri::command]
+fn live_ignore(state: State<AppEngine>, id: u32) -> Result<(), String> {
+    with_engine(&state, |engine| {
+        engine.ignore_live_song(id);
         Ok(())
     })
 }
@@ -316,6 +335,8 @@ pub fn run() {
             live_close,
             live_song_finish,
             live_song_analyze,
+            live_library,
+            live_ignore,
             midi_ports,
             midi_set_output,
             audio_load,

@@ -6,7 +6,7 @@ Live play-along guesses everything from the last 8–16 s. Beat This! and BTC se
 
 The goal is super-accurate beats. The way there is to analyse a song once, with full context, store it, then recognise it and follow the stored grid.
 
-The user chose to build it in slices. This plan details slices 1 and 2; slices 3–5 are outlined and each gets its own plan later.
+The user chose to build it in slices. This plan details slices 1–4; slice 5 is outlined and gets its own plan later.
 - Songs are identified by **metadata when available, and a local audio fingerprint otherwise**.
 - Songs learned from live audio store **analysis + fingerprint only, no audio**.
 
@@ -21,7 +21,7 @@ Existing pieces this builds on:
 ---
 
 ## Status (2026-10-24)
-- Slices 1–3 are built; results and what is open are in `docs/PLAN.md` Status ("Accurate stored songs").
+- Slices 1–4 are built; results and what is open are in `docs/PLAN.md` Status ("Accurate stored songs").
 - Changes from the plan:
   - Slice 1: `Live` ignores guides whose beat is before the last start-over, because a network run already under way re-locked the tracker to the old song.
   - Slice 2: downbeats were 0.58 → 0.63 F only. The network's own downbeats score 0.91, but one bar phase for the whole song misplaces the 1 after odd bars (2, 3 or 5 beats) that most of the test songs have. The user chose (2026-10-24) to keep one phase and leave wrong 1s to slice 5's downbeat editing.
@@ -30,6 +30,12 @@ Existing pieces this builds on:
     - The fingerprint is computed now (matching stays in slice 4), because live songs keep no audio.
     - Several learned songs can wait to be kept (up to 5).
     - A capture's end includes the ~0.5 s the level takes to fall.
+  - Slice 4:
+    - The grid from a stored map is a straight fit (`fit`) through its last 6 s of beats, not the local period: the maps have stray beats in places (0.45/0.67 s steps in a steady 0.9 s song), which threw the grid off (beats 78 → 86 % on four songs).
+    - The 1 while following is voted, as live: the stored 1s count a little (0.3 each) and the network's downbeats from its refining runs fully, because one stored bar phase is wrong after odd bars (stored 1s were right 13–19 % on some songs).
+    - Where a song repeats, the earliest of the places that match about as well (80 % of the votes) is taken, so a partial song is followed the longest.
+    - A song change cuts the capture at the last landmark of the old song heard, not at the end of its last look-up (which lands ~6 s into the next song).
+- Measuring slice 4 again: `KNOWN=1 START=60 HEAR_REF=~/.cache/midzer-eval/ref hear_eval $(files24)`, against the same without `KNOWN` (~15 min each, under a 5 GB cap).
 - Measuring slice 2 again: `offline_dump` on `files24.txt` (24 songs, ~20 s each natively, under a 4 GB cap) → `score.py` with the Python in `~/.claude/jobs/05b3b04b/tmp/venv` (it has mir_eval; `~/venv` doesn't).
 
 ## Slice 1: reset after silence + a reset button
@@ -170,21 +176,72 @@ Where the audio is: the listener (`Hearing`) already resamples the live source t
 - Playwright (rebuild first): with the fake source, "Save this song" → the card → Keep → the song is in Songs, with `source: 'live'`.
 - Desktop parts are type-checked only, as before.
 
-## Slice 4 (own plan later): recognise songs and follow the stored grid
-- Metadata: implement `docs/now-playing-plan.md`. A track id maps to a stored song id.
-- Fingerprint: landmark hashes (spectral-peak pairs, Shazam-style) at 11 kHz. They are computed in slice 2/3 analysis and stored in an IndexedDB `fingerprints` store keyed by **song id**, as a `Uint32Array` of hash, frame pairs (`apps/web/src/songs/fingerprints.ts`). Slice 4 builds the hash → (song, frame) index from it in memory at start-up.
-  - What exists (slice 3): `midzer_hear::fingerprint(&[f32] at 22.05 kHz) -> Vec<(hash, frame)>` in `crates/midzer-hear/src/fingerprint.rs`.
-    - Frames run at `fingerprint::FPS` (≈43.07/s; 11.025 kHz, hop 256), from the start of the analysed audio. For imports that is the file's start; for live songs it is the capture's start, which is also where `Song.heard.beatTimes` count from.
-    - Hash = f1 << 13 | (df + 64) << 6 | dt.
-    - The listener can hash a rolling window of its 22.05 kHz `audio` with the same function.
-    - Checked on real songs: a 10 s noisy excerpt gives ~500 votes on the right offset against ~10 for the next best (`best_offset` in the fingerprint test shows the voting).
-  - Beat maps: `Song.backing` (with a recording) or `Song.heard` (live-learned; `complete`, `envelope`, `heardAt`); read `backing ?? heard`.
-  - `Capture.from` is the engine frame of a capture's first sample, if following ever needs it.
-  - Partial live songs (`heard.complete === false`) should be extended when recognised again (moved here from slice 3). The listener hashes the live input every ~2 s and votes on (song, time offset). A clear vote (N matching hashes on one offset) means a match **and** the position in the song.
-- Song change without metadata: silence, a lost match, a jump in tempo or key, or a sudden novelty in chroma.
-- Following: when matched, the engine gets the stored beat map (a new `LiveSong` command: beat times + downbeat). It plays the beats and the 1 from it, locked by the fingerprint offset and refined by onset cross-correlation. The live tracker only watches for drift, a lost match or a skip (seek). All chords are known ahead.
+## Slice 4: recognise songs and follow the stored grid
+The user chose (2026-10-24) to recognise by fingerprint only. Now-playing metadata (`docs/now-playing-plan.md`) becomes a slice of its own later.
+
+Where it runs: the listener (`Hearing`) already has the last 16 s of the live source at 22.05 kHz, sees the silences, owns the capture and sends the guides, so recognising and following live there too. That keeps web (worker) and desktop (thread) the same.
+
+Change from the outline: no new `LiveSong` engine command. While following, the listener sends the existing `LiveGuide` built from the stored beat map instead of from its own fit: the stored beat, the local stored period, the stored 1, full confidence. The tracker already moves to a guide's grid and snaps its beats to onsets (`tracker.rs guided_beat`), and the guides keep coming about once a second, so tempo drift in the stored map is followed. The core stays unchanged.
+
+What exists (slice 3): `midzer_hear::fingerprint(&[f32] at 22.05 kHz) -> Vec<(hash, frame)>`, frames at `fingerprint::FPS` (≈43.07/s) from the start of the analysed audio (the file for imports, the capture for live songs, which is also where `Song.heard.beatTimes` count from). Beat maps: `Song.backing ?? Song.heard`, `beatTimes` per chart beat; chart beat 0 is a 1.
+
+**Library (new `crates/midzer-hear/src/recognise.rs`)**
+- `Library`: the stored songs, each `{ id: u32, beats: Vec<f64> /*song s*/, chords: Vec<Option<Chord>> /*per beat*/, seconds: f64 }`, plus one sorted `Vec<u64>` index of `hash << 32 | song << 16 | frame`. Frame as u16 covers 25 min at FPS; looked up with `partition_point`. About 8 bytes a landmark: ~20 k landmarks a 4-min song, so 100 songs ≈ 16 MB.
+- `Library::add(id, landmarks, beats, chords, seconds)`, `remove(id)`, `clear()`; the index is rebuilt on change (rare).
+- `Library::recognise(&[Landmark]) -> Option<Match { song, offset_frames, votes }>`:
+  - every heard landmark votes for (song, stored frame − heard frame), the offsets ±1 frame pooled;
+  - a match needs ≥ `MATCH_VOTES` (start at 25 for 8 s heard; tuned on real songs) and ≥ 4× the best vote for another song or an offset more than a beat away.
+
+**Listener (`hearing.rs`)**
+- `set_library(Library)`. Without one, nothing changes (so `hear_eval` and the tests stay as they are).
+- Recognising: every `RECOGNISE_EVERY_S` (2 s) of sound, fingerprint the last `RECOGNISE_S` (8 s) of `audio` and call `recognise`. It's cheap next to Beat This!, and runs in `step` like the networks.
+- A match sets `Follow { song, delta, since }`, where `delta` maps stream samples to song seconds (`song_s = stream_s + delta`). It is exact to about a frame (23 ms) and refined below:
+  - Beat This! keeps running at its steady rate while following. Its beats (made sub-frame with the parabola from `offline.rs`, moved to a shared helper) are compared with the stored beats through `delta`; if ≥ 4 are within 70 ms, `delta` moves halfway to their median difference.
+- While following, `step` does not fit or merge (the state is kept as is) and says:
+  - `Heard::Grid` from the stored map about once a second: the newest stored beat before the stream's end, in engine frames; the period of the stored beats around it; `one` from the beat's chart index mod 4; confidence 1.
+  - `Heard::Chords` from the stored chords, from 10 s back to 8 beats ahead, not marked predicted (they are known). BTC doesn't run.
+  - `Heard::Follow(Some { song, frame, song_s, votes })` when it starts or moves, `Heard::Follow(None)` when it ends.
+- It ends:
+  - past the stored song's end (a partial live song heard further): back to listening, quietly;
+  - when two recognitions in a row while there is sound match neither the song near the expected place nor anything: the match is lost; or another song matches. Both count as a song change: the capture under way is finished there (`finish()`) and the listener `forget()`s, as after a silence;
+  - when the same song matches at a place more than a beat away from where following expects it (a seek): `delta` jumps there, without a change;
+  - at a reset or silence, or by `ignore(song)` ("Not this song"), which keeps that song from matching until the next reset or silence.
+- `Capture` gains `followed: Option<u32>`: the song followed for the most of it.
+
+**ffi (`ffi.rs`) and plumbing**
+- `mzh_alloc(bytes)` for the library data; `mzh_library_clear`, `mzh_library_add(id, landmarks_ptr, len, beats_ptr, n, chords_ptr, seconds)` (chords as the existing code, root · 16 + quality or −1, one i32 per beat), `mzh_library_remove(id)`, `mzh_ignore(id)`.
+- `mzh_step` returns 3 for a follow: song id (−1 none), engine frame, song seconds, votes. `mzh_song_followed` → id or −1.
+- `hear.worker.ts`: `{type:'library', songs}` (replaces it all, buffers transferred), `{type:'ignore', id}`; replies `{type:'follow', id, frame, seconds}` and `song` gains `followed`.
+- `EngineHandle`: `setLiveLibrary(songs: LiveLibrarySong[])`, `ignoreLiveSong(id)`, `onLiveFollow(listener)`; `LiveSongCapture.followed?: number`.
+- Desktop: `live_library` takes the songs as one raw body (like `track_load`), into `Shared.library` with a generation the hear thread picks up; `live_ignore`; `UiUpdate::LiveFollow`; `LiveSong` gains `followed`. Type-checked only, as before.
+
+**App**
+- `apps/web/src/songs/liveLibrary.ts`: builds `LiveLibrarySong`s for songs with a fingerprint and a beat map (`backing ?? heard`): `beatTimes`, a chord code per beat (resolving `''` to the chord before, through `parseChord` and the protocol's quality order), `seconds`. Ids are small numbers given per session, mapped back to song ids.
+- `session.ts`:
+  - sends the library when a live source opens and again (debounced) when songs are kept, deleted or analysed again;
+  - state `liveFollow: null | { songId, title, bpm }` from `onLiveFollow`; `notThisSong()` → `ignoreLiveSong`;
+  - `onLiveSong` with `followed`:
+    - the stored song is an import or complete: the capture is dropped, not analysed (it is a song already known);
+    - a partial live song, and the capture is complete or ≥ 10 s longer: analysed and offered as "Heard more of <title>" with Update / Dismiss. Update replaces its `heard`, chart and fingerprint, keeping the title, artist and style (the confirm is the button, as with "Analyse again");
+    - otherwise dropped.
+- `PlayAlong.tsx`: a Stage/club chip "Following <title> · 118 BPM" with "Not this song", while following. The "Songs heard" card gains the update variant.
+
+**Tests**
+- recognise: two songs in a library (the fingerprint test's `tune`, moved where both tests share it): an 8 s noisy excerpt of the second matches it within a frame; other music and silence match nothing; removing a song stops it matching.
+- hearing, with the bundled networks as in the slice 1 and 3 tests:
+  - with a library holding a tune and its beat map, playing it from 40 s in follows it within ~10 s and the grids land on the stored beats (within 10 ms) with the stored 1;
+  - jumping 30 s on (a seek) moves the follow; switching to other music ends it and finishes the capture; "Not this song" stops it; past a partial song's end it stops quietly;
+  - a capture of a followed song carries `followed`.
+- Real songs (`hear_eval` gains `KNOWN=1`): each song is first analysed whole (`hear_song` + `fingerprint`) into a library, then played in from 60 s in, as if a source opened mid-song. Report the time to follow and the beat/1 scores against `ref/`, next to the live-only scores. Expect beats near the offline 0.93 and the 1 near the stored phase once following, within ~5–10 s.
+- Vitest: `liveLibrary` (chord codes per beat, songs without a map or fingerprint left out); the hear message decode; the capture routing in the session (known → dropped, partial → update offer).
+- Playwright (rebuild first): with the fake source, learn the song as in slice 3 (Save this song → Keep), then Start over: the chip shows "Following Heard …".
+
+**Open, by design**
+- A change between two unknown songs without a silence (gapless playlists) is still captured as one; novelty detection (tempo, key, chroma) is left for later.
+- The bar phase is one per song, as in slice 2; wrong 1s are fixed in slice 5.
 
 ## Slice 5 (own plan later): fix beats and chords
+- Found in slice 4: stored maps have stray beats in places (`hear_eval KNOWN=1` prints how well each stored map matches the reference, as "stored"), and the one bar phase is often wrong. The listener gets fixed maps the next time a source opens: the library is sent then, and when a learned song is kept, but not on edits.
 - A timeline editor in `SongScreen` showing the waveform (stored recording) or the onset envelope (live-learned), with beat lines and chord blocks. It lets you:
   - drag or nudge the downbeat;
   - halve or double the tempo;

@@ -6,11 +6,14 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import {
   decodeChordSpans,
+  liveFollowOf,
   liveSongOf,
   type EngineHandle,
   type EventListener,
   type LiveChordListener,
   type LiveDevice,
+  type LiveFollowListener,
+  type LiveLibrarySong,
   type LiveSongListener,
   type TrackLoaded,
 } from './engine';
@@ -46,7 +49,9 @@ type Update =
   /** What the listener heard in the live source; see `decodeChordSpans`. */
   | { type: 'chords'; spans: number[]; heardFrame: number }
   /** A song captured from the live source, kept natively until `analyzeLiveSong`; flags as in `liveSongOf`. */
-  | { type: 'liveSong'; seconds: number; flags: number };
+  | { type: 'liveSong'; seconds: number; flags: number; followed: number }
+  /** A stored song followed from engine frame `frame`, `seconds` into it; id −1 when none is any more. */
+  | { type: 'liveFollow'; id: number; frame: number; seconds: number; heardFrame: number };
 
 interface Started {
   sampleRate: number;
@@ -85,6 +90,7 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
   const listeners = new Set<EventListener>();
   const chordListeners = new Set<LiveChordListener>();
   const songListeners = new Set<LiveSongListener>();
+  const followListeners = new Set<LiveFollowListener>();
   const portListeners = new Set<(ports: MidiPorts) => void>();
   const inputListeners = new Set<(cmd: EngineCommand) => void>();
   let ports: MidiPorts = { inputs: [], outputs: [] };
@@ -106,8 +112,11 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
       const spans = decodeChordSpans(update.spans, (frame) => frameTime(frame, update.heardFrame, sampleRate, now));
       for (const listener of chordListeners) listener(spans);
     } else if (update.type === 'liveSong') {
-      const song = liveSongOf(null, update.seconds, update.flags);
+      const song = liveSongOf(null, update.seconds, update.flags, update.followed);
       for (const listener of songListeners) listener(song);
+    } else if (update.type === 'liveFollow') {
+      const follow = liveFollowOf(update.id, update.seconds, frameTime(update.frame, update.heardFrame, sampleRate, performance.now()));
+      for (const listener of followListeners) listener(follow);
     } else if (update.type === 'input') {
       const w = update.words;
       for (let i = 0; i + 3 < w.length; i += 4) {
@@ -154,6 +163,16 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
     canLearnSongs: true,
     finishLiveSong() {
       void invoke('live_song_finish');
+    },
+    setLiveLibrary(songs) {
+      invoke('live_library', encodeLibrary(songs)).catch((e: unknown) => console.warn('midzer: live_library failed', e));
+    },
+    onLiveFollow(listener) {
+      followListeners.add(listener);
+      return () => followListeners.delete(listener);
+    },
+    ignoreLiveSong(id) {
+      void invoke('live_ignore', { id });
     },
     async loadSoundFont(bytes) {
       try {
@@ -209,6 +228,7 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
       listeners.clear();
       chordListeners.clear();
       songListeners.clear();
+      followListeners.clear();
       channel.onmessage = () => {};
     },
     midi: {
@@ -226,6 +246,40 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
       },
     },
   };
+}
+
+/**
+ * The stored songs for `live_library`, little-endian: per song its id,
+ * landmark pairs, beats and chords as u32s and its seconds as an f64, then
+ * the landmarks (u32), beat times (f64) and chord codes (i32).
+ */
+export function encodeLibrary(songs: LiveLibrarySong[]): Uint8Array {
+  const size = songs.reduce((n, s) => n + 24 + s.landmarks.byteLength + s.beatTimes.byteLength + s.chords.byteLength, 4);
+  const view = new DataView(new ArrayBuffer(size));
+  let at = 0;
+  const u32 = (v: number) => {
+    view.setUint32(at, v, true);
+    at += 4;
+  };
+  u32(songs.length);
+  for (const s of songs) {
+    u32(s.id);
+    u32(s.landmarks.length >> 1);
+    u32(s.beatTimes.length);
+    u32(s.chords.length);
+    view.setFloat64(at, s.seconds, true);
+    at += 8;
+    for (const v of s.landmarks.subarray(0, s.landmarks.length & ~1)) u32(v);
+    for (const v of s.beatTimes) {
+      view.setFloat64(at, v, true);
+      at += 8;
+    }
+    for (const v of s.chords) {
+      view.setInt32(at, v, true);
+      at += 4;
+    }
+  }
+  return new Uint8Array(view.buffer, 0, at);
 }
 
 /**

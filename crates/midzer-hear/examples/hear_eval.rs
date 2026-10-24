@@ -25,10 +25,17 @@
 //!   within 200 ms); and the same in hindsight.
 //!
 //! Settings: WINDOW, EVERY (beat runs), CHORD_EVERY, EDGE, FIT (seconds), CHANGE_W.
+//!
+//! KNOWN=1 first analyses each song whole, as an import is (beat map, chords
+//! and fingerprint), and gives the listener that as its library, so it can
+//! recognise the song and follow the stored grid. START=<s> plays each song
+//! in from there, as if the source were opened mid-song (scores count from
+//! there; "follow" is how long recognising took, and "stored" how well the
+//! stored beat map itself matches the reference).
 
-use midzer_analyze::{decode, resample};
-use midzer_core::Quality;
-use midzer_hear::{Heard, Hearing};
+use midzer_analyze::{Extras, RATE, analyze, decode, resample};
+use midzer_core::{Chord, Quality};
+use midzer_hear::{Heard, Hearing, StoredSong};
 
 const SR: u32 = 48_000;
 
@@ -83,6 +90,10 @@ struct Score {
     runs: usize,
     compute_s: f64,
     seconds: f64,
+    follow_s: Option<f64>,
+    /// With KNOWN: reference beats the stored map itself has a beat within 70 ms of, and its 1s right.
+    stored_hit: usize,
+    stored_ones: usize,
 }
 
 fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
@@ -106,8 +117,20 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
         .collect();
 
     let d = decode(std::fs::read(path).unwrap()).unwrap();
-    let audio = resample(&d.mono(), d.sample_rate, SR);
+    let mono = d.mono();
+    let audio = resample(&mono, d.sample_rate, SR);
     let mut hearing = Hearing::with_models(SR as f32).unwrap();
+    let mut stored: Vec<f64> = Vec::new();
+    if env("KNOWN").is_some_and(|k| k != 0.0) {
+        let mix = resample(&mono, d.sample_rate, RATE);
+        let a = analyze(&mix, Extras::default(), &mut |_, _| {}).expect("analysis");
+        let chords = a.chords.iter().map(|c| c.map(|c| Chord { root: c.root, quality: Quality::ALL[c.quality as usize], bass: c.bass })).collect();
+        stored = a.beat_times.iter().map(|&t| t as f64).collect();
+        let song = StoredSong { id: 1, beats: stored.clone(), chords, seconds: a.duration as f64 };
+        hearing.library().add(song, a.fingerprint.as_chunks::<2>().0.iter().map(|p| (p[0], p[1])).collect());
+    }
+    let start = env("START").unwrap_or(0.0);
+    let first = ((start * SR as f64) as usize / 2048 * 2048).min(audio.len());
     if let Some(v) = env("WINDOW") {
         hearing.settings.beat_window_s = v;
     }
@@ -129,12 +152,14 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
     // (ready at, result), in seconds.
     let mut grids = Vec::new();
     let mut chords = Vec::new();
-    let mut score = Score { seconds: audio.len() as f64 / SR as f64, ..Score::default() };
+    let mut score = Score { seconds: (audio.len() - first) as f64 / SR as f64, ..Score::default() };
+    let start_s = first as f64 / SR as f64;
     // When the worker is free again.
     let mut free_at = 0.0f64;
-    for (i, block) in audio.chunks(2048).enumerate() {
-        hearing.push(block, (i * 2048) as u64);
-        let now = ((i + 1) * 2048) as f64 / SR as f64;
+    for (i, block) in audio[first..].chunks(2048).enumerate() {
+        // Engine frames are the song's own, from its start.
+        hearing.push(block, (first + i * 2048) as u64);
+        let now = (first + (i + 1) * 2048) as f64 / SR as f64;
         // A busy worker takes the audio that came meanwhile when it is free again.
         while free_at <= now {
             let start = std::time::Instant::now();
@@ -147,13 +172,27 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
             match heard {
                 Heard::Grid(g) => grids.push((ready, g)),
                 Heard::Chords(c) => chords.push((ready, c)),
+                Heard::Follow(f) => {
+                    if f.is_some() && score.follow_s.is_none() {
+                        score.follow_s = Some(ready - start_s);
+                    }
+                }
             }
         }
     }
 
     let mut streak = 0;
     for (i, &(r, _)) in reference.iter().enumerate() {
+        if r < start_s {
+            continue;
+        }
         score.beats += 1;
+        let j = stored.partition_point(|&b| b < r);
+        let near = [j.checked_sub(1), Some(j)].into_iter().flatten().filter(|&j| j < stored.len()).min_by(|&a, &b| (stored[a] - r).abs().total_cmp(&(stored[b] - r).abs()));
+        if let Some(j) = near.filter(|&j| (stored[j] - r).abs() < 0.07) {
+            score.stored_hit += 1;
+            score.stored_ones += (place[i] == Some((j % 4) as u8)) as usize;
+        }
         let Some((_, g)) = grids.iter().rev().find(|(ready, _)| *ready <= r) else { continue };
         let frame = r * SR as f64;
         let k = ((frame - g.beat) / g.period).round();
@@ -166,7 +205,7 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
             score.hit += 1;
             streak += 1;
             if streak == 8 && score.lock_s.is_none() {
-                score.lock_s = Some(reference[i + 1 - 8].0);
+                score.lock_s = Some(reference[i + 1 - 8].0 - start_s);
             }
             if let (Some(one), Some(p)) = (g.one, place[i]) {
                 score.ones += 1;
@@ -179,8 +218,8 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
         }
     }
 
-    let mut t = 0.0;
-    while t < score.seconds {
+    let mut t = start_s;
+    while t < start_s + score.seconds {
         let reference = labels.iter().find(|l| l.0 <= t && t < l.1).map(|l| l.2);
         if let Some(Ok(want)) = reference {
             score.chord_n += 1;
@@ -209,6 +248,9 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
     };
     for w in labels.windows(2) {
         let (Ok(a), Ok(b)) = (w[0].2, w[1].2) else { continue };
+        if w[1].0 < start_s {
+            continue;
+        }
         if a == b || b.is_none() || w[1].1 - w[1].0 < 0.5 {
             continue;
         }
@@ -245,14 +287,18 @@ fn main() {
     let pct = |a: usize, b: usize| 100.0 * a as f64 / b.max(1) as f64;
     let mut all = Score::default();
     let mut locks = Vec::new();
+    let mut follows = Vec::new();
     for (path, s) in files.iter().zip(&scores) {
         let name: String = path.rsplit('/').next().unwrap().chars().take(44).collect();
         println!(
-            "{name:<44} beats {:>3.0}% tempo {:>3.0}% 1s {:>3.0}% | lock {:>5.1}s | chords {:>3.0}% (hindsight {:>3.0}%, predicted {:>3.0}% of the time, {:>3.0}% right) | changes ahead {:>3.0}% hindsight {:>3.0}% | {:.0} ms a run",
+            "{name:<44} stored {:>3.0}% 1s {:>3.0}% | beats {:>3.0}% tempo {:>3.0}% 1s {:>3.0}% | lock {:>5.1}s follow {:>5.1}s | chords {:>3.0}% (hindsight {:>3.0}%, predicted {:>3.0}% of the time, {:>3.0}% right) | changes ahead {:>3.0}% hindsight {:>3.0}% | {:.0} ms a run",
+            pct(s.stored_hit, s.beats),
+            pct(s.stored_ones, s.stored_hit),
             pct(s.hit, s.beats),
             pct(s.tempo, s.beats),
             pct(s.ones_right, s.ones),
             s.lock_s.unwrap_or(f64::NAN),
+            s.follow_s.unwrap_or(f64::NAN),
             pct(s.chord_right, s.chord_n),
             pct(s.hindsight_right, s.chord_n),
             pct(s.predicted_n, s.chord_n),
@@ -278,14 +324,17 @@ fn main() {
         all.compute_s += s.compute_s;
         all.seconds += s.seconds;
         locks.push(s.lock_s.unwrap_or(999.0));
+        follows.push(s.follow_s.unwrap_or(999.0));
     }
     locks.sort_by(f64::total_cmp);
+    follows.sort_by(f64::total_cmp);
     println!(
-        "ALL: beats {:.0}% tempo {:.0}% 1s {:.0}% | median lock {:.1}s | chords {:.0}% (hindsight {:.0}%, predicted {:.0}% of the time, {:.0}% right) | changes ahead {:.0}% hindsight {:.0}% | busy {:.0}% of the time",
+        "ALL: beats {:.0}% tempo {:.0}% 1s {:.0}% | median lock {:.1}s follow {:.1}s | chords {:.0}% (hindsight {:.0}%, predicted {:.0}% of the time, {:.0}% right) | changes ahead {:.0}% hindsight {:.0}% | busy {:.0}% of the time",
         pct(all.hit, all.beats),
         pct(all.tempo, all.beats),
         pct(all.ones_right, all.ones),
         locks[locks.len() / 2],
+        follows[follows.len() / 2],
         pct(all.chord_right, all.chord_n),
         pct(all.hindsight_right, all.chord_n),
         pct(all.predicted_n, all.chord_n),
