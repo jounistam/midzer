@@ -31,6 +31,8 @@ export const live = {
   mic: { level: 0, key: -1 },
   /** The last beat of a live source the player heard (performance.now() ms) and its place in the bar. */
   beatClock: { ms: -Infinity, beat: 0 },
+  /** The last song beat heard (performance.now() ms) and its number from the start of the song. */
+  songClock: { ms: -Infinity, beat: 0 },
   /** Bumped on every change so renderers can skip unchanged frames. */
   version: 0,
 };

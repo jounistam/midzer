@@ -8,7 +8,7 @@ import { BUILTIN_SONGS } from './builtin';
 import type { MelodyNote } from './melody';
 import { deleteFingerprint } from './fingerprints';
 import { deleteRecording } from './recordings';
-import { MAX_BAR_BEATS, MAX_TRACK_BEATS, type Bar, type Song, type SongBacking, type SongHeard, type SongSection, type SongSource } from './song';
+import { MAX_BAR_BEATS, MAX_TRACK_BEATS, type Bar, type Song, type SongBacking, type SongFixes, type SongHeard, type SongSection, type SongSource } from './song';
 
 const LEGACY_KEY = 'midzer.songs';
 const MAX_MELODY_NOTES = 8192;
@@ -48,7 +48,18 @@ function sanitize(value: unknown): Song | null {
     transcription: Array.isArray(s.transcription) ? sanitizeTracks(s.transcription) : undefined,
     backing: sanitizeBacking(s.backing),
     heard: sanitizeHeard(s.heard),
+    fixes: sanitizeFixes(s.fixes),
   };
+}
+
+function sanitizeFixes(value: unknown): SongFixes | undefined {
+  const { beats, bars, chords } = (value ?? {}) as Partial<SongFixes>;
+  const list = (v: unknown) => (Array.isArray(v) ? v.filter((b): b is number => Number.isInteger(b) && b >= 0).slice(0, MAX_TRACK_BEATS) : []);
+  const fixes: SongFixes = {};
+  if (beats === true) fixes.beats = true;
+  if (list(bars).length) fixes.bars = list(bars);
+  if (list(chords).length) fixes.chords = list(chords);
+  return Object.keys(fixes).length ? fixes : undefined;
 }
 
 /** A beat map's times, if well-formed: at least two, only ever moving forward. */
@@ -59,10 +70,13 @@ function beatMap(beatTimes: unknown): number[] | undefined {
 }
 
 function sanitizeBacking(value: unknown): SongBacking | undefined {
-  const { beatTimes, seconds, stemsDir } = (value ?? {}) as Partial<SongBacking>;
+  const { beatTimes, seconds, stemsDir, envelope } = (value ?? {}) as Partial<SongBacking>;
   const times = beatMap(beatTimes);
   if (!times || typeof seconds !== 'number' || !(seconds > 0)) return undefined;
-  return typeof stemsDir === 'string' ? { beatTimes: times, seconds, stemsDir } : { beatTimes: times, seconds };
+  const backing: SongBacking = { beatTimes: times, seconds };
+  if (typeof stemsDir === 'string') backing.stemsDir = stemsDir;
+  if (envelope instanceof Uint8Array) backing.envelope = envelope;
+  return backing;
 }
 
 function sanitizeHeard(value: unknown): SongHeard | undefined {

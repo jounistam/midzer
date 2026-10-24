@@ -7,18 +7,20 @@ import { TimingBar } from '../components/DrummerStage';
 import { HitFeedback } from '../components/HitFeedback';
 import { useStageHeight } from '../components/stageHeight';
 import { TimingReport } from '../components/TimingReport';
+import { TimelineEditor } from '../components/Timeline';
 import { TopBar } from '../components/TopBar';
 import {
   analyzeSongAgain,
   closeSong,
   editSong,
+  redoSong,
   saveSong,
   saveTranscription,
   seekSong,
   setLoop,
   setPlayRecording,
   setRecordingDrums,
-  setTempo,
+  undoSong,
   useSession,
   type LoopRange,
 } from '../session';
@@ -36,6 +38,7 @@ import {
   type Song,
   type SongSection,
 } from '../songs/song';
+import { chartFixes } from '../songs/timeline';
 import { LoadingStatus } from './LoadingStatus';
 import { MissSoundControl } from './PlayAlong';
 
@@ -48,6 +51,7 @@ export function SongScreen() {
   const kitHeight = useStageHeight(200);
   const [editing, setEditing] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
+  useUndoKeys(editing);
   if (!song) return null;
 
   const select = (bar: number, extend: boolean) => {
@@ -76,6 +80,7 @@ export function SongScreen() {
             <SongHeader song={song} editing={editing} onEditing={setEditing} />
             {editing && <EditTools song={song} selection={selection} onSelection={setSelection} />}
             <Chart song={song} editing={editing} selection={selection} onSelect={select} />
+            {editing && (song.backing ?? song.heard) && <TimelineEditor song={song} />}
             <p className="setting-note">
               {editing
                 ? 'Type the chords of each bar: "C" fills the bar, "Am F" splits it, "C . G7 ." gives each beat; "[3/4] C" makes it three beats long. Shift-click bar numbers to select several.'
@@ -87,7 +92,7 @@ export function SongScreen() {
         <aside className="panel control-panel">
           <PlayButton className="full" />
           {song.backing && <RecordingControl />}
-          {song.backing && !isBuiltin(song) && <AnalyseAgain />}
+          {song.backing && !isBuiltin(song) && <AnalyseAgain fixed={!!song.fixes} />}
           {recording && <MissSoundControl />}
           <LoopControl song={song} selection={selection} />
           {!recording && (
@@ -104,6 +109,24 @@ export function SongScreen() {
       {drums ? <KitView height={kitHeight} /> : <Keyboard split={split} />}
     </div>
   );
+}
+
+/** Ctrl-Z / Ctrl-Shift-Z (or Ctrl-Y) undo and redo edits of the song while editing, outside text fields. */
+function useUndoKeys(editing: boolean) {
+  useEffect(() => {
+    if (!editing) return;
+    const key = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!(e.ctrlKey || e.metaKey) || target?.closest('input, textarea, select')) return;
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey) undoSong();
+      else if (k === 'y' || (k === 'z' && e.shiftKey)) redoSong();
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, [editing]);
 }
 
 /** How a drummer's hits sit against the band; or how a drummer's or keys player's sit against the recording, with a report after each run. */
@@ -162,16 +185,16 @@ function RecordingControl() {
 
 type Reading = { type: 'idle' } | { type: 'confirm' } | { type: 'working'; fraction: number; step: number } | { type: 'error'; message: string };
 
-/** Reads the song's recording again with the current analysis; it replaces the chords and beat map, hand edits included. */
-function AnalyseAgain() {
+/** Reads the song's recording again with the current analysis; it replaces the chords and beat map, or keeps what was fixed by hand. */
+function AnalyseAgain({ fixed }: { fixed: boolean }) {
   const [state, setState] = useState<Reading>({ type: 'idle' });
   const abort = useRef<AbortController | null>(null);
   useEffect(() => () => abort.current?.abort(), []);
-  const start = () => {
+  const start = (keep: boolean) => {
     const controller = new AbortController();
     abort.current = controller;
     setState({ type: 'working', fraction: 0, step: 0 });
-    analyzeSongAgain((fraction, step) => !controller.signal.aborted && setState({ type: 'working', fraction, step }), controller.signal)
+    analyzeSongAgain((fraction, step) => !controller.signal.aborted && setState({ type: 'working', fraction, step }), controller.signal, keep)
       .then(() => !controller.signal.aborted && setState({ type: 'idle' }))
       .catch((e: unknown) => !controller.signal.aborted && setState({ type: 'error', message: e instanceof Error ? e.message : String(e) }));
   };
@@ -188,11 +211,27 @@ function AnalyseAgain() {
           Analyse again
         </button>
       )}
-      {state.type === 'confirm' && (
+      {state.type === 'confirm' && fixed && (
+        <>
+          <p className="setting-note">Reads the recording again for the beat, chords and sections. Keep the beats, bar lines and chords you fixed by hand, or replace everything?</p>
+          <div className="actions">
+            <button className="btn btn-primary" onClick={() => start(true)}>
+              Keep my fixes
+            </button>
+            <button className="btn btn-secondary" onClick={() => start(false)}>
+              Replace all
+            </button>
+            <button className="btn btn-ghost" onClick={cancel}>
+              Cancel
+            </button>
+          </div>
+        </>
+      )}
+      {state.type === 'confirm' && !fixed && (
         <>
           <p className="setting-note">Reads the recording again for the beat, chords and sections. Your changes to the chords are replaced.</p>
           <div className="actions">
-            <button className="btn btn-primary" onClick={start}>
+            <button className="btn btn-primary" onClick={() => start(false)}>
               Replace them
             </button>
             <button className="btn btn-ghost" onClick={cancel}>
@@ -230,8 +269,12 @@ function Chart(props: { song: Song; editing: boolean; selection: Selection | nul
   const beat = useSession((s) => s.beat);
   const startBar = useSession((s) => s.songStartBar);
   const loop = useSession((s) => s.loop);
-  const onEditBar = (index: number, bar: Bar) =>
-    editSong({ ...props.song, bars: props.song.bars.map((b, i) => (i === index ? bar : b)) });
+  const onEditBar = (index: number, bar: Bar) => {
+    const { song } = props;
+    const bars = song.bars.map((b, i) => (i === index ? bar : b));
+    // In a song with a beat map, what was typed is a fix to keep when it is analysed again.
+    editSong(song.backing || song.heard ? { ...song, bars, fixes: chartFixes(song.bars, bars, song.fixes) } : { ...song, bars });
+  };
   return (
     <ChartView
       {...props}
@@ -292,7 +335,7 @@ function SongHeader({ song, editing, onEditing }: { song: Song; editing: boolean
     void saveSong().then((ok) => setSaveNote(ok ? 'Saved to My songs' : 'Could not save: browser storage is full or blocked'));
   const update = (fields: Partial<Song>) => {
     setSaveNote(null);
-    editSong({ ...song, ...fields });
+    editSong({ ...song, ...fields }, Object.keys(fields).join());
   };
 
   return (
@@ -316,10 +359,7 @@ function SongHeader({ song, editing, onEditing }: { song: Song; editing: boolean
               value={song.bpm}
               onChange={(e) => {
                 const bpm = Math.round(Number(e.target.value));
-                if (bpm >= 40 && bpm <= 240) {
-                  update({ bpm });
-                  setTempo(bpm);
-                }
+                if (bpm >= 40 && bpm <= 240) update({ bpm });
               }}
             />
           </label>
@@ -356,6 +396,7 @@ function EditTools({
   selection: Selection | null;
   onSelection: (s: Selection | null) => void;
 }) {
+  const history = useSession((s) => s.songHistory);
   const [text, setText] = useState<string | null>(null);
   const [textError, setTextError] = useState<string | null>(null);
   const sel = selection && selection.start < song.bars.length ? selection : null;
@@ -449,6 +490,12 @@ function EditTools({
       </button>
       <button className="btn btn-ghost" onClick={() => setText(formatChart(bars))}>
         Edit as text
+      </button>
+      <button className="btn btn-ghost" disabled={!history.undo} onClick={undoSong}>
+        Undo
+      </button>
+      <button className="btn btn-ghost" disabled={!history.redo} onClick={redoSong}>
+        Redo
       </button>
     </div>
   );

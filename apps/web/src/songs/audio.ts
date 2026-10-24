@@ -130,7 +130,7 @@ export function songFromAnalysis(a: AudioAnalysis, fallbackTitle: string, live?:
     if (live) {
       song.heard = { beatTimes, seconds: a.duration, complete: live.complete, envelope: Uint8Array.from(a.envelope), heardAt: live.heardAt };
     } else {
-      song.backing = { beatTimes, seconds: a.duration };
+      song.backing = { beatTimes, seconds: a.duration, envelope: Uint8Array.from(a.envelope) };
       if (a.stemsDir) song.backing.stemsDir = a.stemsDir;
     }
   }

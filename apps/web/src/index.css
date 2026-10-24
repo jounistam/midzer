@@ -1239,6 +1239,58 @@ code {
   margin: 0;
 }
 
+.timeline-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.timeline-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-control);
+  background: var(--color-bg-stage);
+}
+
+.timeline-scroll:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.timeline-track {
+  height: 168px;
+}
+
+.timeline-track canvas {
+  position: sticky;
+  left: 0;
+  display: block;
+  touch-action: pan-x;
+  cursor: col-resize;
+}
+
+.timeline-zoom {
+  display: flex;
+  gap: var(--space-1);
+  margin-left: auto;
+}
+
+.timeline-ask {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--color-primary-default);
+  color: var(--color-text-primary);
+}
+
+.chord-picker .bar-input {
+  width: 7em;
+}
+
 .toggle:disabled {
   opacity: 0.45;
   cursor: default;

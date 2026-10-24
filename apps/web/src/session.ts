@@ -66,6 +66,8 @@ import { songFromAnalysis, transcriptionMidi } from './songs/audio';
 import { Recorder } from './songs/recorder';
 import { loadRecording } from './songs/recordings';
 import { barAt, barStarts, chartCommands, newSongId, trackCommands, type Bar, type Song } from './songs/song';
+import { keepFixes, timelineOf, withTimeline } from './songs/timeline';
+import { recordingEnvelope } from './songs/envelope';
 
 export type Screen = 'onboarding' | 'home' | 'jam' | 'songs' | 'song' | 'learn' | 'lesson' | 'along';
 
@@ -175,6 +177,8 @@ interface SessionState {
   /** The song open in the song screen, with any unsaved edits. */
   song: Song | null;
   songDirty: boolean;
+  /** How many edits of the open song can be undone and redone. */
+  songHistory: { undo: number; redo: number };
   /** What the user should know about an imported song. */
   songNotes: string[];
   /** The song bar being heard; null when stopped. */
@@ -390,6 +394,7 @@ export const useSession = create<SessionState>(() => ({
   outputLatencyMs: 0,
   song: null,
   songDirty: false,
+  songHistory: { undo: 0, redo: 0 },
   songNotes: [],
   songBar: null,
   songStartBar: 0,
@@ -593,6 +598,8 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
       forgetLiveSong();
       break;
     case 'songPosition': {
+      live.songClock.ms = heardMs;
+      live.songClock.beat = event.beat;
       const at = barAt(startsOf(get().song?.bars), event.beat);
       if (at.beat === 0) setTimeout(() => set({ songBar: at.bar }), delay);
       break;
@@ -991,6 +998,7 @@ export function openSong(song: Song, notes: string[] = [], { screen = 'song' as 
   send({ type: 'stop' });
   send({ type: 'songWait', tick: null });
   unloadRecording();
+  clearHistory();
   set({ song, songDirty: false, songNotes: notes, songBar: null, songStartBar: 0, loop: null, screen, style: song.style });
   send({ type: 'setStyle', index: song.style });
   setTempo(song.bpm * speed);
@@ -1004,6 +1012,7 @@ export function closeSong(screen: Screen = 'songs'): void {
   send({ type: 'songWait', tick: null });
   send({ type: 'setSong', on: false });
   unloadRecording();
+  clearHistory();
   const { style } = readPrefs();
   set({ song: null, songDirty: false, songBar: null, loop: null, screen, style });
   send({ type: 'setStyle', index: style });
@@ -1011,17 +1020,87 @@ export function closeSong(screen: Screen = 'songs'): void {
   syncJamHarmony();
 }
 
-/** Changes the open song; the band hears the new chart from the next beat. */
-export function editSong(song: Song): void {
+/** Edits of the open song that can be undone, oldest first, and those undone that can be redone. */
+let undoStack: Song[] = [];
+let redoStack: Song[] = [];
+/** What the last edit changed, so typing into one field is undone as one step. */
+let lastEditKind: string | null = null;
+const MAX_UNDO = 100;
+
+function clearHistory(): void {
+  undoStack = [];
+  redoStack = [];
+  lastEditKind = null;
+  set({ songHistory: { undo: 0, redo: 0 } });
+}
+
+/**
+ * Changes the open song; the band hears the new chart from the next beat and
+ * a playing recording the new beat map. Each edit can be undone; edits of the
+ * same `kind` in a row (typing a title) are undone as one.
+ */
+export function editSong(song: Song, kind?: string): void {
+  const before = get().song;
+  if (before && (!kind || kind !== lastEditKind)) {
+    undoStack = [...undoStack, before].slice(-MAX_UNDO);
+    redoStack = [];
+  }
+  lastEditKind = kind ?? null;
+  showSong(song, before);
+}
+
+/** Puts `song` in place of the open one (`before`), unsaved. */
+function showSong(song: Song, before: Song | null): void {
   const loop = get().loop;
   const bars = song.bars.length;
   set({
     song,
     songDirty: true,
+    songHistory: { undo: undoStack.length, redo: redoStack.length },
     loop: loop && loop.start < bars ? { start: loop.start, end: Math.min(loop.end, bars) } : null,
     songStartBar: Math.min(get().songStartBar, Math.max(0, bars - 1)),
   });
   syncSong();
+  if (song.bpm !== before?.bpm) setTempo(song.bpm);
+  if (song.backing && song.backing.beatTimes !== before?.backing?.beatTimes && get().recording.status === 'ready') {
+    for (const cmd of trackCommands(song.backing)) send(cmd);
+  }
+}
+
+/** Takes the open song's last edit back, chart and timeline alike. */
+export function undoSong(): void {
+  const song = get().song;
+  const previous = undoStack[undoStack.length - 1];
+  if (!song || !previous) return;
+  undoStack = undoStack.slice(0, -1);
+  redoStack = [...redoStack, song];
+  lastEditKind = null;
+  showSong(previous, song);
+}
+
+export function redoSong(): void {
+  const song = get().song;
+  const next = redoStack[redoStack.length - 1];
+  if (!song || !next) return;
+  redoStack = redoStack.slice(0, -1);
+  undoStack = [...undoStack, song];
+  lastEditKind = null;
+  showSong(next, song);
+}
+
+/** The level of the open song over time (100 a second), for the timeline; read from its recording once if it was imported before songs kept it. */
+export async function songEnvelope(): Promise<Uint8Array | null> {
+  const song = get().song;
+  if (!song) return null;
+  const kept = song.backing?.envelope ?? song.heard?.envelope;
+  if (kept?.length) return kept;
+  if (!song.backing) return null;
+  const envelope = await recordingEnvelope(song.id);
+  if (!envelope) return null;
+  // Kept with the song as saved, without touching unsaved edits.
+  const saved = (await loadUserSongs()).find((s) => s.id === song.id);
+  if (saved?.backing) void saveUserSong({ ...saved, backing: { ...saved.backing, envelope } });
+  return envelope;
 }
 
 /** Saves the open song to My songs; a built-in one is saved as a copy. Resolves false on failure. */
@@ -1031,6 +1110,8 @@ export async function saveSong(): Promise<boolean> {
   const saved = isBuiltin(song) ? { ...song, id: newSongId(), source: 'user' as const, title: `${song.title} (my version)` } : song;
   if (!(await saveUserSong(saved))) return false;
   if (get().song === song) set({ song: saved, songDirty: false });
+  // The listener follows the map as fixed from now on.
+  if (get().liveSource.status === 'on') void sendLiveLibrary();
   return true;
 }
 
@@ -1090,9 +1171,11 @@ async function loadSongRecording(): Promise<void> {
  * Reads the open song's stored recording again and replaces what was read
  * from it: the beat map, tempo, chords and sections, and a melody guessed
  * from the mix. Title, style, lyrics where the bars line up, separated stems
- * and their parts stay. The song is then unsaved, like any edit.
+ * and their parts stay. With `keepFixes`, what was set by hand in the
+ * timeline or the chart stays too (see `keepFixes` in timeline.ts); without,
+ * it goes. The song is then unsaved, like any edit.
  */
-export async function analyzeSongAgain(onProgress: (fraction: number, step: number) => void, signal?: AbortSignal): Promise<void> {
+export async function analyzeSongAgain(onProgress: (fraction: number, step: number) => void, signal?: AbortSignal, keep = false): Promise<void> {
   const song = get().song;
   if (!song?.backing) throw new Error('This song was not read from a recording.');
   const bytes = await loadRecording(song.id);
@@ -1102,12 +1185,15 @@ export async function analyzeSongAgain(onProgress: (fraction: number, step: numb
   if (signal?.aborted || current?.id !== song.id || !current.backing) return;
   const { song: fresh, notes, fingerprint } = songFromAnalysis(analysis, current.title);
   void saveFingerprint(song.id, fingerprint);
-  const next: Song = {
+  const old = timelineOf(current);
+  let next: Song = {
     ...current,
     bpm: fresh.bpm,
     bars: fresh.bars.map((b, i) => (current.bars[i]?.lyric ? { ...b, lyric: current.bars[i]!.lyric } : b)),
     backing: { ...current.backing, ...fresh.backing },
   };
+  delete next.fixes;
+  if (keep && old && current.fixes && fresh.backing) next = withTimeline(next, keepFixes(old, { bars: fresh.bars, beatTimes: fresh.backing.beatTimes }));
   // A melody from the separated vocals beats one guessed from the mix.
   if (!current.backing.stemsDir) {
     if (fresh.melody) next.melody = fresh.melody;
@@ -1115,8 +1201,6 @@ export async function analyzeSongAgain(onProgress: (fraction: number, step: numb
   }
   editSong(next);
   set({ songNotes: notes });
-  setTempo(next.bpm);
-  if (get().recording.status === 'ready') for (const cmd of trackCommands(next.backing!)) send(cmd);
 }
 
 function unloadRecording(): void {

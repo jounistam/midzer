@@ -134,3 +134,52 @@ test('songs: a drummer plays along with the recording and gets a timing report',
   await expect(page.getByText('The recording keeps its own tempo')).toBeVisible({ timeout: 30_000 });
   expect(errors).toEqual([]);
 });
+
+test('songs: a 1 set by hand in the timeline stays when the song is analysed again', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  await page.addInitScript(() => localStorage.setItem('midzer.onboarded', '1'));
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Songs/ }).click();
+  const C = [48, 60, 64, 67];
+  const F = [41, 60, 65, 69];
+  await page.getByLabel('Import a recording, MIDI or ChordPro file').setInputFiles({ name: 'odd bar.wav', mimeType: 'audio/wav', buffer: recording(120, [C, F], 12) });
+  await expect(page.getByRole('heading', { name: 'odd bar' })).toBeVisible({ timeout: 30_000 });
+
+  // Select the third beat of bar 1 on the timeline: the first beat, then two on.
+  await page.getByRole('button', { name: 'Edit chart' }).click();
+  const timeline = page.getByLabel(/^Beat timeline/);
+  await expect(timeline).toBeVisible();
+  await timeline.locator('canvas').click({ position: { x: 2, y: 60 } });
+  await expect(page.getByText('Beat 1 · bar 1, beat 1')).toBeVisible();
+  await timeline.press('Alt+ArrowRight');
+  await timeline.press('Alt+ArrowRight');
+  await expect(page.getByText('Beat 3 · bar 1, beat 3')).toBeVisible();
+  await page.getByRole('button', { name: 'The 1 is here' }).click();
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled();
+  if (process.env.MIDZER_SHOTS) await page.screenshot({ path: `${process.env.MIDZER_SHOTS}/timeline.png`, fullPage: true });
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.getByRole('button', { name: /^Bar 1 \(2 beats\): C/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Bar 2: / })).toBeVisible();
+
+  // It plays through the short bar.
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
+  await expect(page.getByText(/^Bar 3 of \d+$/)).toBeVisible({ timeout: 5_000 });
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
+
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.getByText('Saved to My songs')).toBeVisible();
+
+  // Analysing again asks; keeping the fixes keeps the short bar.
+  await page.getByRole('button', { name: 'Analyse again' }).click();
+  await page.getByRole('button', { name: 'Keep my fixes' }).click();
+  await expect(page.getByRole('button', { name: 'Analyse again' })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole('button', { name: /^Bar 1 \(2 beats\): C/ })).toBeVisible();
+  // Replacing all puts the bars of four back.
+  await page.getByRole('button', { name: 'Analyse again' }).click();
+  await page.getByRole('button', { name: 'Replace all' }).click();
+  await expect(page.getByRole('button', { name: 'Analyse again' })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole('button', { name: /^Bar 1: C/ })).toBeVisible();
+  expect(errors).toEqual([]);
+});

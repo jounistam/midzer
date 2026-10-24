@@ -61,7 +61,19 @@ export interface Song {
   backing?: SongBacking;
   /** How the chart lines up with the song as it was heard live; no recording is kept. */
   heard?: SongHeard;
+  /** What was set by hand in the timeline or the chart, so analysing again can keep it. */
+  fixes?: SongFixes;
   source: SongSource;
+}
+
+/** What the player fixed by hand in a song with a beat map. */
+export interface SongFixes {
+  /** The beat map itself was moved. */
+  beats?: true;
+  /** Bar lines set by hand, as song beats. */
+  bars?: number[];
+  /** Beats whose chord was set by hand. */
+  chords?: number[];
 }
 
 /** Mirrors `MAX_TRACK_BEATS` in backing.rs: every beat of the longest chart, plus its end. */
@@ -115,6 +127,8 @@ export interface SongBacking {
   seconds: number;
   /** Where the desktop app saved the separated instruments, if it did. */
   stemsDir?: string;
+  /** The level, 100 a second, from −60 dBFS (0) to 0 dBFS (255); missing from songs imported before the timeline editor. */
+  envelope?: Uint8Array;
 }
 
 /** A song learned from live audio: its beat map, and enough to draw it without the audio. */
