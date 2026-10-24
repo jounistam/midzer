@@ -1,18 +1,24 @@
-// The song model shared by Songs and Learn: a chord chart in 4/4 with
-// sections, plus a compact text notation for built-in songs and the editor.
+// The song model shared by Songs and Learn: a chord chart with sections,
+// plus a compact text notation for built-in songs and the editor. Bars are
+// four beats unless the chart says otherwise (1 to 7).
 //
-// Chart notation: bars are separated by `|` or line breaks. A bar holds one, two or four
-// chords (whole bar, half bars, beats); `.` keeps the previous chord for a
-// beat, `%` repeats the previous bar and `N.C.` is no chord. A tag in square
-// brackets starts a section at its bar: [Intro], [A], [B], [C], [Ending] (also
-// [Verse], [Chorus], [Bridge], [Outro]); [Fill] asks for a fill in that bar.
+// Chart notation: bars are separated by `|` or line breaks. A bar holds one
+// chord (the whole bar), two (half bars, in bars of an even length) or one a
+// beat; `.` keeps the previous chord for a beat, `%` repeats the previous bar
+// and `N.C.` is no chord. A tag in square brackets starts a section at its
+// bar: [Intro], [A], [B], [C], [Ending] (also [Verse], [Chorus], [Bridge],
+// [Outro]); [Fill] asks for a fill in that bar; [3/4] (any n/4) makes bars n
+// beats long from there on.
 
 import type { EngineCommand, SongMark } from '@midzer/audio-web';
 import { isNoChord, parseChord } from './chords';
 import type { AnalysedTrack } from './audio';
 import type { MelodyNote } from './melody';
 
+/** The usual length of a bar, in beats. */
 export const BEATS_PER_BAR = 4;
+/** The longest bar; mirrors `MAX_BAR_BEATS` in song.rs. */
+export const MAX_BAR_BEATS = 7;
 /** Mirrors `MAX_SONG_BARS` in song.rs. */
 export const MAX_BARS = 512;
 
@@ -27,7 +33,7 @@ export const SECTION_LABELS: Record<SongSection, string> = {
 };
 
 export interface Bar {
-  /** One chord name per beat; '' keeps the chord before it. */
+  /** One chord name per beat, as many as the bar has beats (1–7); '' keeps the chord before it. */
   beats: string[];
   /** A section that starts at this bar. */
   section?: SongSection;
@@ -59,7 +65,41 @@ export interface Song {
 }
 
 /** Mirrors `MAX_TRACK_BEATS` in backing.rs: every beat of the longest chart, plus its end. */
-export const MAX_TRACK_BEATS = MAX_BARS * BEATS_PER_BAR + 1;
+export const MAX_TRACK_BEATS = MAX_BARS * MAX_BAR_BEATS + 1;
+
+/** The song beat each bar starts on (beats count from the start of the song), and the end of the last bar. */
+export function barStarts(bars: Bar[]): number[] {
+  const starts = [0];
+  for (const bar of bars) starts.push(starts[starts.length - 1]! + bar.beats.length);
+  return starts;
+}
+
+/** How many beats the chart has. */
+export function totalBeats(bars: Bar[]): number {
+  return bars.reduce((n, bar) => n + bar.beats.length, 0);
+}
+
+/**
+ * The bar song beat `beat` is in, and its place there, from `barStarts`.
+ * Past the end, bars go on as long as the last one.
+ */
+export function barAt(starts: number[], beat: number): { bar: number; beat: number } {
+  const bars = starts.length - 1;
+  const end = starts[bars]!;
+  if (bars === 0) return { bar: Math.floor(beat / BEATS_PER_BAR), beat: beat % BEATS_PER_BAR };
+  if (beat >= end) {
+    const len = end - starts[bars - 1]!;
+    return { bar: bars + Math.floor((beat - end) / len), beat: (beat - end) % len };
+  }
+  let lo = 0;
+  let hi = bars - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (starts[mid]! <= beat) lo = mid;
+    else hi = mid - 1;
+  }
+  return { bar: lo, beat: beat - starts[lo]! };
+}
 
 /** Loads a recording's tempo map into the engine. */
 export function trackCommands(backing: SongBacking): EngineCommand[] {
@@ -111,16 +151,22 @@ export function sectionOf(name: string): SongSection | 'fill' | undefined {
   return TAGS[word];
 }
 
-export function emptyBar(): Bar {
-  return { beats: ['', '', '', ''] };
+export function emptyBar(beats = BEATS_PER_BAR): Bar {
+  return { beats: Array<string>(beats).fill('') };
 }
 
-/** Spreads 1, 2 or 4 chords over the beats; other counts go one per beat. */
-function spread(tokens: string[]): string[] {
-  const beats = ['', '', '', ''];
-  const step = tokens.length === 1 ? 4 : tokens.length === 2 ? 2 : 1;
-  tokens.slice(0, BEATS_PER_BAR).forEach((t, i) => (beats[i * step] = t === '.' ? '' : t));
+/** Spreads chords over a bar of `n` beats: one fills it, two split an even bar in halves, others go one a beat. */
+function spread(tokens: string[], n: number): string[] {
+  const beats = Array<string>(n).fill('');
+  const step = tokens.length === 1 ? n : tokens.length === 2 && n % 2 === 0 ? n / 2 : 1;
+  tokens.slice(0, n).forEach((t, i) => (beats[i * step] = t === '.' ? '' : t));
   return beats;
+}
+
+/** The length a `[n/4]` tag sets, if it is one. */
+function meterTag(tag: string): number | undefined {
+  const m = /^\s*([1-7])\s*\/\s*4\s*$/.exec(tag);
+  return m ? Number(m[1]) : undefined;
 }
 
 /** A chord token as stored: the original spelling, or 'N.C.'. */
@@ -142,25 +188,30 @@ export function parseChart(text: string): ParseResult {
   const unknown: string[] = [];
   let section: SongSection | undefined;
   let fill = false;
+  let meter = BEATS_PER_BAR;
   for (const cell of text.split(/[|\n]/)) {
     const tokens: string[] = [];
+    let copied: string[] | undefined;
     for (const raw of cell.match(/\[[^\]]*\]|\S+/g) ?? []) {
       if (raw.startsWith('[')) {
+        const length = meterTag(raw.slice(1, -1));
         const tag = sectionOf(raw.slice(1, -1));
-        if (tag === 'fill') fill = true;
+        if (length) meter = length;
+        else if (tag === 'fill') fill = true;
         else if (tag) section = tag;
         else unknown.push(raw);
       } else if (raw === '%') {
         const prev = bars[bars.length - 1];
-        if (prev) tokens.push(...prev.beats.map((b) => b || '.'));
+        if (prev) copied = [...prev.beats];
       } else {
         const token = chordToken(raw);
         if (token) tokens.push(token);
         else unknown.push(raw);
       }
     }
-    if (tokens.length === 0) continue; // empty cells, e.g. from "||" or a trailing bar line
-    const bar: Bar = { beats: spread(tokens) };
+    if (tokens.length === 0 && !copied) continue; // empty cells, e.g. from "||" or a trailing bar line
+    // "%" alone repeats the bar before, its length too.
+    const bar: Bar = { beats: copied && tokens.length === 0 ? copied : spread([...(copied ?? []).map((b) => b || '.'), ...tokens], meter) };
     if (section) bar.section = section;
     if (fill) bar.fill = true;
     bars.push(bar);
@@ -173,22 +224,27 @@ export function parseChart(text: string): ParseResult {
 /** One bar in chart notation, without its tags: "C", "Am F" or "C . G7 .". */
 export function formatBar(bar: Bar): string {
   const b = bar.beats;
+  const n = b.length;
   if (b.every((x) => x === '')) return '.';
-  if (b[1] === '' && b[2] === '' && b[3] === '') return b[0] || '.';
-  if (b[1] === '' && b[3] === '') return `${b[0] || '.'} ${b[2]}`;
+  if (b.slice(1).every((x) => x === '')) return b[0] || '.';
+  const half = n / 2;
+  if (n % 2 === 0 && n > 2 && b[half] && b.every((x, i) => i === 0 || i === half || x === '')) return `${b[0] || '.'} ${b[half]}`;
   return b.map((x) => x || '.').join(' ');
 }
 
-/** The whole chart in notation, four bars a line. */
+/** The whole chart in notation, four bars a line, with `[n/4]` where the length of the bars changes. */
 export function formatChart(bars: Bar[]): string {
   const lines: string[] = [];
   let line: string[] = [];
+  let meter = BEATS_PER_BAR;
   bars.forEach((bar, i) => {
     if (bar.section && line.length > 0) {
       lines.push(line.join(' | '));
       line = [];
     }
-    const tags = `${bar.section ? `[${SECTION_LABELS[bar.section]}] ` : ''}${bar.fill ? '[Fill] ' : ''}`;
+    const length = bar.beats.length;
+    const tags = `${bar.section ? `[${SECTION_LABELS[bar.section]}] ` : ''}${length !== meter ? `[${length}/4] ` : ''}${bar.fill ? '[Fill] ' : ''}`;
+    meter = length;
     line.push(tags + formatBar(bar));
     if (line.length === 4 || i === bars.length - 1) {
       lines.push(line.join(' | '));
@@ -237,13 +293,15 @@ export function marksByBar(bars: Bar[]): SongMark[] {
 export function chartCommands(song: Pick<Song, 'bars'>): EngineCommand[] {
   const bars = song.bars.slice(0, MAX_BARS);
   const cmds: EngineCommand[] = [{ type: 'songClear', bars: bars.length }];
-  bars.forEach((bar, b) =>
+  const starts = barStarts(bars);
+  bars.forEach((bar, b) => {
+    if (bar.beats.length !== BEATS_PER_BAR) cmds.push({ type: 'songBar', bar: b, beats: bar.beats.length });
     bar.beats.forEach((token, i) => {
       if (!token) return;
       const spec = token === 'N.C.' ? 'nc' : parseChord(token);
-      if (spec) cmds.push({ type: 'songChord', beat: b * BEATS_PER_BAR + i, slot: spec });
-    }),
-  );
+      if (spec) cmds.push({ type: 'songChord', beat: starts[b]! + i, slot: spec });
+    });
+  });
   marksByBar(bars).forEach((mark, bar) => mark && cmds.push({ type: 'songMark', bar, mark }));
   return cmds;
 }

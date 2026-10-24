@@ -21,7 +21,7 @@ Existing pieces this builds on:
 ---
 
 ## Status (2026-10-24)
-- Slices 1–4 are built; results and what is open are in `docs/PLAN.md` Status ("Accurate stored songs"). Slice 5 is planned (below), to be built as 5a then 5b.
+- Slices 1–4 and 5a are built; results and what is open are in `docs/PLAN.md` Status ("Accurate stored songs"). 5b (the timeline editor) is next.
 - Changes from the plan:
   - Slice 1: `Live` ignores guides whose beat is before the last start-over, because a network run already under way re-locked the tracker to the old song.
   - Slice 2: downbeats were 0.58 → 0.63 F only. The network's own downbeats score 0.91, but one bar phase for the whole song misplaces the 1 after odd bars (2, 3 or 5 beats) that most of the test songs have. The user chose (2026-10-24) to keep one phase and leave wrong 1s to slice 5's downbeat editing.
@@ -35,6 +35,12 @@ Existing pieces this builds on:
     - The 1 while following is voted, as live: the stored 1s count a little (0.3 each) and the network's downbeats from its refining runs fully, because one stored bar phase is wrong after odd bars (stored 1s were right 13–19 % on some songs).
     - Where a song repeats, the earliest of the places that match about as well (80 % of the votes) is taken, so a partial song is followed the longest.
     - A song change cuts the capture at the last landmark of the old song heard, not at the end of its last look-up (which lands ~6 s into the next song).
+  - Slice 5a:
+    - `bar_lines` takes the network's 1s as they come. The planned check of each odd bar against the 1s after it lost songs whose sections change bar length (runs of 5s and 6s): 0.87 F. Trusting them, passing over only a 1 a beat after the last and filling gaps of two bars or more, gives 0.92, above the network's own 0.91. Tuned on the network's beats dumped once (`sweep.py`-style, outside the repo).
+    - `chords.rs` keeps its 4/4 phase: only the DSP fallback uses it, and that stays 4/4. Melody notation for built-ins stays 4/4 too.
+    - The drummer's fill window and the count-in stay four beats (the fill detector only acts in Jam).
+    - A followed song's 1 is now the vote for how many beats after the stored bar lines the 1s are heard (0 = as stored), not for a place in a bar of four.
+    - The bar editor keeps a bar's length; "[3/4] C" in it gives another.
 - Measuring slice 4 again: `KNOWN=1 START=60 HEAR_REF=~/.cache/midzer-eval/ref hear_eval $(files24)`, against the same without `KNOWN` (~15 min each, under a 5 GB cap).
 - Measuring slice 2 again: `offline_dump` on `files24.txt` (24 songs, ~20 s each natively, under a 4 GB cap) → `score.py` with the Python in `~/.claude/jobs/05b3b04b/tmp/venv` (it has mir_eval; `~/venv` doesn't).
 

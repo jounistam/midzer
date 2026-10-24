@@ -37,6 +37,22 @@ const CRASH_WINDOW: f64 = PPQ as f64 / 4.0;
 /// Tempo follow reports a new tempo to the UI once it moved this much.
 const TEMPO_REPORT_STEP: f32 = 0.5;
 
+/// The bar the band is playing.
+#[derive(Clone, Copy)]
+struct BandBar {
+    /// Its first band tick.
+    tick: f64,
+    beats: u8,
+    /// Bars played before it.
+    index: u64,
+}
+
+impl Default for BandBar {
+    fn default() -> Self {
+        Self { tick: 0.0, beats: BEATS_PER_BAR as u8, index: 0 }
+    }
+}
+
 /// Tempo follow: compares the player's attacks with the band's eighth-note grid.
 #[derive(Clone, Copy, Default)]
 struct TempoFollow {
@@ -117,6 +133,10 @@ pub struct Band {
     hold: Option<(f64, u32)>,
     /// The band tick of the song beat playing, and that song beat.
     song_beat: Option<(f64, u32)>,
+    /// The bar playing: its first band tick, its length in beats and how many
+    /// bars came before it. A song sets its own bar lines; otherwise every
+    /// [`BEATS_PER_BAR`] beats.
+    bar: BandBar,
     tempo: TempoFollow,
     /// A drummer leads: tempo follow is always on and tuned for drums, and
     /// fills move the band on.
@@ -181,6 +201,7 @@ impl Band {
             wait: None,
             hold: None,
             song_beat: None,
+            bar: BandBar::default(),
             tempo: TempoFollow { base_bpm: style.default_bpm, player_bpm: style.default_bpm, reported_bpm: style.default_bpm, ..TempoFollow::default() },
             drummer: false,
             drum_layer: BandDrums::Full,
@@ -317,9 +338,14 @@ impl Band {
             let error = tick - (tick / grid).round() * grid;
             out.push(0, EngineEvent::Timing { ms: (error / self.ticks_per_second() * 1000.0) as f32 });
         }
-        let bar = (tick / TICKS_PER_BAR as f64).floor();
+        let (bar, into) = if self.song.active() {
+            (self.bar.index as i64, tick - self.bar.tick)
+        } else {
+            let bar = (tick / TICKS_PER_BAR as f64).floor();
+            (bar as i64, tick - bar * TICKS_PER_BAR as f64)
+        };
         // In a song the chart has the sections; a fill there is only a fill.
-        if self.fills.hit(piece, velocity, bar as i64, tick - bar * TICKS_PER_BAR as f64) && !self.song.active() {
+        if self.fills.hit(piece, velocity, bar, into) && !self.song.active() {
             self.conductor.cue_next();
             self.publish(0, out);
         }
@@ -333,7 +359,7 @@ impl Band {
                 self.publish(0, out);
             }
         }
-        let weight = if self.fills.in_fill(bar as i64) { (0.0, 0.0) } else { time_weight(piece, velocity) };
+        let weight = if self.fills.in_fill(bar) { (0.0, 0.0) } else { time_weight(piece, velocity) };
         self.follow_onset(0.0, weight);
     }
 
@@ -453,6 +479,10 @@ impl Band {
         self.song.set_mark(bar, mark);
     }
 
+    pub fn set_song_bar(&mut self, bar: u32, beats: u8) {
+        self.song.set_bar_beats(bar, beats);
+    }
+
     pub fn set_song_loop(&mut self, start: u32, end: u32) {
         self.song.set_loop(start, end);
     }
@@ -520,6 +550,7 @@ impl Band {
         self.anchor_tick = 0.0;
         self.hold = None;
         self.song_beat = None;
+        self.bar = BandBar::default();
         self.tempo.last = None;
         self.tempo.phase = 0.0;
         self.fills.reset();
@@ -591,7 +622,7 @@ impl Band {
             if beat_tick >= end {
                 break;
             }
-            if self.waits_on_beat(beat) {
+            if self.waits_on_beat() {
                 self.start_hold(beat_tick, &clock, frames, out);
                 return;
             }
@@ -615,9 +646,8 @@ impl Band {
     }
 
     /// Whether the band waits right at `beat`, before playing it.
-    fn waits_on_beat(&self, beat: u64) -> bool {
-        let beat_in_bar = (beat % BEATS_PER_BAR as u64) as u8;
-        self.song.active() && !self.click && self.wait == Some(self.song.upcoming(beat_in_bar) * PPQ)
+    fn waits_on_beat(&self) -> bool {
+        self.song.active() && !self.click && self.wait == Some(self.song.upcoming() * PPQ)
     }
 
     /// Stops the clock at `tick` for the rest of the block and until the wait
@@ -642,8 +672,17 @@ impl Band {
 
     fn on_beat(&mut self, beat: u64, tick: f64, clock: &BlockClock, out: &mut EventBuffer) {
         let frame = clock.frame(tick);
-        let beat_in_bar = (beat % BEATS_PER_BAR as u64) as u8;
-        out.push(frame, EngineEvent::Beat { bar: (beat / BEATS_PER_BAR as u64) as u32, beat: beat_in_bar });
+        // A song says where its bars start; it moves on even when the band stops on this beat.
+        let song = (self.song.active() && !self.click).then(|| self.song.on_beat());
+        let (beat_in_bar, bar_beats) = match song {
+            Some(s) => (s.beat_in_bar, s.bar_beats),
+            None => ((beat % BEATS_PER_BAR as u64) as u8, BEATS_PER_BAR as u8),
+        };
+        if beat_in_bar == 0 {
+            let index = if beat == 0 { 0 } else { self.bar.index + 1 };
+            self.bar = BandBar { tick, beats: bar_beats, index };
+        }
+        out.push(frame, EngineEvent::Beat { bar: self.bar.index as u32, beat: beat_in_bar });
         if (self.bpm - self.tempo.reported_bpm).abs() >= TEMPO_REPORT_STEP {
             self.tempo.reported_bpm = self.bpm;
             out.push(frame, EngineEvent::Tempo { bpm: self.bpm });
@@ -659,6 +698,7 @@ impl Band {
         }
 
         let before = self.conductor.section();
+        self.conductor.set_bar_beats(bar_beats);
         let cue = self.conductor.on_beat(beat_in_bar, self.keys_held);
         if cue.stop {
             self.stop_at(frame, out);
@@ -676,8 +716,7 @@ impl Band {
             // Everyone but the pad stops; the rest pattern takes over.
             self.release_all(|_| true, frame, out);
         }
-        if self.song.active() {
-            let song = self.song.on_beat(beat_in_bar);
+        if let Some(song) = song {
             self.song_beat = Some((tick, song.beat));
             out.push(frame, EngineEvent::SongPosition { beat: song.beat });
             if let Some(chord) = song.chord {
@@ -730,13 +769,12 @@ impl Band {
         let harmonic = |ch: u8| style.parts.iter().any(|p| p.kind != PartKind::Drums && p.channel == ch);
         self.release_all(harmonic, frame, out);
 
-        let bar = (tick / TICKS_PER_BAR as f64).floor();
-        let bar_tick = bar * TICKS_PER_BAR as f64;
+        let BandBar { tick: bar_tick, beats, index } = self.bar;
         for part in style.parts.iter().filter(|p| p.kind != PartKind::Drums) {
             let Some(pattern) = self.pattern(part) else {
                 continue;
             };
-            for step in pattern.bar(bar as u64) {
+            for step in pattern.bar(index, beats) {
                 let (on, off) = (bar_tick + step.tick as f64, bar_tick + (step.tick + step.dur) as f64);
                 if on < tick && off > tick + 1.0 {
                     self.trigger(part, &Step { dur: (off - tick) as u32, ..step }, tick, clock, out);
@@ -760,20 +798,17 @@ impl Band {
             return;
         }
 
-        let first_bar = (from / TICKS_PER_BAR as f64).floor() as u64;
-        let last_bar = (to / TICKS_PER_BAR as f64).ceil() as u64;
+        // The range is inside one beat, so inside the bar playing.
+        let BandBar { tick: bar_tick, beats, index } = self.bar;
         let style = self.style;
-        for bar in first_bar..last_bar {
-            let bar_tick = (bar * TICKS_PER_BAR as u64) as f64;
-            for part in &style.parts {
-                let Some(pattern) = self.pattern(part) else {
-                    continue;
-                };
-                for step in pattern.bar(bar) {
-                    let tick = bar_tick + step.tick as f64;
-                    if tick >= from && tick < to {
-                        self.trigger(part, &step, tick, clock, out);
-                    }
+        for part in &style.parts {
+            let Some(pattern) = self.pattern(part) else {
+                continue;
+            };
+            for step in pattern.bar(index, beats) {
+                let tick = bar_tick + step.tick as f64;
+                if tick >= from && tick < to {
+                    self.trigger(part, &step, tick, clock, out);
                 }
             }
         }
@@ -1192,6 +1227,38 @@ mod tests {
         assert!(sections.contains(&(96_000, Section::Main, 1)), "{sections:?}");
         assert!(sections.contains(&(192_000, Section::Ending, 1)), "{sections:?}");
         assert!(!band.is_playing(), "the band stops after the ending");
+        assert_no_hanging_notes(&events);
+    }
+
+    #[test]
+    fn songs_with_bars_of_other_lengths_play_them() {
+        // C for 4 beats | F for 2 | G for 3, then the ending.
+        let mut band = Band::new(SR);
+        band.set_tempo(120.0);
+        band.set_song(true);
+        band.clear_song(3);
+        band.set_song_bar(1, 2);
+        band.set_song_bar(2, 3);
+        band.set_song_slot(0, Slot::Chord(Chord::new(0, Quality::Major)));
+        band.set_song_slot(4, Slot::Chord(Chord::new(5, Quality::Major)));
+        band.set_song_slot(6, Slot::Chord(Chord::new(7, Quality::Major)));
+        band.play(&mut EventBuffer::default());
+        let mut frame = 0;
+        let events = run(&mut band, 8.0, &mut frame);
+        let beats: Vec<_> = events.iter().filter_map(|(f, e)| if let EngineEvent::Beat { bar, beat } = e { Some((*f / 24_000, *bar, *beat)) } else { None }).collect();
+        let expected: Vec<(u64, u32, u8)> = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1), (2, 0), (2, 1), (2, 2), (3, 0)]
+            .iter()
+            .enumerate()
+            .map(|(i, &(bar, beat))| (i as u64, bar, beat))
+            .collect();
+        assert_eq!(&beats[..10], expected);
+        // Every bar line has the drums' 1 on it, the 2-beat bar's too.
+        let drums = note_ons(&events, DRUM_CHANNEL);
+        for line in [0, 96_000, 144_000] {
+            assert!(drums.iter().any(|d| d.0 == line), "drums at {line}");
+        }
+        let sections: Vec<_> = states(&events).iter().map(|(f, s)| (*f, s.section)).collect();
+        assert!(sections.contains(&(216_000, Section::Ending)), "the ending after the 3-beat bar: {sections:?}");
         assert_no_hanging_notes(&events);
     }
 

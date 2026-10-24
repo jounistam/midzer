@@ -105,7 +105,7 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
     let mut since: Option<u8> = None;
     for &(_, one) in &reference {
         since = if one { Some(0) } else { since.map(|s| s + 1) };
-        place.push(since.filter(|&s| s < 4));
+        place.push(since.filter(|&s| s < 8));
     }
     let labels: Vec<(f64, f64, MajMin)> = std::fs::read_to_string(format!("{dir}/chords/{name}.lab"))
         .expect("chord reference")
@@ -121,12 +121,14 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
     let audio = resample(&mono, d.sample_rate, SR);
     let mut hearing = Hearing::with_models(SR as f32).unwrap();
     let mut stored: Vec<f64> = Vec::new();
+    let mut stored_song = StoredSong::default();
     if env("KNOWN").is_some_and(|k| k != 0.0) {
         let mix = resample(&mono, d.sample_rate, RATE);
         let a = analyze(&mix, Extras::default(), &mut |_, _| {}).expect("analysis");
         let chords = a.chords.iter().map(|c| c.map(|c| Chord { root: c.root, quality: Quality::ALL[c.quality as usize], bass: c.bass })).collect();
         stored = a.beat_times.iter().map(|&t| t as f64).collect();
-        let song = StoredSong { id: 1, beats: stored.clone(), chords, seconds: a.duration as f64 };
+        let song = StoredSong { id: 1, beats: stored.clone(), chords, seconds: a.duration as f64, bar_beats: a.bar_beats.clone() };
+        stored_song = song.clone();
         hearing.library().add(song, a.fingerprint.as_chunks::<2>().0.iter().map(|p| (p[0], p[1])).collect());
     }
     let start = env("START").unwrap_or(0.0);
@@ -152,6 +154,7 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
     // (ready at, result), in seconds.
     let mut grids = Vec::new();
     let mut chords = Vec::new();
+    let mut bar_lines: Vec<(f64, Vec<(f64, u8)>)> = Vec::new();
     let mut score = Score { seconds: (audio.len() - first) as f64 / SR as f64, ..Score::default() };
     let start_s = first as f64 / SR as f64;
     // When the worker is free again.
@@ -172,6 +175,7 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
             match heard {
                 Heard::Grid(g) => grids.push((ready, g)),
                 Heard::Chords(c) => chords.push((ready, c)),
+                Heard::Bars(b) => bar_lines.push((ready, b)),
                 Heard::Follow(f) => {
                     if f.is_some() && score.follow_s.is_none() {
                         score.follow_s = Some(ready - start_s);
@@ -191,7 +195,7 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
         let near = [j.checked_sub(1), Some(j)].into_iter().flatten().filter(|&j| j < stored.len()).min_by(|&a, &b| (stored[a] - r).abs().total_cmp(&(stored[b] - r).abs()));
         if let Some(j) = near.filter(|&j| (stored[j] - r).abs() < 0.07) {
             score.stored_hit += 1;
-            score.stored_ones += (place[i] == Some((j % 4) as u8)) as usize;
+            score.stored_ones += (place[i] == Some((j - stored_song.bar_at(j).0) as u8)) as usize;
         }
         let Some((_, g)) = grids.iter().rev().find(|(ready, _)| *ready <= r) else { continue };
         let frame = r * SR as f64;
@@ -209,7 +213,17 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
             }
             if let (Some(one), Some(p)) = (g.one, place[i]) {
                 score.ones += 1;
-                if (one as i64 + k as i64).rem_euclid(4) as u8 == p {
+                // As the engine counts: from the bar lines of a song followed, sent in the last 2 s, else in fours from the grid's 1.
+                let lines = bar_lines.iter().rev().find(|(ready, _)| *ready <= r).filter(|(ready, _)| r - ready < 2.0);
+                let line = lines.and_then(|(_, l)| l.iter().rev().find(|(f, _)| *f <= frame + 0.5 * g.period));
+                let heard = match line {
+                    Some(&(f, len)) => {
+                        let n = ((frame - f) / g.period).round() as i64;
+                        if n < len as i64 { n as u8 } else { (n - len as i64).rem_euclid(4) as u8 }
+                    }
+                    None => (one as i64 + k as i64).rem_euclid(4) as u8,
+                };
+                if heard == p {
                     score.ones_right += 1;
                 }
             }

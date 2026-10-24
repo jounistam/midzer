@@ -28,6 +28,9 @@ describe('the songs the listener recognises', () => {
     const marks = new Uint32Array([1, 2]);
     const entry = liveLibrarySong(3, song({ heard: heard(4, true) }), marks)!;
     expect(entry.id).toBe(3);
+    expect([...entry.barBeats]).toEqual([4, 4]);
+    const odd = liveLibrarySong(4, song({ heard: heard(4, true), bars: [{ beats: ['Am', ''] }, { beats: ['C', '', '', ''] }] }), marks)!;
+    expect([...odd.barBeats]).toEqual([2, 4]);
     expect(entry.beatTimes).toHaveLength(9);
     expect(entry.chords).toHaveLength(8);
     expect(entry.seconds).toBe(4);

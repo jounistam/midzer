@@ -13,17 +13,22 @@ fn soundfont() -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
-/// Renders `bars` of the chart at `bpm`, with a melody played on top (key, beat, beats).
-fn render(font: &[u8], bpm: f32, style: u8, chart: &[Chord], melody: &[(u8, f32, f32)], bars: usize) -> Vec<f32> {
+/// Renders `bars` of the chart at `bpm`, with a melody played on top (key,
+/// beat, beats). Bars are four beats but for those in `odd` (bar, beats).
+fn render(font: &[u8], bpm: f32, style: u8, chart: &[Chord], melody: &[(u8, f32, f32)], bars: usize, odd: &[(usize, u8)]) -> Vec<f32> {
     let mut engine = Engine::new(SR as f32);
     let mut synth = Synth::new(SR as f32);
     synth.load_soundfont(font).unwrap();
     engine.handle(Command::SetStyle { index: style });
     engine.handle(Command::SetTempo { bpm });
     engine.handle(Command::SongClear { bars: bars as u16 });
+    let mut beat = 0;
     for b in 0..bars {
         let slot = Slot::Chord(chart[b % chart.len()]);
-        engine.handle(Command::SongChord { beat: (b * 4) as u16, slot });
+        engine.handle(Command::SongChord { beat: beat as u16, slot });
+        let len = odd.iter().find(|o| o.0 == b).map_or(4, |o| o.1);
+        engine.handle(Command::SongBar { bar: b as u16, beats: len });
+        beat += len as usize;
     }
     engine.handle(Command::SetSong { on: true });
     // Half a second of silence first, like a recording.
@@ -85,7 +90,7 @@ fn reads_back_what_the_band_played() {
         Chord::new(7, Quality::Major),
     ];
     for (bpm, style) in [(100.0, 0u8), (124.0, 1), (84.0, 4)] {
-        let audio = render(&font, bpm, style, &chart, &[], 16);
+        let audio = render(&font, bpm, style, &chart, &[], 16, &[]);
         let mix = resample(&audio, SR, RATE);
         let a = analyze(&mix, Extras::default(), &mut |_: f32, _: Step| {}).unwrap();
         assert!((a.bpm - bpm).abs() < 2.0, "style {style}: {bpm} BPM read as {}", a.bpm);
@@ -130,7 +135,8 @@ fn drifting_clicks(seconds: f32) -> (Vec<f32>, Vec<f32>) {
 fn the_tempo_map_follows_a_recording_that_speeds_up() {
     let (audio, clicks) = drifting_clicks(60.0);
     let a = analyze(&audio, Extras::default(), &mut |_: f32, _: Step| {}).unwrap();
-    assert_eq!(a.beat_times.len(), a.bar_times.len() * 4 + 1);
+    assert_eq!(a.bar_beats.len(), a.bar_times.len());
+    assert_eq!(a.beat_times.len(), a.bar_beats.iter().map(|&n| n as usize).sum::<usize>() + 1);
     // Every mapped beat inside the recording sits on a click, though the
     // usual tempo alone would be far off by the end.
     let last_click = *clicks.last().unwrap();
@@ -143,4 +149,20 @@ fn the_tempo_map_follows_a_recording_that_speeds_up() {
     assert!(worst < 0.035, "a beat {worst} s off its click");
     let drift = a.beat_times.iter().enumerate().map(|(i, b)| (a.bar_times[0] + i as f32 * 60.0 / a.bpm - b).abs()).fold(0.0, f32::max);
     assert!(drift > 0.3, "a steady grid would be only {drift} s off");
+}
+
+#[test]
+fn finds_a_short_bar_where_the_band_played_one() {
+    let Some(font) = soundfont() else {
+        eprintln!("skipped: no SoundFont");
+        return;
+    };
+    let chart = [Chord::new(0, Quality::Major), Chord::new(9, Quality::Minor), Chord::new(5, Quality::Major), Chord::new(7, Quality::Major)];
+    // Bar 7 has two beats: bars 8 on start two beats earlier than in fours.
+    let audio = render(&font, 110.0, 0, &chart, &[], 16, &[(7, 2)]);
+    let a = analyze(&resample(&audio, SR, RATE), Extras::default(), &mut |_: f32, _: Step| {}).unwrap();
+    let starts: Vec<usize> = a.bar_beats.iter().scan(0, |at, &n| Some(std::mem::replace(at, *at + n as usize))).collect();
+    let played: Vec<usize> = (0..16).map(|b| if b <= 7 { 4 * b } else { 4 * b - 2 }).collect();
+    let right = played.iter().filter(|p| starts.contains(p)).count();
+    assert!(right >= 14, "bars at {starts:?}, played at {played:?}: {:?}", a.bar_beats);
 }

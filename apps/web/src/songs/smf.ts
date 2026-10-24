@@ -192,6 +192,11 @@ export function writeSmf(ppq: number, tracks: TrackEvents[]): Uint8Array {
   return new Uint8Array(bytes);
 }
 
+/** A time signature meta event: `beats` quarter notes a bar. */
+export function meterEvent(tick: number, beats: number): number[] {
+  return [tick, 0xff, 0x58, beats, 2, 24, 8];
+}
+
 /** A tempo meta event. */
 export function tempoEvent(tick: number, bpm: number): number[] {
   const us = Math.round(60_000_000 / bpm);

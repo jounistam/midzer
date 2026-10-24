@@ -34,6 +34,13 @@ describe('my songs', () => {
     expect((await lib.loadUserSongs()).map((s) => s.id)).toEqual(['a']);
   });
 
+  it('keeps bars of one to seven beats and drops others', async () => {
+    const lib = await import('./library');
+    const bars = [{ beats: ['C'] }, { beats: ['C', '', ''] }, { beats: Array(7).fill('') }, { beats: [] }, { beats: Array(8).fill('') }];
+    await lib.saveUserSong({ ...song('odd'), bars });
+    expect((await lib.loadUserSongs())[0]!.bars.map((b) => b.beats.length)).toEqual([1, 3, 7]);
+  });
+
   it('keeps a recording with its song and its tempo map, and deletes them together', async () => {
     const lib = await import('./library');
     const recordings = await import('./recordings');

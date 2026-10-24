@@ -25,6 +25,7 @@ import {
 import { STEP_LABELS } from '../songs/audio';
 import { isBuiltin } from '../songs/library';
 import {
+  barStarts,
   emptyBar,
   formatChart,
   MAX_BARS,
@@ -77,7 +78,7 @@ export function SongScreen() {
             <Chart song={song} editing={editing} selection={selection} onSelect={select} />
             <p className="setting-note">
               {editing
-                ? 'Type one to four chords per bar: "C" fills the bar, "Am F" splits it, "C . G7 ." gives each beat. Shift-click bar numbers to select several.'
+                ? 'Type the chords of each bar: "C" fills the bar, "Am F" splits it, "C . G7 ." gives each beat; "[3/4] C" makes it three beats long. Shift-click bar numbers to select several.'
                 : 'Click a bar to start there (while playing, the band jumps there at the next bar). Shift-click to select bars to loop.'}
             </p>
           </section>
@@ -250,9 +251,11 @@ function NowPlaying({ song }: { song: Song }) {
   const beat = useSession((s) => s.beat);
   const startBar = useSession((s) => s.songStartBar);
   const beats = useMemo(() => resolvedBeats(song.bars), [song.bars]);
+  const starts = useMemo(() => barStarts(song.bars), [song.bars]);
 
   const playing = songBar !== null;
-  const at = playing ? songBar * 4 + beat : startBar * 4;
+  const at = playing ? (starts[songBar] ?? 0) + beat : (starts[startBar] ?? 0);
+  const barBeats = song.bars[playing ? songBar : startBar]?.beats.length ?? 4;
   const now = playing ? (chord?.name ?? '—') : (beats[at] ?? '—');
   let next: { name: string; in: number } | null = null;
   for (let i = at + 1; i < beats.length; i++) {
@@ -274,7 +277,7 @@ function NowPlaying({ song }: { song: Song }) {
         {next && playing && <p className="next-when">in {next.in} {next.in === 1 ? 'beat' : 'beats'}</p>}
       </div>
       <div className="beats" aria-hidden>
-        {[0, 1, 2, 3].map((b) => (
+        {Array.from({ length: barBeats }, (_, b) => b).map((b) => (
           <span key={b} className={`beat-dot ${playing && b === beat ? 'active' : ''}`} />
         ))}
       </div>
@@ -435,7 +438,7 @@ function EditTools({
       <button className={`toggle ${selected.length && selected.every((b) => b.fill) ? 'on' : ''}`} disabled={!sel} onClick={toggleFill}>
         Fill
       </button>
-      <button className="btn btn-secondary" onClick={() => insert(sel ? sel.end : bars.length, [emptyBar()])}>
+      <button className="btn btn-secondary" onClick={() => insert(sel ? sel.end : bars.length, [emptyBar((sel ? bars[sel.end - 1] : bars[bars.length - 1])?.beats.length)])}>
         Add bar
       </button>
       <button className="btn btn-secondary" disabled={!sel} onClick={() => sel && insert(sel.end, selected.map(withoutSection))}>

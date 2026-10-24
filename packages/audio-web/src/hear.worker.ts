@@ -26,7 +26,7 @@ interface Exports {
   mzh_alloc(bytes: number): number;
   mzh_free(ptr: number, bytes: number): void;
   mzh_library_clear(l: number): void;
-  mzh_library_add(l: number, id: number, marks: number, pairs: number, beats: number, nBeats: number, chords: number, nChords: number, seconds: number): void;
+  mzh_library_add(l: number, id: number, marks: number, pairs: number, beats: number, nBeats: number, chords: number, nChords: number, seconds: number, barBeats: number, nBars: number): void;
   mzh_ignore(l: number, id: number): void;
 }
 
@@ -37,6 +37,7 @@ export interface HearSong {
   beatTimes: Float64Array;
   chords: Int32Array;
   seconds: number;
+  barBeats: Uint8Array;
 }
 
 export type HearRequest =
@@ -60,6 +61,8 @@ export type HearReply =
   | { type: 'song'; samples: Int16Array<ArrayBuffer>; flags: number; followed: number }
   /** A stored song followed from engine frame `frame`, `seconds` into it; id −1 when none is any more. */
   | { type: 'follow'; id: number; frame: number; seconds: number }
+  /** The bar lines of the song followed: engine frame of each bar's first beat, its beats, … */
+  | { type: 'bars'; bars: Float64Array<ArrayBuffer> }
   | { type: 'error'; message: string };
 
 /** The wasm side takes at most this many samples a push (`INPUT` in ffi.rs). */
@@ -108,6 +111,9 @@ function tick(): void {
       post({ type: 'grid', frame: r[0]!, period: r[1]!, one: r[2]! < 0 ? null : r[2]!, confidence: r[3]! });
     } else if (kind === 3) {
       post({ type: 'follow', id: r[0]!, frame: r[1]!, seconds: r[2]! });
+    } else if (kind === 4) {
+      const bars = r.slice();
+      post({ type: 'bars', bars }, [bars.buffer]);
     } else {
       const spans = r.slice();
       post({ type: 'chords', spans }, [spans.buffer]);
@@ -128,17 +134,16 @@ function takeSong(x: Exports): void {
 function setLibrary(x: Exports): void {
   x.mzh_library_clear(listener);
   for (const song of library) {
-    const sizes = [song.landmarks.byteLength, song.beatTimes.byteLength, song.chords.byteLength];
-    const [marks, beats, chords] = sizes.map((bytes) => x.mzh_alloc(bytes)) as [number, number, number];
+    const sizes = [song.landmarks.byteLength, song.beatTimes.byteLength, song.chords.byteLength, song.barBeats.byteLength];
+    const [marks, beats, chords, bars] = sizes.map((bytes) => x.mzh_alloc(bytes)) as [number, number, number, number];
     // Views only after all the room is taken: growing memory detaches them.
     new Uint32Array(x.memory.buffer, marks, song.landmarks.length).set(song.landmarks);
     new Float64Array(x.memory.buffer, beats, song.beatTimes.length).set(song.beatTimes);
     new Int32Array(x.memory.buffer, chords, song.chords.length).set(song.chords);
+    new Uint8Array(x.memory.buffer, bars, song.barBeats.length).set(song.barBeats);
     const pairs = song.landmarks.length >> 1;
-    x.mzh_library_add(listener, song.id, marks, pairs, beats, song.beatTimes.length, chords, song.chords.length, song.seconds);
-    x.mzh_free(marks, sizes[0]!);
-    x.mzh_free(beats, sizes[1]!);
-    x.mzh_free(chords, sizes[2]!);
+    x.mzh_library_add(listener, song.id, marks, pairs, beats, song.beatTimes.length, chords, song.chords.length, song.seconds, bars, song.barBeats.length);
+    [marks, beats, chords, bars].forEach((ptr, i) => x.mzh_free(ptr, sizes[i]!));
   }
 }
 

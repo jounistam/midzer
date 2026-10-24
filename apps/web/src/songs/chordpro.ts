@@ -4,7 +4,7 @@
 // result is a starting point for the chart editor.
 
 import { parseChord } from './chords';
-import { emptyBar, newSongId, parseChart, sectionOf, type Bar, type Song, type SongSection } from './song';
+import { BEATS_PER_BAR, emptyBar, MAX_BAR_BEATS, newSongId, parseChart, sectionOf, type Bar, type Song, type SongSection } from './song';
 
 const DIRECTIVE = /^\{\s*([\w-]+)\s*(?::\s*(.*?))?\s*\}$/;
 const ENVIRONMENTS: Record<string, SongSection> = { verse: 'A', chorus: 'B', bridge: 'C' };
@@ -21,10 +21,13 @@ export function parseChordPro(text: string, fallbackTitle = 'Untitled song'): Ch
   let section: SongSection | undefined;
   let inGrid = false;
   let current: Bar | null = null;
+  /** Beats a bar, from `{time: n/4}`. */
+  let meter = BEATS_PER_BAR;
 
   /** Opens a bar for `chord`, starting the pending section there. */
   const startBar = (chord: string): Bar => {
-    const bar: Bar = { ...emptyBar(), beats: [chord, '', '', ''] };
+    const bar = emptyBar(meter);
+    bar.beats[0] = chord;
     if (section) bar.section = section;
     section = undefined;
     song.bars.push(bar);
@@ -48,6 +51,11 @@ export function parseChordPro(text: string, fallbackTitle = 'Untitled song'): Ch
       if (name === 'title' || name === 't') song.title = value || song.title;
       else if (name === 'artist' || name === 'subtitle' || name === 'st') song.artist ??= value || undefined;
       else if (name === 'tempo') song.bpm = clampBpm(Number.parseFloat(value)) ?? song.bpm;
+      else if (name === 'time') {
+        const m = /^\s*(\d+)\s*\/\s*(\d+)\s*$/.exec(value);
+        const beats = m ? (Number(m[1]) * 4) / Number(m[2]) : NaN;
+        if (Number.isInteger(beats) && beats >= 1 && beats <= MAX_BAR_BEATS) meter = beats;
+      }
       else if (name === 'start_of_grid' || name === 'sog') inGrid = true;
       else if (name === 'end_of_grid' || name === 'eog') inGrid = false;
       else if (/^(start_of_|so)/.test(name)) {
@@ -71,7 +79,7 @@ export function parseChordPro(text: string, fallbackTitle = 'Untitled song'): Ch
     }
 
     if (inGrid || /^\|.*\|$/.test(line)) {
-      const grid = parseChart(line.replace(/\[([^\]]+)\]/g, '$1'));
+      const grid = parseChart(`[${meter}/4] ${line.replace(/\[([^\]]+)\]/g, '$1')}`);
       unknown.push(...grid.unknown);
       addBars(grid.bars);
       continue;

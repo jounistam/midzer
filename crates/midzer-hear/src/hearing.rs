@@ -205,6 +205,9 @@ pub enum Heard {
     /// A stored song is followed from here (on recognising it, or a jump in
     /// it), or none is any more.
     Follow(Option<Following>),
+    /// The bar lines of the song followed, from the bar playing to a few bars
+    /// ahead: the engine frame of the beat each starts on and its length in beats.
+    Bars(Vec<(f64, u8)>),
 }
 
 /// The song followed.
@@ -218,7 +221,8 @@ struct Follow {
     found_until: u64,
     next_out: u64,
     /// The last grid told (anchor and period in stream samples), the votes
-    /// for which beat of the bar its anchor is, and the 1 said.
+    /// for how many beats after the stored bar lines the 1s are heard, and
+    /// the shift taken.
     grid: Option<(f64, f64)>,
     votes: [f32; 4],
     one: Option<u8>,
@@ -693,8 +697,9 @@ impl Hearing {
         self.chords.clear();
     }
 
-    /// Says where the song followed is: a grid through its stored beats, the
-    /// 1 voted from its stored 1s and the network's downbeats, and its chords.
+    /// Says where the song followed is: a grid through its stored beats, its
+    /// bar lines (moved if the network's downbeats outvote the stored 1s),
+    /// and its chords.
     fn tell_follow(&mut self) {
         let total = self.total();
         let Some(mut f) = self.follow else { return };
@@ -720,26 +725,28 @@ impl Hearing {
         // A straight grid through the last stored beats: a stray beat in the map doesn't move it.
         let from = beats.partition_point(|&b| b < now - self.settings.fit_s);
         let near: Vec<f64> = beats[from..=k].iter().map(|&b| stream(b)).collect();
+        // The stored beat nearest a stream time.
+        let beat_at = |t: f64| {
+            let s = t / RATE + f.delta;
+            let i = beats.partition_point(|&b| b < s);
+            [i.checked_sub(1), Some(i)].into_iter().flatten().filter(|&i| i < beats.len()).min_by(|&a, &b| (beats[a] - s).abs().total_cmp(&(beats[b] - s).abs())).unwrap_or(0)
+        };
         if let Some((anchor, period, _)) = fit(&near).filter(|g| g.2 >= 0.5) {
-            // The votes move with the anchor and fade; the stored 1s and the network's downbeats add to them.
-            if let Some((before, _)) = f.grid {
-                let n = ((anchor - before) / period).round() as i64;
-                let old = f.votes;
-                for v in 0..4 {
-                    f.votes[(v as i64 + n).rem_euclid(4) as usize] = old[v] * VOTE_DECAY;
-                }
-                f.one = f.one.map(|o| (o as i64 + n).rem_euclid(4) as u8);
+            // The votes fade; the stored 1s (no shift) and the network's downbeats add to them.
+            for v in &mut f.votes {
+                *v *= VOTE_DECAY;
             }
             let on = |t: f64| ((t - anchor) - ((t - anchor) / period).round() * period).abs() < ON_GRID_S * RATE;
-            let place = |t: f64| (-(((t - anchor) / period).round() as i64)).rem_euclid(4) as usize;
             for (j, &t) in near.iter().enumerate() {
-                if (from + j) % 4 == 0 && on(t) {
-                    f.votes[place(t)] += STORED_ONE;
+                if song.bar_at(from + j).0 == from + j && on(t) {
+                    f.votes[0] += STORED_ONE;
                 }
             }
             for (t, w) in self.follow_downbeats.drain(..) {
-                if on(t) {
-                    f.votes[place(t)] += w;
+                let j = beat_at(t);
+                let shift = j - song.bar_at(j).0;
+                if on(t) && shift < 4 {
+                    f.votes[shift] += w;
                 }
             }
             let mut order = [0usize, 1, 2, 3];
@@ -750,9 +757,18 @@ impl Hearing {
             f.grid = Some((anchor, period));
         }
         let (anchor, period) = f.grid.unwrap_or((stream(beats[k]), (beats[k + 1] - beats[k]) * RATE));
-        // Until the votes are clear, the stored 1.
-        let one = f.one.unwrap_or_else(|| place_of(&near, from, anchor, period));
+        // Until the votes are clear, the stored bar lines.
+        let shift = f.one.unwrap_or(0) as usize;
+        let in_bar = |j: usize| j.checked_sub(shift).map_or((j + 4 - shift) % 4, |j| j - song.bar_at(j).0);
+        let one = (in_bar(beat_at(anchor)) % 4) as u8;
         let grid = Grid { beat: self.frame_of(anchor), period: period * self.input_rate / RATE, one: Some(one), confidence: 1.0 };
+        let mut bars = Vec::new();
+        let mut j = k.saturating_sub(in_bar(k));
+        while j <= k + FOLLOW_AHEAD && j < beats.len() - 1 {
+            let len = j.checked_sub(shift).map_or(shift - j, |j| song.bar_at(j).1).max(1);
+            bars.push((self.frame_of(stream(beats[j])), len as u8));
+            j += len;
+        }
         let first = beats.partition_point(|&b| b <= now - FOLLOW_BACK_S).saturating_sub(1);
         let last = (k + FOLLOW_AHEAD).min(song.chords.len()).min(beats.len() - 1);
         let mut spans: Vec<ChordSpan> = Vec::new();
@@ -765,6 +781,7 @@ impl Hearing {
         }
         self.follow = Some(f);
         self.pending.push(Heard::Grid(grid));
+        self.pending.push(Heard::Bars(bars));
         self.pending.push(Heard::Chords(spans));
     }
 
@@ -996,14 +1013,6 @@ impl Hearing {
         }
         out
     }
-}
-
-/// Which beat of the bar the grid's anchor is, by the stored 1 nearest it
-/// (`near` are stored beats from chart beat `from` on, in stream samples).
-fn place_of(near: &[f64], from: usize, anchor: f64, period: f64) -> u8 {
-    let Some((j, &t)) = near.iter().enumerate().min_by(|a, b| (a.1 - anchor).abs().total_cmp(&(b.1 - anchor).abs())) else { return 0 };
-    let n = ((t - anchor) / period).round() as i64;
-    ((from + j) as i64 - n).rem_euclid(4) as u8
 }
 
 /// A chord's root and whether it is minor: what a loop must repeat (the
@@ -1316,7 +1325,7 @@ mod tests {
         let beats: Vec<f64> = (0..=(seconds * 2.0) as usize).map(|i| i as f64 * 0.5).collect();
         let chords = vec![Some(Chord { root: 0, quality: Quality::Major, bass: 0 }); beats.len() - 1];
         let marks = fingerprint(&music[..(seconds * RATE) as usize]);
-        hearing.library().add(StoredSong { id: 7, beats, chords, seconds }, marks);
+        hearing.library().add(StoredSong { id: 7, beats, chords, seconds, bar_beats: Vec::new() }, marks);
         music
     }
 

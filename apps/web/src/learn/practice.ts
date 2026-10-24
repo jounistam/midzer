@@ -6,7 +6,7 @@ import { NOTE_NAMES, PPQ, type TimedEvent } from '@midzer/audio-web';
 import { create } from 'zustand';
 import { live } from '../live';
 import { closeSong, onEngineEvents, onPlayerNote, openSong, seekSong, send, setLoop, setTempo, useSession } from '../session';
-import type { Song } from '../songs/song';
+import { barStarts, totalBeats, type Song } from '../songs/song';
 import { SongClock } from './clock';
 import { accuracy, emptyScore, Judge, starsFor, type Grade, type Score } from './judge';
 import type { BeatRange } from './lanes';
@@ -82,6 +82,8 @@ export const practiceLive = {
   loop: null as BeatRange | null,
   /** Where the song starts, in beats, for the view while stopped. */
   startBeat: 0,
+  /** The beat each bar starts on, and the song's end. */
+  barStarts: [0] as number[],
   /** Target id → time it was played, for a flash. */
   flashes: new Map<number, number>(),
   lastPos: null as number | null,
@@ -137,6 +139,7 @@ function rebuild(starting = false): void {
   if (session().playing && !starting) send({ type: 'stop' });
   const targets = buildTargets(song, part, { chordBase: hasMidiInput() ? 48 : 60 });
   practiceLive.targets = targets;
+  practiceLive.barStarts = barStarts(song.bars);
   practiceLive.clock.reset();
   practiceLive.flashes.clear();
   practiceLive.lastPos = null;
@@ -175,7 +178,8 @@ export function setSpeed(speed: number): void {
 export function setPracticeLoop(bars: { start: number; end: number } | null): void {
   setLoop(bars);
   seekSong(bars?.start ?? 0);
-  practiceLive.loop = bars && { start: bars.start * 4, end: bars.end * 4 };
+  const starts = barStarts(get().song?.bars ?? []);
+  practiceLive.loop = bars && { start: starts[bars.start] ?? 0, end: starts[bars.end] ?? starts[starts.length - 1]! };
   rebuild();
 }
 
@@ -230,7 +234,7 @@ function endRun(): void {
   const pos = practiceLive.lastPos;
   const { song } = get();
   if (!judge || !song || pos === null) return;
-  const ended = !practiceLive.loop && pos >= Math.max(targetsEnd(practiceLive.targets), song.bars.length * 4) - 1.5;
+  const ended = !practiceLive.loop && pos >= Math.max(targetsEnd(practiceLive.targets), totalBeats(song.bars)) - 1.5;
   if (!ended) return;
   judge.advance(Number.MAX_SAFE_INTEGER, practiceLive.clock.msPerBeat);
   const score = { ...judge.score };

@@ -3,7 +3,7 @@
 
 import { QUALITY_INTERVALS } from '@midzer/audio-web';
 import { parseChord } from '../songs/chords';
-import { BEATS_PER_BAR, resolvedBeats, sectionsByBar, type Song } from '../songs/song';
+import { barAt, barStarts, resolvedBeats, sectionsByBar, type Song } from '../songs/song';
 
 export type Part = 'melody' | 'chords' | 'both';
 
@@ -55,14 +55,15 @@ export function buildTargets(song: Song, part: Part, { chordBase = 48 }: TargetO
 function chordTargets(song: Song, base: number): Omit<Target, 'id'>[] {
   const beats = resolvedBeats(song.bars);
   const sections = sectionsByBar(song.bars);
+  const starts = barStarts(song.bars);
   const out: Omit<Target, 'id'>[] = [];
   let previous: string | null = null;
   beats.forEach((name, i) => {
-    const bar = Math.floor(i / BEATS_PER_BAR);
+    const { bar, beat } = barAt(starts, i);
     const changed = name !== previous;
     previous = name;
     // The intro is the band's alone.
-    if (!name || sections[bar] === 'intro' || !(changed || i % BEATS_PER_BAR === 0)) return;
+    if (!name || sections[bar] === 'intro' || !(changed || beat === 0)) return;
     const spec = parseChord(name);
     if (!spec) return;
     const intervals = QUALITY_INTERVALS[spec.quality] ?? [];
@@ -74,7 +75,7 @@ function chordTargets(song: Song, base: number): Omit<Target, 'id'>[] {
     out.push({
       kind: 'chord',
       beat: i,
-      len: BEATS_PER_BAR,
+      len: song.bars[bar]!.beats.length,
       keys: intervals.map((iv) => root + iv),
       pcs: required.map((iv) => (spec.root + iv) % 12),
       name,

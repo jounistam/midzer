@@ -25,7 +25,10 @@ fn main() {
     let a = &analysis;
     println!("{:?} – {:?}, {:.0}s, {} BPM, key {}{}, tuning {} cents", a.title, a.artist, a.duration, a.bpm, ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"][a.key.tonic as usize], if a.key.minor { "m" } else { "" }, a.tuning_cents);
     let name = |c: &Option<midzer_analyze::ChordOut>| c.map_or(".".to_string(), |c| Chord { root: c.root, quality: Quality::ALL[c.quality as usize], bass: c.bass }.to_string());
-    for (b, bar) in a.chords.chunks(4).enumerate() {
+    let mut at = 0;
+    for (b, &n) in a.bar_beats.iter().enumerate() {
+        let bar = &a.chords[at..at + n as usize];
+        at += n as usize;
         if let Some(s) = a.sections.iter().find(|s| s.bar == b) {
             print!("\n[{}] ", s.part);
         } else if b % 4 == 0 {

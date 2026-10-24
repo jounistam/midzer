@@ -24,5 +24,7 @@ describe('falling-note placements', () => {
 
   it('lists bar lines', () => {
     expect(barLines(2.5, 12)).toEqual([4, 8, 12]);
+    // From the song's bar starts (4, 2 and 3 beats), then fours past its end.
+    expect(barLines(1, 17, [0, 4, 6, 9])).toEqual([4, 6, 9, 13, 17]);
   });
 });

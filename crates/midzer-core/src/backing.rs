@@ -14,12 +14,10 @@ use crate::chord::Chord;
 use crate::drummer::keeps_time;
 use crate::drums::Piece;
 use crate::event::{EngineEvent, EventBuffer};
-use crate::song::{MAX_SONG_BARS, SongPlayer};
-use crate::style::BEATS_PER_BAR;
+use crate::song::{MAX_SONG_BEATS, SongPlayer};
 
-const BEATS: u32 = BEATS_PER_BAR;
 /// Every song beat plus the end of the last bar.
-pub const MAX_TRACK_BEATS: usize = MAX_SONG_BARS * BEATS as usize + 1;
+pub const MAX_TRACK_BEATS: usize = MAX_SONG_BEATS + 1;
 /// Frames of the cross-fade on starts, stops and jumps, so nothing clicks.
 const FADE: u32 = 256;
 /// The tempo shown changes when the recording's moves by this much.
@@ -45,9 +43,11 @@ impl Track {
 pub struct Judged {
     /// How far from the nearest sixteenth, in ms; negative is early.
     pub ms: f32,
-    /// The sixteenth of the bar it was meant for, 0..16.
+    /// The sixteenth of the bar it was meant for, 0..28 (four a beat).
     pub sixteenth: u8,
     pub bar: u16,
+    /// The song beat it was meant for, counting the sixteenth after it as that beat.
+    pub beat: u32,
 }
 
 /// Whether the pitch classes played fit `chord`: every one a chord tone, or
@@ -206,13 +206,13 @@ impl Backing {
 
     /// Starts from the start bar, a bar early so the player hears it coming;
     /// from the very start at bar 0.
-    pub fn play(&mut self, band_bpm: f32, out: &mut EventBuffer) {
+    pub fn play(&mut self, band_bpm: f32, chart: &SongPlayer, out: &mut EventBuffer) {
         if self.playing || self.track.is_none() || self.beat_count < 2 {
             return;
         }
         let from = match self.start_bar {
             0 => 0,
-            bar => self.beat_frame((bar - 1) * BEATS).unwrap_or(0),
+            bar => self.beat_frame(chart.bar_start(bar - 1)).unwrap_or(0),
         };
         self.pos = from;
         self.next_beat = (0..).find(|&i| self.beat_frame(i).is_none_or(|f| f >= from)).unwrap_or(0);
@@ -244,15 +244,15 @@ impl Backing {
     }
 
     /// Where a bar line at song beat `beat` jumps to: a seek, or the loop's start.
-    fn jump_target(&mut self, beat: u32) -> Option<u32> {
-        if !beat.is_multiple_of(BEATS) {
+    fn jump_target(&mut self, beat: u32, chart: &SongPlayer) -> Option<u32> {
+        if chart.bar_of(beat).1 != 0 {
             return None;
         }
         if let Some(bar) = self.seek.take() {
             return Some(bar);
         }
         match self.loop_bars {
-            Some((start, end)) if beat >= end * BEATS => Some(start),
+            Some((start, end)) if beat >= chart.bar_start(end) => Some(start),
             _ => None,
         }
     }
@@ -262,7 +262,7 @@ impl Backing {
         if !self.playing || frames == 0 {
             return;
         }
-        let chart_beats = chart.bars() * BEATS;
+        let chart_beats = chart.beats();
         let mut offset = 0u32;
         let mut pos = self.pos;
         while let Some(f) = self.beat_frame(self.next_beat) {
@@ -272,12 +272,12 @@ impl Backing {
             }
             let beat = self.next_beat;
             let at = offset + f.saturating_sub(pos) as u32;
-            if let Some(bar) = self.jump_target(beat)
-                && let Some(to) = self.beat_frame(bar * BEATS)
-                && bar * BEATS != beat
+            if let Some(bar) = self.jump_target(beat, chart)
+                && let Some(to) = self.beat_frame(chart.bar_start(bar))
+                && chart.bar_start(bar) != beat
             {
                 self.cue(Cue::Jump { at, to });
-                self.next_beat = bar * BEATS;
+                self.next_beat = chart.bar_start(bar);
                 pos = to;
                 offset = at;
                 continue;
@@ -302,14 +302,16 @@ impl Backing {
     }
 
     fn report_beat(&mut self, chart: &SongPlayer, beat: u32, at: u32, out: &mut EventBuffer) {
-        out.push(at, EngineEvent::Beat { bar: beat / BEATS, beat: (beat % BEATS) as u8 });
+        let (bar, beat_in_bar) = chart.bar_of(beat);
+        out.push(at, EngineEvent::Beat { bar, beat: beat_in_bar });
         out.push(at, EngineEvent::SongPosition { beat });
         self.report_chord(chart, beat, at, out);
-        if beat.is_multiple_of(BEATS)
-            && let (Some(a), Some(b)) = (self.beat_time(beat as i64), self.beat_time(beat as i64 + BEATS as i64))
+        let len = chart.bar_start(bar + 1).saturating_sub(beat).max(1);
+        if beat_in_bar == 0
+            && let (Some(a), Some(b)) = (self.beat_time(beat as i64), self.beat_time((beat + len) as i64))
             && b > a
         {
-            let bpm = (60.0 * BEATS as f64 / (b - a)) as f32;
+            let bpm = (60.0 * len as f64 / (b - a)) as f32;
             if (bpm - self.bpm).abs() >= TEMPO_STEP {
                 self.bpm = bpm;
                 out.push(at, EngineEvent::Tempo { bpm });
@@ -326,8 +328,8 @@ impl Backing {
     }
 
     /// Places a hit made `late_ms` before now (the player's latency) on the
-    /// recording's grid of sixteenths.
-    pub fn judge(&self, late_ms: f32) -> Option<Judged> {
+    /// recording's grid of sixteenths, in the chart's bars.
+    pub fn judge(&self, late_ms: f32, chart: &SongPlayer) -> Option<Judged> {
         if !self.playing {
             return None;
         }
@@ -355,12 +357,15 @@ impl Backing {
             // Well before the first beat: nothing to judge against yet.
             return None;
         }
-        Some(Judged { ms, sixteenth: (sixteenth % 16) as u8, bar: (sixteenth / 16).min(u16::MAX as i64) as u16 })
+        let (bar, beat_in_bar) = chart.bar_of((sixteenth / 4) as u32);
+        let beat = ((sixteenth + 1) / 4) as u32;
+        let sixteenth = beat_in_bar as u32 * 4 + (sixteenth % 4) as u32;
+        Some(Judged { ms, sixteenth: sixteenth as u8, bar: bar.min(u16::MAX as u32) as u16, beat })
     }
 
     /// Judges a drummer's hit; the meter only shows hits that keep time.
-    pub fn drum_hit(&self, piece: Piece, velocity: u8, late_ms: f32, out: &mut EventBuffer) {
-        let Some(j) = self.judge(late_ms) else { return };
+    pub fn drum_hit(&self, piece: Piece, velocity: u8, late_ms: f32, chart: &SongPlayer, out: &mut EventBuffer) {
+        let Some(j) = self.judge(late_ms, chart) else { return };
         out.push(0, EngineEvent::Judged { ms: j.ms, piece, sixteenth: j.sixteenth, bar: j.bar });
         if keeps_time(piece, velocity) {
             out.push(0, EngineEvent::Timing { ms: j.ms });
@@ -371,10 +376,9 @@ impl Backing {
     /// bit set) made `late_ms` before now, and whether it fits the chart's
     /// chord on the beat it was meant for.
     pub fn keys_strike(&self, pitches: u16, late_ms: f32, chart: &SongPlayer, out: &mut EventBuffer) {
-        let Some(j) = self.judge(late_ms) else { return };
+        let Some(j) = self.judge(late_ms, chart) else { return };
         // A strike a sixteenth before a beat is meant for that beat's chord.
-        let beat = (j.bar as u32 * 16 + j.sixteenth as u32 + 1) / 4;
-        let chord = chart.chord_at(beat).and_then(|c| fits(pitches, c));
+        let chord = chart.chord_at(j.beat).and_then(|c| fits(pitches, c));
         out.push(0, EngineEvent::KeysJudged { ms: j.ms, sixteenth: j.sixteenth, bar: j.bar, chord });
         out.push(0, EngineEvent::Timing { ms: j.ms });
     }
@@ -514,7 +518,7 @@ mod tests {
         let mut b = backing(16, 0.3, 0.6, 0.002);
         let c = chart(4);
         let mut out = EventBuffer::default();
-        b.play(120.0, &mut out);
+        b.play(120.0, &c, &mut out);
         let events = run(&mut b, &c, (RATE * 13.0) as u64);
         let beats = song_beats(&events);
         assert_eq!(beats.len(), 16, "one per chart beat");
@@ -535,7 +539,7 @@ mod tests {
         let c = chart(8);
         b.seek(2);
         b.set_loop(2, 4);
-        b.play(120.0, &mut EventBuffer::default());
+        b.play(120.0, &c, &mut EventBuffer::default());
         let events = run(&mut b, &c, (RATE * 7.0) as u64);
         let beats: Vec<u32> = song_beats(&events).iter().map(|b| b.1).collect();
         // Bar 1 as the lead-in, then bars 2–3 twice and more.
@@ -551,7 +555,7 @@ mod tests {
     fn a_seek_while_playing_jumps_at_the_next_bar() {
         let mut b = backing(32, 0.0, 0.5, 0.0);
         let c = chart(8);
-        b.play(120.0, &mut EventBuffer::default());
+        b.play(120.0, &c, &mut EventBuffer::default());
         let first = run(&mut b, &c, (RATE * 0.7) as u64);
         assert_eq!(song_beats(&first).last().unwrap().1, 1);
         b.seek(6);
@@ -569,7 +573,7 @@ mod tests {
         }
         b.set_gain(0.6);
         let c = chart(1);
-        b.play(120.0, &mut EventBuffer::default());
+        b.play(120.0, &c, &mut EventBuffer::default());
         let (mut l, mut r) = ([0.0f32; 128], [0.0f32; 128]);
         // Two blocks to get past the fade-in.
         for _ in 0..3 {
@@ -606,30 +610,54 @@ mod tests {
     #[test]
     fn judges_hits_against_the_recording_s_sixteenths() {
         let mut b = backing(16, 0.25, 0.5, 0.0);
-        b.play(120.0, &mut EventBuffer::default());
+        let c = chart(4);
+        b.play(120.0, &c, &mut EventBuffer::default());
         // Bar 1, beat 2 (sixteenth 4 of bar 1) is 0.25 + 6 × 0.5 s in.
         let at = |seconds: f64, b: &mut Backing| b.pos = (seconds * RATE as f64) as u64;
         at(3.25 + 0.012, &mut b);
-        let j = b.judge(0.0).unwrap();
+        let j = b.judge(0.0, &c).unwrap();
         assert_eq!((j.bar, j.sixteenth), (1, 8));
         assert!((j.ms - 12.0).abs() < 0.1, "{j:?}");
         // The player's latency moves the hit earlier: 20 ms of it makes this 8 ms early.
-        assert!((b.judge(20.0).unwrap().ms + 8.0).abs() < 0.1);
+        assert!((b.judge(20.0, &c).unwrap().ms + 8.0).abs() < 0.1);
         // Just before the second sixteenth of beat 0, and in the pickup.
         at(0.25 + 0.125 - 0.005, &mut b);
-        let j = b.judge(0.0).unwrap();
+        let j = b.judge(0.0, &c).unwrap();
         assert_eq!((j.bar, j.sixteenth), (0, 1));
         assert!((j.ms + 5.0).abs() < 0.1);
         at(0.25 - 0.03, &mut b);
-        let j = b.judge(0.0).unwrap();
+        let j = b.judge(0.0, &c).unwrap();
         assert_eq!((j.bar, j.sixteenth), (0, 0));
         assert!((j.ms + 30.0).abs() < 0.1);
         at(0.0, &mut b);
-        assert_eq!(b.judge(0.0), None, "too long before the first beat");
+        assert_eq!(b.judge(0.0, &c), None, "too long before the first beat");
         // Past the map the grid carries on at the last tempo.
         at(0.25 + 20.0 * 0.5 + 0.003, &mut b);
-        let j = b.judge(0.0).unwrap();
+        let j = b.judge(0.0, &c).unwrap();
         assert_eq!((j.bar, j.sixteenth), (5, 0));
         assert!((j.ms - 3.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn bars_of_other_lengths_set_the_bar_lines_jumps_and_judging() {
+        // Bars of 4, 2, 4 and 3 beats, half a second each from 0.25 s.
+        let mut b = backing(13, 0.25, 0.5, 0.0);
+        let mut c = chart(4);
+        c.set_bar_beats(1, 2);
+        c.set_bar_beats(3, 3);
+        b.seek(2);
+        b.set_loop(2, 4);
+        b.play(120.0, &c, &mut EventBuffer::default());
+        let events = run(&mut b, &c, (RATE * 6.0) as u64);
+        let beats: Vec<u32> = song_beats(&events).iter().map(|b| b.1).collect();
+        // Bar 1 (2 beats) leads in, then bars 2–3 (7 beats) loop.
+        assert_eq!(&beats[..11], [4, 5, 6, 7, 8, 9, 10, 11, 12, 6, 7]);
+        let bars: Vec<(u32, u8)> = events.iter().filter_map(|(_, e)| if let EngineEvent::Beat { bar, beat } = e { Some((*bar, *beat)) } else { None }).collect();
+        assert_eq!(&bars[..7], [(1, 0), (1, 1), (2, 0), (2, 1), (2, 2), (2, 3), (3, 0)]);
+
+        // Beat 11 is the second of bar 3: its first sixteenth is that bar's fifth.
+        b.pos = ((0.25 + 11.0 * 0.5) * RATE as f64) as u64;
+        let j = b.judge(0.0, &c).unwrap();
+        assert_eq!((j.bar, j.sixteenth, j.beat), (3, 4, 11));
     }
 }

@@ -50,6 +50,16 @@ describe('songs from recordings', () => {
     expect(notes.join(' ')).toContain('rough guess');
   });
 
+  it('groups the beats into bars of the lengths the analysis heard', () => {
+    const { song } = songFromAnalysis(analysis({ barBeats: [4, 2, 4], beatTimes: Array.from({ length: 11 }, (_, i) => 0.5 + i * 0.625), chords: [C, C, C, C, Am, Am, G7B, G7B, C, C] }), 'x');
+    expect(song.bars.map((b) => b.beats)).toEqual([
+      ['C', '', '', ''],
+      ['Am', ''],
+      ['G7/B', '', 'C', ''],
+    ]);
+    expect(song.backing!.beatTimes).toHaveLength(11);
+  });
+
   it('marks silence after music as no chord, and takes the title from the tags', () => {
     const { song } = songFromAnalysis(analysis({ chords: [C, C, null, null], title: ' Tagged ', artist: 'Band' }), 'file');
     expect(song.bars[0]!.beats).toEqual(['C', '', 'N.C.', '']);

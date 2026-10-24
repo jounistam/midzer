@@ -36,6 +36,24 @@ pub struct StoredSong {
     pub chords: Vec<Option<Chord>>,
     /// How long the audio was.
     pub seconds: f64,
+    /// How many beats each bar of the chart has; past them (or with none)
+    /// bars are four beats.
+    pub bar_beats: Vec<u8>,
+}
+
+impl StoredSong {
+    /// The bar chart beat `beat` is in: the beat it starts on and its length.
+    pub fn bar_at(&self, beat: usize) -> (usize, usize) {
+        let mut start = 0;
+        for &n in &self.bar_beats {
+            let n = n.max(1) as usize;
+            if beat < start + n {
+                return (start, n);
+            }
+            start += n;
+        }
+        (beat - (beat - start) % 4, 4)
+    }
 }
 
 /// A song recognised: which, where, and how sure.
@@ -223,6 +241,8 @@ mod tests {
         let (a, b) = (tune(30.0, 1), tune(30.0, 3));
         let mut library = Library::default();
         library.add(StoredSong { id: 7, seconds: 30.0, ..Default::default() }, fingerprint(&a));
+        let odd = StoredSong { bar_beats: vec![4, 2, 3], ..Default::default() };
+        assert_eq!([odd.bar_at(3), odd.bar_at(5), odd.bar_at(8), odd.bar_at(9), odd.bar_at(14)], [(0, 4), (4, 2), (6, 3), (9, 4), (13, 4)]);
         library.add(StoredSong { id: 9, seconds: 30.0, ..Default::default() }, fingerprint(&b));
 
         let heard = fingerprint(&excerpt(&b, 12.3, 8.0, 5));

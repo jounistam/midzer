@@ -38,9 +38,13 @@ export function placements(targets: readonly Target[], pos: number, ahead: numbe
   return out;
 }
 
-/** Song positions of the bar lines between `from` and `to`, in beats. */
-export function barLines(from: number, to: number, beatsPerBar = 4): number[] {
-  const out: number[] = [];
-  for (let b = Math.ceil(from / beatsPerBar) * beatsPerBar; b <= to; b += beatsPerBar) out.push(b);
+/**
+ * Song positions of the bar lines between `from` and `to`, in beats, from
+ * where the bars start (`barStarts`); past the song's end, every four beats.
+ */
+export function barLines(from: number, to: number, starts: readonly number[] = [0]): number[] {
+  const end = starts[starts.length - 1]!;
+  const out = starts.filter((b) => b >= from && b <= to && b < end);
+  for (let b = Math.max(end, end + Math.ceil((from - end) / 4) * 4); b <= to; b += 4) out.push(b);
   return out;
 }

@@ -38,6 +38,7 @@ export function liveLibrarySong(id: number, song: Song, landmarks: Uint32Array |
     beatTimes: Float64Array.from(map.beatTimes),
     chords: chords.slice(0, Math.min(chords.length, map.beatTimes.length - 1)),
     seconds: map.seconds,
+    barBeats: Uint8Array.from(song.bars, (bar) => bar.beats.length),
   };
 }
 

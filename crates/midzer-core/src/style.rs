@@ -74,14 +74,23 @@ pub struct Pattern {
 }
 
 impl Pattern {
-    /// The steps of the bar that plays as song bar `bar`, with ticks relative
-    /// to that bar's start.
-    pub fn bar(&self, bar: u64) -> impl Iterator<Item = Step> + '_ {
+    /// The steps of the bar that plays as the band's bar `bar`, `beats` beats
+    /// long, with ticks relative to that bar's start. Patterns are written in
+    /// four: a shorter bar plays their first beats, a longer one their four
+    /// and then their second half again. Notes don't ring past a bar of
+    /// another length.
+    pub fn bar(&self, bar: u64, beats: u8) -> impl Iterator<Item = Step> + '_ {
         let offset = (bar % self.bars.max(1) as u64) as u32 * TICKS_PER_BAR;
-        self.steps
-            .iter()
-            .filter(move |s| s.tick >= offset && s.tick < offset + TICKS_PER_BAR)
-            .map(move |s| Step { tick: s.tick - offset, ..*s })
+        let end = beats as u32 * PPQ;
+        let clip = beats as u32 != BEATS_PER_BAR;
+        (0..beats as u32).flat_map(move |beat| {
+            let from = if beat < BEATS_PER_BAR { beat } else { 2 + (beat - BEATS_PER_BAR) % 2 };
+            let lo = offset + from * PPQ;
+            self.steps.iter().filter(move |s| s.tick >= lo && s.tick < lo + PPQ).map(move |s| {
+                let tick = s.tick - lo + beat * PPQ;
+                Step { tick, dur: if clip { s.dur.min(end - tick) } else { s.dur }, ..*s }
+            })
+        })
     }
 }
 
@@ -561,8 +570,22 @@ mod tests {
 
         let two = chords("x...|..x.");
         assert_eq!(two.bars, 2);
-        assert_eq!(two.bar(1).map(|s| s.tick).collect::<Vec<_>>(), [2 * 480]);
-        assert_eq!(two.bar(2).count(), 1);
+        assert_eq!(two.bar(1, 4).map(|s| s.tick).collect::<Vec<_>>(), [2 * 480]);
+        assert_eq!(two.bar(2, 4).count(), 1);
+    }
+
+    #[test]
+    fn bars_of_other_lengths_cut_or_repeat_the_pattern() {
+        let p = bass("R...5...R...3...");
+        let ticks = |beats| p.bar(0, beats).map(|s| (s.tick, s.dur)).collect::<Vec<_>>();
+        let full = p.steps[0].dur;
+        assert_eq!(ticks(4).iter().map(|t| t.0).collect::<Vec<_>>(), [0, 480, 960, 1440]);
+        assert_eq!(ticks(2), [(0, full), (480, full.min(480))]);
+        assert_eq!(ticks(1), [(0, full.min(480))]);
+        // Five and six beats: the four, then beats 3 and 4 again.
+        assert_eq!(ticks(6).iter().map(|t| t.0).collect::<Vec<_>>(), [0, 480, 960, 1440, 1920, 2400]);
+        let notes: Vec<_> = p.bar(0, 6).map(|s| s.hit).collect();
+        assert_eq!((notes[4], notes[5]), (notes[2], notes[3]));
     }
 
     #[test]

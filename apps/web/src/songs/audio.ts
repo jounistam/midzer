@@ -6,8 +6,8 @@
 import { NOTE_NAMES } from '@midzer/audio-web';
 import { formatChord } from './chords';
 import type { MelodyNote } from './melody';
-import { tempoEvent, writeSmf, type TrackEvents } from './smf';
-import { BEATS_PER_BAR, MAX_BARS, MAX_TRACK_BEATS, newSongId, type Bar, type Song, type SongSection } from './song';
+import { meterEvent, tempoEvent, writeSmf, type TrackEvents } from './smf';
+import { BEATS_PER_BAR, MAX_BAR_BEATS, MAX_BARS, MAX_TRACK_BEATS, newSongId, totalBeats, type Bar, type Song, type SongSection } from './song';
 
 /** Mirrors `Analysis` in crates/midzer-analyze/src/lib.rs. */
 export interface AudioAnalysis {
@@ -18,9 +18,11 @@ export interface AudioAnalysis {
   key: { tonic: number; minor: boolean };
   tuningCents: number;
   barTimes: number[];
+  /** How many beats each bar has; missing from older analyses, whose bars are all four. */
+  barBeats?: number[];
   /** Every beat of the bars, plus the end of the last one. */
   beatTimes: number[];
-  /** Four per bar; null is no chord. */
+  /** One per beat of the bars; null is no chord. */
   chords: ({ root: number; quality: number; bass: number } | null)[];
   sections: { bar: number; part: SongSection }[];
   melody: AnalysedNote[];
@@ -92,18 +94,21 @@ export interface HeardLive {
 
 /** A song from a recording's analysis, or with `live` from a song heard live, which keeps no recording. */
 export function songFromAnalysis(a: AudioAnalysis, fallbackTitle: string, live?: HeardLive): FromAudio {
-  const barCount = Math.min(MAX_BARS, Math.floor(a.chords.length / BEATS_PER_BAR));
   const bars: Bar[] = [];
   let previous: string | null = null;
-  for (let b = 0; b < barCount; b++) {
-    const beats = ['', '', '', ''];
-    for (let i = 0; i < BEATS_PER_BAR; i++) {
-      const chord = a.chords[b * BEATS_PER_BAR + i];
+  let at = 0;
+  for (let b = 0; b < MAX_BARS; b++) {
+    const length = Math.min(MAX_BAR_BEATS, Math.max(1, a.barBeats?.[b] ?? BEATS_PER_BAR));
+    if (at + length > a.chords.length) break;
+    const beats = Array<string>(length).fill('');
+    for (let i = 0; i < length; i++) {
+      const chord = a.chords[at + i];
       const name = chord ? formatChord(chord) : 'N.C.';
       if (name !== previous && !(previous === null && name === 'N.C.')) beats[i] = name;
       previous = name;
     }
     bars.push({ beats });
+    at += length;
   }
   for (const { bar, part } of a.sections) {
     if (bars[bar]) bars[bar].section = part;
@@ -121,7 +126,7 @@ export function songFromAnalysis(a: AudioAnalysis, fallbackTitle: string, live?:
   if (melody.length > 0) song.melody = melody;
   if (a.tracks.length > 0) song.transcription = a.tracks;
   if (a.beatTimes.length >= 2) {
-    const beatTimes = a.beatTimes.slice(0, Math.min(MAX_TRACK_BEATS, barCount * BEATS_PER_BAR + 1));
+    const beatTimes = a.beatTimes.slice(0, Math.min(MAX_TRACK_BEATS, totalBeats(bars) + 1));
     if (live) {
       song.heard = { beatTimes, seconds: a.duration, complete: live.complete, envelope: Uint8Array.from(a.envelope), heardAt: live.heardAt };
     } else {
@@ -143,9 +148,17 @@ const PPQ = 480;
 const DRUM_CHANNEL = 9;
 const MELODIC_CHANNELS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15];
 
-/** The transcribed parts as a format-1 MIDI file at the song's tempo, one track each. */
-export function transcriptionMidi(tracks: AnalysedTrack[], bpm: number): Uint8Array {
+/** The transcribed parts as a format-1 MIDI file at the song's tempo, one track each, in the chart's bars. */
+export function transcriptionMidi(tracks: AnalysedTrack[], bpm: number, bars: Bar[] = []): Uint8Array {
   const tempo: TrackEvents = { name: 'Tempo', events: [tempoEvent(0, bpm)] };
+  let at = 0;
+  let meter = BEATS_PER_BAR;
+  for (const bar of bars) {
+    const n = bar.beats.length;
+    if (n !== meter || (at === 0 && n !== BEATS_PER_BAR)) tempo.events.push(meterEvent(at * PPQ, n));
+    meter = n;
+    at += n;
+  }
   let melodic = 0;
   const parts = tracks.map((track): TrackEvents => {
     const ch = track.drums ? DRUM_CHANNEL : MELODIC_CHANNELS[melodic++ % MELODIC_CHANNELS.length]!;

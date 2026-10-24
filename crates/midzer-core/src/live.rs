@@ -12,6 +12,8 @@
 //! A listener off the audio thread (`midzer-hear`) can send a guide: the
 //! grid it heard and which beat is the 1. The tracker then takes its beats
 //! from that grid, and the 1 is the guide's unless the player said otherwise.
+//! Following a stored song, it also sends the song's bar lines ahead, so bars
+//! of other lengths than four come out right; past them bars are four beats.
 //!
 //! Nothing here allocates after [`Live::new`].
 
@@ -26,6 +28,8 @@ const BEATS: u32 = 4;
 const KEPT: usize = 8;
 /// Hits waiting for the beat after them.
 const PENDING: usize = 64;
+/// Bar lines from a stored song, kept from a little before the beat heard to a few bars ahead.
+const BAR_LINES: usize = 8;
 /// How often the status goes out at most, in seconds.
 const STATUS_EVERY_S: f32 = 0.1;
 /// The downbeat guess: how fast it forgets, when it starts, and how much
@@ -118,6 +122,10 @@ pub struct Live {
     /// The engine frame of the last start over: guides heard before it were
     /// of the song forgotten.
     fresh_from: f64,
+    /// Bar lines a stored song says are coming, oldest first: the engine
+    /// frame of the beat a bar starts on, and how many beats it has.
+    bar_lines: [(f64, u8); BAR_LINES],
+    bar_line_count: usize,
 }
 
 impl Live {
@@ -157,6 +165,8 @@ impl Live {
             shown_period: 0.0,
             far_for: 0.0,
             fresh_from: 0.0,
+            bar_lines: [(0.0, 0); BAR_LINES],
+            bar_line_count: 0,
         }
     }
 
@@ -211,6 +221,7 @@ impl Live {
         self.bpm = 0.0;
         self.shown_period = 0.0;
         self.far_for = 0.0;
+        self.bar_line_count = 0;
     }
 
     /// How much later, in ms, the player hears the source than the engine gets it.
@@ -253,6 +264,66 @@ impl Live {
         }
     }
 
+    /// A bar of `beats` beats starts at the beat at `frame` (low 32 bits of an
+    /// engine frame), as a stored song followed says, ahead of time.
+    pub fn bar_ahead(&mut self, frame: u32, beats: u8, now: u64) {
+        if !self.active || beats == 0 {
+            return;
+        }
+        let at = now as f64 + (frame.wrapping_sub(now as u32) as i32) as f64;
+        if at < self.fresh_from {
+            return;
+        }
+        let period = self.tracker.last_beat().map_or(0.0, |b| b.2);
+        let lines = &mut self.bar_lines[..self.bar_line_count];
+        // The same line again (the listener's place moved a little) replaces it.
+        if let Some(line) = lines.iter_mut().find(|l| (l.0 - at).abs() < 0.5 * period) {
+            *line = (at, beats);
+            return;
+        }
+        // A line before the ones kept: a jump in the song; they were of another place.
+        if lines.last().is_some_and(|l| l.0 > at) {
+            self.bar_line_count = 0;
+        }
+        if self.bar_line_count == BAR_LINES {
+            self.bar_lines.copy_within(1.., 0);
+            self.bar_line_count -= 1;
+        }
+        self.bar_lines[self.bar_line_count] = (at, beats);
+        self.bar_line_count += 1;
+    }
+
+    /// Where tracker beat `j` falls: its bar (counted on from the tracker's
+    /// first beats) and its place in it. From the latest stored bar line at
+    /// or before it, else in fours from the 1.
+    fn place(&self, j: i64) -> (i64, u8) {
+        let four = |rel: i64| (rel.div_euclid(BEATS as i64), rel.rem_euclid(BEATS as i64) as u8);
+        let line = self.tracker.last_beat().and_then(|(at, index, period)| {
+            self.bar_lines[..self.bar_line_count]
+                .iter()
+                .map(|&(t, beats)| (index as i64 + ((t - at) / period).round() as i64, beats as i64))
+                .rfind(|&(start, _)| start <= j)
+        });
+        match line {
+            None => four(j - self.downbeat as i64),
+            Some((start, beats)) if j - start < beats => (start.div_euclid(BEATS as i64), (j - start) as u8),
+            Some((start, beats)) => {
+                let (bar, beat) = four(j - start - beats);
+                (start.div_euclid(BEATS as i64) + 1 + bar, beat)
+            }
+        }
+    }
+
+    /// Drops bar lines well behind the beat heard, keeping the latest of them.
+    fn drop_old_bar_lines(&mut self) {
+        let Some((at, _, period)) = self.tracker.last_beat() else { return };
+        let old = self.bar_lines[..self.bar_line_count].iter().take_while(|l| l.0 < at - 2.0 * period).count();
+        if old > 1 {
+            self.bar_lines.copy_within(old - 1.., 0);
+            self.bar_line_count -= old - 1;
+        }
+    }
+
     /// Counts the guide's 1 from the tracker's beats.
     fn apply_guide_one(&mut self) {
         let (Some((at, one)), Some((last, index, period))) = (self.guide_one, self.tracker.last_beat()) else { return };
@@ -286,7 +357,7 @@ impl Live {
         }
         self.running = true;
         self.pending_count = 0;
-        self.first_bar = self.beat_heard_at(now).map_or(0, |beat| (beat - self.downbeat as i64).div_euclid(BEATS as i64));
+        self.first_bar = self.beat_heard_at(now).map_or(0, |beat| self.place(beat).0);
         out.push(0, EngineEvent::Transport { playing: true });
     }
 
@@ -373,6 +444,7 @@ impl Live {
         self.beat_count += 1;
         self.apply_guide_one();
         self.guess_downbeat(beat);
+        self.drop_old_bar_lines();
 
         if self.running {
             // Hits before this beat now have a beat on each side.
@@ -461,9 +533,10 @@ impl Live {
         if (nearest == 0.0 || nearest == 4.0) && ms.abs() < CUE_MS {
             self.cue(hit.what, (beat.1 + nearest as u32 / 4) % BEATS);
         }
-        let sixteenth = (beat.1 as i64 - self.downbeat as i64) * 4 + nearest as i64;
-        let bar = (sixteenth.div_euclid(16) - self.first_bar).clamp(0, u16::MAX as i64) as u16;
-        let sixteenth = sixteenth.rem_euclid(16) as u8;
+        let at = beat.1 as i64 * 4 + nearest as i64;
+        let (bar, beat_in_bar) = self.place(at.div_euclid(4));
+        let bar = (bar - self.first_bar).clamp(0, u16::MAX as i64) as u16;
+        let sixteenth = beat_in_bar * 4 + at.rem_euclid(4) as u8;
         match hit.what {
             Played::Drum { piece, velocity } => {
                 out.push(0, EngineEvent::Judged { ms, piece, sixteenth, bar });
@@ -538,9 +611,9 @@ impl Live {
         while heard(j) < end {
             let t = heard(j);
             if t >= now as f64 {
-                let rel = j as i64 - self.downbeat as i64;
-                let bar = (rel.div_euclid(BEATS as i64) - if self.running { self.first_bar } else { 0 }).max(0) as u32;
-                out.push((t - now as f64) as u32, EngineEvent::Beat { bar, beat: rel.rem_euclid(BEATS as i64) as u8 });
+                let (bar, beat) = self.place(j as i64);
+                let bar = (bar - if self.running { self.first_bar } else { 0 }).max(0) as u32;
+                out.push((t - now as f64) as u32, EngineEvent::Beat { bar, beat });
             }
             j += 1;
         }
@@ -725,6 +798,36 @@ mod tests {
             assert!(err.abs() < 0.003, "beat {err} s off");
             // The guide's 1, not the thump's.
             assert_eq!(b as i64, (2 + k).rem_euclid(4), "beat at {} s", f as f64 / SR as f64);
+        }
+    }
+
+    #[test]
+    fn bar_lines_from_a_stored_song_place_its_odd_bars() {
+        let mut live = Live::new(SR);
+        live.set_active(true, &mut EventBuffer::default());
+        let signal = source(11.0);
+        let (head, tail) = signal.split_at(frame(3.0) as usize);
+        let mut events = run(&mut live, head, 0, &[]);
+        live.guide(frame(2.25) as u32, 0.5 * SR, Some(2), 230, frame(3.0));
+        // Bars of 2, 4 and 3 beats from 4.25 s; then fours again.
+        for (at, beats) in [(4.25, 2), (5.25, 4), (7.25, 3)] {
+            live.bar_ahead(frame(at) as u32, beats, frame(3.0));
+        }
+        events.extend(run(&mut live, tail, frame(3.0), &[]));
+        let beats: Vec<_> = events.iter().filter_map(|(f, e)| if let EngineEvent::Beat { beat, .. } = e { Some((*f as f64 / SR as f64, *beat)) } else { None }).collect();
+        let place = |t: f64| -> u8 {
+            let k = |from: f64| ((t - from) / 0.5).round() as i64;
+            match t {
+                t if t < 4.2 => (2 + k(2.25)).rem_euclid(4) as u8,
+                t if t < 5.2 => k(4.25) as u8,
+                t if t < 7.2 => k(5.25) as u8,
+                t if t < 8.7 => k(7.25) as u8,
+                _ => k(8.75).rem_euclid(4) as u8,
+            }
+        };
+        assert!(beats.len() > 10);
+        for (t, b) in beats {
+            assert_eq!(b, place(t), "beat at {t} s");
         }
     }
 

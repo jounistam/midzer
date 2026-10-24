@@ -25,6 +25,16 @@ describe('targets', () => {
     expect(targetsEnd(chords)).toBe(20);
   });
 
+  it('asks for the chord again on each bar line of bars of other lengths', () => {
+    const odd = songFromChart({ id: 'o', title: 'O', bpm: 100, style: 0, source: 'user' }, 'C | [2/4] C | [3/4] C | F');
+    expect(buildTargets(odd, 'chords').map((t) => [t.beat, t.name, t.len])).toEqual([
+      [0, 'C', 4],
+      [4, 'C', 2],
+      [6, 'C', 3],
+      [9, 'F', 3],
+    ]);
+  });
+
   it('melody targets are the notes; hands together puts chords first on shared beats', () => {
     expect(buildTargets(song, 'melody').map((t) => [t.beat, t.keys[0]])).toEqual([
       [4, 64], [5, 62], [6, 60], [8, 60], [10, 57], [12, 59], [16, 60],

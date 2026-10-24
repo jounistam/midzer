@@ -40,6 +40,8 @@ pub const ENVELOPE_FPS: usize = 100;
 pub const MAX_BARS: usize = 512;
 const MAX_MELODY_NOTES: usize = 8192;
 const MIN_BEATS: usize = 16;
+/// The longest bar, in beats (`MAX_BAR_BEATS` in midzer-core's song.rs).
+pub const MAX_BAR_BEATS: usize = 7;
 /// The share of [`analyze`]'s progress done after the beats and the chords.
 const BEATS_DONE: f32 = 0.35;
 const CHORDS_DONE: f32 = 0.6;
@@ -133,10 +135,12 @@ pub struct Analysis {
     pub tuning_cents: f32,
     /// Time of each bar's downbeat in the recording, in seconds.
     pub bar_times: Vec<f32>,
-    /// The tempo map: the time of every beat of the bars, four per bar, plus
-    /// the end of the last bar, in seconds. Beats past the tracked ones keep the usual tempo.
+    /// How many beats each bar has (1 to [`MAX_BAR_BEATS`], mostly 4).
+    pub bar_beats: Vec<u8>,
+    /// The tempo map: the time of every beat of the bars, plus the end of
+    /// the last bar, in seconds. Beats past the tracked ones keep the usual tempo.
     pub beat_times: Vec<f32>,
-    /// One chord per beat of every bar (four per bar); `None` is no chord.
+    /// One chord per beat of every bar; `None` is no chord.
     pub chords: Vec<Option<ChordOut>>,
     pub sections: Vec<SectionOut>,
     /// The tune, quantized to sixteenths, for Learn.
@@ -154,6 +158,21 @@ pub struct Analysis {
     pub envelope: Vec<u8>,
     /// Landmarks to recognise the song by (`midzer_hear::fingerprint`), as hash, frame pairs.
     pub fingerprint: Vec<u32>,
+}
+
+impl Analysis {
+    /// For each of `beat_times`, whether a bar starts on it.
+    pub fn downbeats(&self) -> Vec<bool> {
+        let mut out = vec![false; self.beat_times.len()];
+        let mut at = 0;
+        for &n in &self.bar_beats {
+            if let Some(d) = out.get_mut(at) {
+                *d = true;
+            }
+            at += n as usize;
+        }
+        out
+    }
 }
 
 /// Better sources than the mix, from stem separation.
@@ -225,16 +244,13 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
     let per_beat = chroma::per_beat(&frames, tuning, &beat_times);
     drop(frames);
     let key = chords::key(&per_beat);
-    let (phase, mut beat_chords) = match dsp {
+    let (lines, mut beat_chords) = match dsp {
         None => {
             let (beats, downbeats) = &heard;
-            let (phase, waltz) = bar_phase(beats, downbeats);
-            if waltz {
-                warnings.push("The song sounds like it has three beats to the bar; midzer counts four.".into());
-            }
+            let lines = bar_lines(beats, downbeats);
             let spans = midzer_hear::hear_chords(harmony, &mut |f| progress(BEATS_DONE + (CHORDS_DONE - BEATS_DONE) * f, Step::Chords))?;
             let chords = beats.iter().enumerate().map(|(i, &t)| midzer_hear::chord_over(&spans, t, beats.get(i + 1).copied().unwrap_or(t + beat_seconds as f64)).flatten()).collect();
-            (phase, chords)
+            (lines, chords)
         }
         Some((onsets, beat_frames)) => {
             let first_pass = chords::decode(&per_beat, key, chords::Meter::Unknown);
@@ -242,7 +258,8 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
                 beat_frames.iter().map(|&f| env[f.saturating_sub(2)..(f + 3).min(env.len())].iter().fold(0.0f32, |m, &v| m.max(v))).collect()
             };
             let phase = structure::downbeat_phase(&first_pass, &strength(&onsets.low), &strength(&onsets.all));
-            (phase, chords::decode(&per_beat, key, chords::Meter::Bars { phase }))
+            let chords = chords::decode(&per_beat, key, chords::Meter::Bars { phase });
+            ((phase..beat_times.len()).step_by(4).collect(), chords)
         }
     };
     chords::hold_short_gaps(&mut beat_chords, 8);
@@ -250,31 +267,36 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
     progress(CHORDS_DONE, Step::Sections);
 
     // Bars start at the first downbeat; beats before it are a pickup and left out.
-    let first = phase;
-    let mut bar_count = (beat_times.len() - first).div_ceil(4);
-    if bar_count > MAX_BARS {
-        bar_count = MAX_BARS;
+    let mut starts = bar_starts(&lines, beat_times.len());
+    if starts.len() > MAX_BARS + 1 {
+        starts.truncate(MAX_BARS + 1);
         warnings.push(format!("Only the first {MAX_BARS} bars were kept."));
     }
+    if starts.len() > 8 && starts.windows(2).filter(|w| w[1] - w[0] == 3).count() * 2 > starts.len() {
+        warnings.push("The song sounds like it has three beats to the bar: the band plays its four-beat patterns cut short.".into());
+    }
+    let first = starts[0];
+    let bar_count = starts.len() - 1;
+    let bar_beats: Vec<u8> = starts.windows(2).map(|w| (w[1] - w[0]) as u8).collect();
     let beat_at = |i: usize| beat_times.get(i).copied().unwrap_or_else(|| beat_times[beat_times.len() - 1] + (i + 1 - beat_times.len()) as f32 * beat_seconds);
-    let bar_times: Vec<f32> = (0..bar_count).map(|b| beat_at(first + 4 * b)).collect();
-    let beat_times: Vec<f32> = (0..=bar_count * 4).map(|i| beat_at(first + i)).collect();
-    let mut chord_slots = Vec::with_capacity(bar_count * 4);
+    let bar_times: Vec<f32> = starts[..bar_count].iter().map(|&i| beat_at(i)).collect();
+    let beat_times: Vec<f32> = (first..=starts[bar_count]).map(beat_at).collect();
+    let mut chord_slots = Vec::with_capacity(beat_times.len());
     let mut bars = Vec::with_capacity(bar_count);
-    for b in 0..bar_count {
-        let mut bar = [chroma::BeatChroma::default(); 4];
-        for (j, slot) in bar.iter_mut().enumerate() {
-            let i = first + 4 * b + j;
+    for w in starts.windows(2) {
+        let chroma = |i: usize| per_beat.get(i).copied().unwrap_or_default();
+        for i in w[0]..w[1] {
             let chord = beat_chords.get(i).copied().unwrap_or_else(|| beat_chords.last().copied().flatten());
             chord_slots.push(chord.map(ChordOut::from));
-            *slot = per_beat.get(i).copied().unwrap_or_default();
         }
-        bars.push(bar);
+        // Sections compare bars as four beats: other lengths are spread over four.
+        let len = w[1] - w[0];
+        bars.push(std::array::from_fn::<_, 4, _>(|j| chroma(w[0] + j * len / 4)));
     }
     let loudness: Vec<f32> = (0..bar_count)
         .map(|b| {
             let a = (bar_times[b] * RATE as f32) as usize;
-            let z = ((beat_at(first + 4 * b + 4)) * RATE as f32) as usize;
+            let z = ((beat_at(starts[b + 1])) * RATE as f32) as usize;
             let s = &mix[a.min(mix.len())..z.min(mix.len())];
             (s.iter().map(|x| x * x).sum::<f32>() / s.len().max(1) as f32).sqrt()
         })
@@ -294,7 +316,7 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
         };
         pos - first as f32
     };
-    let total_beats = (bar_count * 4) as f32;
+    let total_beats = (starts[bar_count] - first) as f32;
     let (melody_notes, melody_from) = match extras.melody {
         Some((notes, from)) => (notes, from),
         None => (melody::track(mix, tuning), "mix".to_string()),
@@ -337,6 +359,7 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
         key: KeyOut { tonic: key.tonic, minor: key.minor },
         tuning_cents: (tuning * 100.0).round(),
         bar_times,
+        bar_beats,
         beat_times,
         chords: chord_slots,
         sections,
@@ -364,18 +387,67 @@ fn envelope(mix: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-/// Which beat (mod 4) the bars start on, by the downbeats' majority, and
-/// whether they mostly come three beats apart.
-fn bar_phase(beats: &[f64], downbeats: &[f64]) -> (usize, bool) {
-    let index: Vec<usize> = downbeats.iter().filter_map(|d| beats.iter().position(|b| b == d)).collect();
-    let mut votes = [0usize; 4];
-    for &i in &index {
-        votes[i % 4] += 1;
+/// The beats the bars start on, from the network's downbeats.
+///
+/// The network's 1s are taken as they come, bars of other lengths too
+/// (tuned on `files24`: its 1s score 0.91 F; one phase for the whole song
+/// 0.64; checking each odd bar against the 1s after it 0.87). Only a 1 a
+/// single beat after the last is passed over, and a gap of two bars or more
+/// (1s missed) is filled with bars as long as most (4, or 3 for a waltz): 0.92. Fewer than four 1s heard: bars of four from the
+/// beats' phase the 1s agree on, or from the first beat.
+fn bar_lines(beats: &[f64], downbeats: &[f64]) -> Vec<usize> {
+    let mut index: Vec<usize> = downbeats
+        .iter()
+        .filter_map(|&d| {
+            let i = beats.partition_point(|&b| b < d);
+            [i.checked_sub(1), Some(i)].into_iter().flatten().filter(|&k| k < beats.len()).min_by(|&a, &b| (beats[a] - d).abs().total_cmp(&(beats[b] - d).abs()))
+        })
+        .collect();
+    index.dedup();
+    if index.len() < 4 {
+        let mut votes = [0usize; 4];
+        for &i in &index {
+            votes[i % 4] += 1;
+        }
+        let phase = (0..4).max_by_key(|&p| (votes[p], std::cmp::Reverse(p))).unwrap_or(0);
+        return (phase..beats.len()).step_by(4).collect();
     }
-    let phase = (0..4).max_by_key(|&p| (votes[p], std::cmp::Reverse(p))).unwrap_or(0);
     let gaps: Vec<usize> = index.windows(2).map(|w| w[1] - w[0]).collect();
-    let threes = gaps.iter().filter(|&&g| g == 3).count();
-    (phase, gaps.len() >= 4 && threes * 2 > gaps.len())
+    let meter = if gaps.len() >= 4 && gaps.iter().filter(|&&g| g == 3).count() * 2 > gaps.len() { 3 } else { 4 };
+    let mut lines = vec![index[0]];
+    let mut pos = index[0];
+    for &d in &index[1..] {
+        while d - pos >= 2 * meter || d - pos > MAX_BAR_BEATS {
+            pos += meter;
+            lines.push(pos);
+        }
+        if d - pos > 1 {
+            lines.push(d);
+            pos = d;
+        }
+    }
+    lines
+}
+
+/// Where each bar starts, for bar lines `lines` among `beats` beats: from
+/// the first line on, the bars after the last one are as long as most bars
+/// until the beats run out (the last bar may run past them). Ends with the
+/// end of the last bar.
+fn bar_starts(lines: &[usize], beats: usize) -> Vec<usize> {
+    let mut starts: Vec<usize> = lines.iter().copied().filter(|&l| l < beats).collect();
+    if starts.is_empty() {
+        starts.push(0);
+    }
+    let mut counts = [0usize; MAX_BAR_BEATS + 1];
+    for w in starts.windows(2) {
+        counts[(w[1] - w[0]).min(MAX_BAR_BEATS)] += 1;
+    }
+    let len = (2..=MAX_BAR_BEATS).max_by_key(|&n| (counts[n], n == 4)).filter(|&n| counts[n] > 0).unwrap_or(4);
+    while *starts.last().unwrap() < beats {
+        let next = starts.last().unwrap() + len;
+        starts.push(next);
+    }
+    starts
 }
 
 fn velocity(level: f32) -> u8 {
@@ -415,17 +487,33 @@ fn quantize_melody(notes: &[TimedNote], to_beats: &dyn Fn(f32) -> f32, total_bea
 mod tests {
     use super::*;
 
+    fn at(beats: &[f64], index: &[usize]) -> Vec<f64> {
+        index.iter().map(|&i| beats[i] + 0.01).collect()
+    }
+
     #[test]
-    fn the_bars_start_where_most_downbeats_fall() {
-        let beats: Vec<f64> = (0..40).map(|i| i as f64 * 0.5).collect();
-        // The 1s on beats 2, 6, 10…, one stray on 7.
-        let mut downbeats: Vec<f64> = (0..10).map(|b| beats[2 + 4 * b]).filter(|&t| t < 20.0).collect();
-        downbeats.push(beats[7]);
-        downbeats.sort_by(f64::total_cmp);
-        assert_eq!(bar_phase(&beats, &downbeats), (2, false));
-        let waltz: Vec<f64> = (0..13).map(|b| beats[1 + 3 * b]).collect();
-        assert!(bar_phase(&beats, &waltz).1, "three beats to the bar");
-        assert_eq!(bar_phase(&beats, &[]), (0, false));
+    fn bars_start_on_the_network_s_downbeats() {
+        let beats: Vec<f64> = (0..48).map(|i| i as f64 * 0.5).collect();
+        // The 1s on 2, 6, 10, then a 2-beat bar: 12, 16, then bars of 5 and 3.
+        let lines = [2, 6, 10, 12, 16, 21, 24, 28, 32, 36, 40, 44];
+        assert_eq!(bar_lines(&beats, &at(&beats, &lines)), lines);
+        // A 1 a beat after the last is passed over; missed ones are filled in.
+        let heard = [2, 6, 7, 10, 12, 16, 21, 24, 36, 40, 44];
+        assert_eq!(bar_lines(&beats, &at(&beats, &heard)), lines);
+        // A waltz is filled in threes.
+        let waltz: Vec<usize> = (0..15).map(|b| 1 + 3 * b).filter(|&b| b != 22 && b != 25).collect();
+        assert_eq!(bar_lines(&beats, &at(&beats, &waltz)), (0..15).map(|b| 1 + 3 * b).collect::<Vec<_>>());
+        // Too few 1s: fours from their phase.
+        assert_eq!(bar_lines(&beats, &at(&beats, &[3, 7]))[..3], [3, 7, 11]);
+        assert_eq!(bar_lines(&beats, &[])[..2], [0, 4]);
+    }
+
+    #[test]
+    fn bars_go_on_in_the_last_length_past_the_last_line() {
+        assert_eq!(bar_starts(&[2, 6, 9, 13], 20), [2, 6, 9, 13, 17, 21]);
+        assert_eq!(bar_starts(&[0, 3, 6, 9], 11), [0, 3, 6, 9, 12]);
+        assert_eq!(bar_starts(&[1], 9), [1, 5, 9]);
+        assert_eq!(bar_starts(&[], 3), [0, 4]);
     }
 
     #[test]

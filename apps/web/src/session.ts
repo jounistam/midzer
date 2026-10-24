@@ -65,7 +65,7 @@ import { loadFingerprint, saveFingerprint } from './songs/fingerprints';
 import { songFromAnalysis, transcriptionMidi } from './songs/audio';
 import { Recorder } from './songs/recorder';
 import { loadRecording } from './songs/recordings';
-import { chartCommands, newSongId, trackCommands, type Song } from './songs/song';
+import { barAt, barStarts, chartCommands, newSongId, trackCommands, type Bar, type Song } from './songs/song';
 
 export type Screen = 'onboarding' | 'home' | 'jam' | 'songs' | 'song' | 'learn' | 'lesson' | 'along';
 
@@ -592,9 +592,11 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
     case 'liveForgot':
       forgetLiveSong();
       break;
-    case 'songPosition':
-      if (event.beat % 4 === 0) setTimeout(() => set({ songBar: event.beat / 4 }), delay);
+    case 'songPosition': {
+      const at = barAt(startsOf(get().song?.bars), event.beat);
+      if (at.beat === 0) setTimeout(() => set({ songBar: at.bar }), delay);
       break;
+    }
     case 'band':
       setTimeout(() => set({ band: event.state }), delay);
       break;
@@ -965,6 +967,14 @@ export function setHeadphones(on: boolean): void {
 }
 
 // ---- Songs ------------------------------------------------------------------
+
+let starts: { bars: Bar[] | undefined; starts: number[] } = { bars: undefined, starts: [0] };
+
+/** Where the bars of `bars` start, kept for the chart in use; without one (Jam), bars of four. */
+function startsOf(bars: Bar[] | undefined): number[] {
+  if (starts.bars !== bars) starts = { bars, starts: bars ? barStarts(bars) : [0] };
+  return starts.starts;
+}
 
 /** Loads the open song's chart, loop and start into the engine. */
 function syncSong(): void {
@@ -1475,7 +1485,7 @@ export function saveTake(): void {
 export function saveTranscription(): void {
   const song = get().song;
   if (!song?.transcription) return;
-  downloadMidi(transcriptionMidi(song.transcription, song.bpm), `${fileName(song.title)} (transcribed).mid`);
+  downloadMidi(transcriptionMidi(song.transcription, song.bpm, song.bars), `${fileName(song.title)} (transcribed).mid`);
 }
 
 const fileName = (title: string) => title.replace(/[^\w\- ]+/g, '').trim() || 'midzer';

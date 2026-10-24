@@ -14,7 +14,7 @@ export interface JudgedHit {
   piece: DrumPiece | 'keys';
   /** For keys: whether the notes fit the chart's chord; null or absent when not checked. */
   chord?: boolean | null;
-  /** 0..15 within the bar. */
+  /** The sixteenth of the bar, four a beat: 0..15 in a bar of four, up to 27 in one of seven. */
   sixteenth: number;
   bar: number;
 }

@@ -2,16 +2,22 @@
 //! chords, with section marks, a loop and a start position.
 //!
 //! The chart is loaded through commands (one chord slot per beat, one mark
-//! per bar) into fixed arrays, so loading and playing never allocate. It can
-//! be reloaded while playing; the band picks up the changes on the next beat.
+//! and one length per bar) into fixed arrays, so loading and playing never
+//! allocate. It can be reloaded while playing; the band picks up the changes
+//! on the next beat.
+//!
+//! Bars are [`BEATS_PER_BAR`] beats unless the chart says otherwise (1 to
+//! [`MAX_BAR_BEATS`]). Song beats count from the start of the song, one after
+//! another, whatever the bars.
 
 use crate::chord::Chord;
 use crate::conductor::Request;
 use crate::style::BEATS_PER_BAR;
 
 pub const MAX_SONG_BARS: usize = 512;
-const BEATS: u32 = BEATS_PER_BAR;
-const MAX_SONG_BEATS: usize = MAX_SONG_BARS * BEATS as usize;
+/// The longest bar, in beats.
+pub const MAX_BAR_BEATS: u32 = 7;
+pub const MAX_SONG_BEATS: usize = MAX_SONG_BARS * MAX_BAR_BEATS as usize;
 
 /// What the chart says about the harmony on one beat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,6 +47,10 @@ pub struct SongBeat {
     pub beat: u32,
     /// The song bar, on downbeats only.
     pub bar: Option<u32>,
+    /// The beat's place in its bar, 0 on downbeats.
+    pub beat_in_bar: u8,
+    /// How many beats its bar has.
+    pub bar_beats: u8,
     /// The harmony from this beat on; `None` keeps the current one.
     pub chord: Option<Option<Chord>>,
     /// A section change for the conductor, timed to land on the next bar.
@@ -50,6 +60,9 @@ pub struct SongBeat {
 pub struct SongPlayer {
     slots: [Slot; MAX_SONG_BEATS],
     marks: [Option<Request>; MAX_SONG_BARS],
+    bar_beats: [u8; MAX_SONG_BARS],
+    /// The song beat each bar starts on, and the end of the last one.
+    bar_start: [u16; MAX_SONG_BARS + 1],
     bars: u32,
     /// Bars `start..end` repeat; `None` plays through to the ending.
     loop_bars: Option<(u32, u32)>,
@@ -68,6 +81,8 @@ impl Default for SongPlayer {
         Self {
             slots: [Slot::Hold; MAX_SONG_BEATS],
             marks: [None; MAX_SONG_BARS],
+            bar_beats: [BEATS_PER_BAR as u8; MAX_SONG_BARS],
+            bar_start: std::array::from_fn(|b| (b as u32 * BEATS_PER_BAR) as u16),
             bars: 0,
             loop_bars: None,
             active: false,
@@ -85,21 +100,63 @@ impl SongPlayer {
         self.active && self.bars > 0
     }
 
-    /// The chart's length in bars.
-    pub fn bars(&self) -> u32 {
-        self.bars
-    }
-
     pub fn set_active(&mut self, on: bool) {
         self.active = on;
     }
 
-    /// Empties the chart and sets its length; marks and slots start empty.
+    /// Empties the chart and sets its length; marks and slots start empty,
+    /// and every bar has the usual four beats.
     pub fn clear(&mut self, bars: u32) {
         self.bars = bars.min(MAX_SONG_BARS as u32);
         self.slots.fill(Slot::Hold);
         self.marks.fill(None);
+        self.bar_beats.fill(BEATS_PER_BAR as u8);
+        self.recount(0);
         self.loop_bars = self.loop_bars.filter(|(_, end)| *end <= self.bars);
+    }
+
+    /// Sets how many beats bar `bar` has (1 to [`MAX_BAR_BEATS`]).
+    pub fn set_bar_beats(&mut self, bar: u32, beats: u8) {
+        let beats = beats.clamp(1, MAX_BAR_BEATS as u8);
+        if let Some(b) = self.bar_beats.get_mut(bar as usize)
+            && *b != beats
+        {
+            *b = beats;
+            self.recount(bar as usize);
+        }
+    }
+
+    fn recount(&mut self, from: usize) {
+        for b in from..MAX_SONG_BARS {
+            self.bar_start[b + 1] = self.bar_start[b] + self.bar_beats[b] as u16;
+        }
+    }
+
+    /// The song beat bar `bar` starts on; past the last bar, the end of the chart.
+    pub fn bar_start(&self, bar: u32) -> u32 {
+        self.bar_start[bar.min(self.bars) as usize] as u32
+    }
+
+    /// The chart's length in beats.
+    pub fn beats(&self) -> u32 {
+        self.bar_start(self.bars)
+    }
+
+    /// The bar song beat `beat` is in, and its place in it. Beats past the
+    /// end count on in bars of the last bar's length.
+    pub fn bar_of(&self, beat: u32) -> (u32, u8) {
+        let end = self.beats();
+        if beat >= end {
+            let len = self.bar_beats.get(self.bars.saturating_sub(1) as usize).map_or(BEATS_PER_BAR, |&b| b as u32);
+            let past = beat - end;
+            return (self.bars + past / len, (past % len) as u8);
+        }
+        let bar = self.bar_start[..=self.bars as usize].partition_point(|&s| s as u32 <= beat) - 1;
+        (bar as u32, (beat - self.bar_start[bar] as u32) as u8)
+    }
+
+    fn bar_len(&self, bar: u32) -> u8 {
+        if bar < self.bars { self.bar_beats[bar as usize] } else { self.bar_beats[self.bars.saturating_sub(1) as usize] }
     }
 
     pub fn set_slot(&mut self, beat: u32, slot: Slot) {
@@ -133,7 +190,7 @@ impl SongPlayer {
     /// variation in force at the start bar, if the chart sets one.
     pub fn start(&mut self) -> (bool, Option<u8>) {
         let start = self.start_bar.min(self.bars.saturating_sub(1));
-        self.next_beat = start * BEATS;
+        self.next_beat = self.bar_start(start);
         self.seek = None;
         self.jumped = true;
         let intro = self.mark(start) == Some(Request::Intro);
@@ -144,22 +201,23 @@ impl SongPlayer {
         (intro, variation)
     }
 
-    /// Advances one beat; `beat_in_bar` is the band's beat, 0 on downbeats.
-    pub fn on_beat(&mut self, beat_in_bar: u8) -> SongBeat {
-        if beat_in_bar == 0
+    /// Advances one beat. The song says where its bars start.
+    pub fn on_beat(&mut self) -> SongBeat {
+        if self.bar_of(self.next_beat).1 == 0
             && let Some(bar) = self.seek.take()
         {
-            self.next_beat = bar * BEATS;
+            self.next_beat = self.bar_start(bar);
             self.jumped = true;
         }
         let beat = self.next_beat;
-        let bar = beat / BEATS;
+        let (bar, beat_in_bar) = self.bar_of(beat);
+        let bar_beats = self.bar_len(bar);
         let chord = if std::mem::take(&mut self.jumped) { Some(self.chord_at(beat)) } else { self.slot(beat).chord() };
 
-        // Requests go out on the second beat: a variation change then fills
-        // the second half of the bar, like the conductor's own changes, and
-        // everything else lands on the next bar line.
-        let request = if beat_in_bar == 1 {
+        // Requests go out on the second beat (the first of a one-beat bar): a
+        // variation change then fills the rest of the bar, like the
+        // conductor's own changes, and everything else lands on the next bar line.
+        let request = if beat_in_bar == 1.min(bar_beats - 1) {
             match self.following(bar) {
                 Some(next) if self.mark(next).is_some_and(|m| m != Request::Fill) => self.mark(next),
                 Some(_) => self.mark(bar).filter(|m| *m == Request::Fill),
@@ -173,20 +231,20 @@ impl SongPlayer {
         // At the loop's end, or past it after the chart got shorter, the next
         // bar starts the loop again.
         if let Some((start, end)) = self.loop_bars
-            && self.next_beat.is_multiple_of(BEATS)
-            && self.next_beat >= end * BEATS
+            && self.bar_of(self.next_beat).1 == 0
+            && self.next_beat >= self.bar_start(end)
         {
-            self.next_beat = start * BEATS;
+            self.next_beat = self.bar_start(start);
             self.jumped = true;
         }
-        SongBeat { beat, bar: (beat_in_bar == 0).then_some(bar), chord, request }
+        SongBeat { beat, bar: (beat_in_bar == 0).then_some(bar), beat_in_bar, bar_beats, chord, request }
     }
 
     /// The song beat the next [`SongPlayer::on_beat`] call will play, taking a
     /// queued jump into account.
-    pub fn upcoming(&self, beat_in_bar: u8) -> u32 {
+    pub fn upcoming(&self) -> u32 {
         match self.seek {
-            Some(bar) if beat_in_bar == 0 => bar * BEATS,
+            Some(bar) if self.bar_of(self.next_beat).1 == 0 => self.bar_start(bar),
             _ => self.next_beat,
         }
     }
@@ -200,7 +258,7 @@ impl SongPlayer {
     }
 
     fn slot(&self, beat: u32) -> Slot {
-        if beat < self.bars * BEATS { self.slots.get(beat as usize).copied().unwrap_or_default() } else { Slot::Hold }
+        if beat < self.beats() { self.slots.get(beat as usize).copied().unwrap_or_default() } else { Slot::Hold }
     }
 
     fn mark(&self, bar: u32) -> Option<Request> {
@@ -209,7 +267,7 @@ impl SongPlayer {
 
     /// The harmony in force on `beat`: its own slot or the last one before it.
     pub fn chord_at(&self, beat: u32) -> Option<Chord> {
-        let last = beat.min((self.bars * BEATS).saturating_sub(1));
+        let last = beat.min(self.beats().saturating_sub(1));
         (0..=last).rev().find_map(|b| self.slot(b).chord()).flatten()
     }
 }
@@ -237,7 +295,7 @@ mod tests {
     }
 
     fn beats(s: &mut SongPlayer, n: u32) -> Vec<SongBeat> {
-        (0..n).map(|i| s.on_beat((i % BEATS) as u8)).collect()
+        (0..n).map(|_| s.on_beat()).collect()
     }
 
     #[test]
@@ -250,7 +308,7 @@ mod tests {
         // Reloaded as a two-bar loop in the middle of bar 6.
         s.clear(2);
         s.set_loop(0, 2);
-        let rest: Vec<_> = (1..8).map(|i| s.on_beat(i % 4)).collect();
+        let rest = beats(&mut s, 7);
         assert!(rest.iter().all(|b| b.request != Some(Request::Ending)), "{rest:?}");
         assert_eq!(rest[3].beat, 0, "back to the start on the bar line");
     }
@@ -297,7 +355,7 @@ mod tests {
         s.set_mark(0, Some(Request::Intro));
         s.seek(2, false);
         assert_eq!(s.start(), (false, Some(1)));
-        let first = s.on_beat(0);
+        let first = s.on_beat();
         assert_eq!((first.bar, first.chord), (Some(2), Some(Some(C))));
 
         s.seek(0, false);
@@ -310,12 +368,12 @@ mod tests {
         s.start();
         beats(&mut s, 2);
         s.seek(2, true);
-        assert_eq!(s.on_beat(2).bar, None);
-        assert_eq!(s.on_beat(3).bar, None);
-        assert_eq!(s.upcoming(0), 8);
-        let next = s.on_beat(0);
+        assert_eq!(s.on_beat().bar, None);
+        assert_eq!(s.on_beat().bar, None);
+        assert_eq!(s.upcoming(), 8);
+        let next = s.on_beat();
         assert_eq!((next.bar, next.chord), (Some(2), Some(Some(C))));
-        assert_eq!((next.beat, s.upcoming(1)), (8, 9));
+        assert_eq!((next.beat, s.upcoming()), (8, 9));
     }
 
     #[test]
@@ -325,6 +383,51 @@ mod tests {
         s.set_mark(1, None);
         s.start();
         assert_eq!(beats(&mut s, 2)[1].request, Some(Request::Fill));
+    }
+
+    /// Bars of 4, 2, 4 and 3 beats: C | F | G | C.
+    fn odd() -> SongPlayer {
+        let mut s = SongPlayer::default();
+        s.clear(4);
+        s.set_active(true);
+        s.set_bar_beats(1, 2);
+        s.set_bar_beats(3, 3);
+        for (beat, chord) in [(0, C), (4, F), (6, G), (10, C)] {
+            s.set_slot(beat, Slot::Chord(chord));
+        }
+        s
+    }
+
+    #[test]
+    fn bars_of_other_lengths_start_where_the_chart_says() {
+        let mut s = odd();
+        assert_eq!((s.bar_start(2), s.bar_start(3), s.beats()), (6, 10, 13));
+        assert_eq!((s.bar_of(5), s.bar_of(6), s.bar_of(12), s.bar_of(14)), ((1, 1), (2, 0), (3, 2), (4, 1)));
+        s.start();
+        let b = beats(&mut s, 13);
+        let downbeats: Vec<_> = b.iter().filter_map(|b| b.bar.map(|bar| (bar, b.beat))).collect();
+        assert_eq!(downbeats, [(0, 0), (1, 4), (2, 6), (3, 10)]);
+        assert_eq!((b[5].beat_in_bar, b[5].bar_beats, b[12].beat_in_bar, b[12].bar_beats), (1, 2, 2, 3));
+        assert_eq!((b[4].chord, b[6].chord, b[10].chord), (Some(Some(F)), Some(Some(G)), Some(Some(C))));
+        assert_eq!(b[11].request, Some(Request::Ending), "asked on the second beat of the last bar");
+    }
+
+    #[test]
+    fn odd_bars_loop_and_seek_on_their_bar_lines() {
+        let mut s = odd();
+        s.set_loop(1, 3);
+        s.seek(1, false);
+        s.start();
+        let b: Vec<_> = beats(&mut s, 12).iter().map(|b| b.beat).collect();
+        assert_eq!(b, [4, 5, 6, 7, 8, 9, 4, 5, 6, 7, 8, 9]);
+
+        s.set_loop(0, 0);
+        assert_eq!(s.on_beat().beat, 4);
+        s.seek(3, true);
+        assert_eq!(s.upcoming(), 5, "the jump waits for the bar line");
+        assert_eq!(s.on_beat().beat, 5);
+        assert_eq!(s.upcoming(), 10);
+        assert_eq!(s.on_beat().bar, Some(3));
     }
 
     #[test]

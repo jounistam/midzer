@@ -45,6 +45,8 @@ pub enum Command {
     SongChord { beat: u16, slot: Slot },
     /// A section the song asks for at bar `bar`: intro, variation, fill or ending.
     SongMark { bar: u16, mark: Option<Request> },
+    /// How many beats song bar `bar` has (1–7); after `SongClear` every bar has four.
+    SongBar { bar: u16, beats: u8 },
     /// Repeats bars `start..end`; an empty range turns the loop off.
     SongLoop { start: u16, end: u16 },
     /// Whether the song chart, rather than the player, sets the harmony.
@@ -104,6 +106,9 @@ pub enum Command {
     LiveGuide { frame: u32, period: f32, one: Option<u8>, confidence: u8 },
     /// Forgets everything heard live and starts listening afresh, as after silence.
     LiveReset,
+    /// A bar of `beats` beats (1–7) starts at the live beat at engine `frame`
+    /// (its low 32 bits), as a stored song followed live says; sent ahead.
+    LiveBar { frame: u32, beats: u8 },
 }
 
 mod op {
@@ -153,6 +158,8 @@ mod op {
     pub const LIVE_TEMPO: u32 = 44;
     pub const LIVE_GUIDE: u32 = 45;
     pub const LIVE_RESET: u32 = 46;
+    pub const SONG_BAR: u32 = 47;
+    pub const LIVE_BAR: u32 = 48;
 }
 
 /// MIDI channel 10, where e-kits and drum pads send.
@@ -248,6 +255,7 @@ impl Command {
                 [op::SONG_CHORD, beat as u32, kind, packed]
             }
             Command::SongMark { bar, mark } => [op::SONG_MARK, bar as u32, mark.map_or(0, |m| request_code(m) + 1), 0],
+            Command::SongBar { bar, beats } => [op::SONG_BAR, bar as u32, beats as u32, 0],
             Command::SongLoop { start, end } => [op::SONG_LOOP, start as u32, end as u32, 0],
             Command::SetSong { on } => [op::SET_SONG, on as u32, 0, 0],
             Command::SongSeek { bar } => [op::SONG_SEEK, bar as u32, 0, 0],
@@ -284,6 +292,7 @@ impl Command {
             Command::LiveDownbeat => [op::LIVE_DOWNBEAT, 0, 0, 0],
             Command::LiveTempo { double } => [op::LIVE_TEMPO, double as u32, 0, 0],
             Command::LiveReset => [op::LIVE_RESET, 0, 0, 0],
+            Command::LiveBar { frame, beats } => [op::LIVE_BAR, frame, beats as u32, 0],
             Command::LiveGuide { frame, period, one, confidence } => [op::LIVE_GUIDE, frame, period.to_bits(), one.map_or(0, |o| o as u32 + 1) | (confidence as u32) << 8],
         }
     }
@@ -314,6 +323,7 @@ impl Command {
         let short = |v: u32| u16::try_from(v).ok();
         let midi = |v: u32| u8::try_from(v).ok().filter(|v| *v < 128);
         let float = |v: u32| Some(f32::from_bits(v)).filter(|f| f.is_finite());
+        let bar_beats = |v: u32| u8::try_from(v).ok().filter(|b| (1..=crate::song::MAX_BAR_BEATS as u8).contains(b));
         match opcode {
             op::NOTE_ON => Some(Command::NoteOn { note: midi(a)?, velocity: midi(b)? }),
             op::NOTE_OFF => Some(Command::NoteOff { note: midi(a)? }),
@@ -337,6 +347,7 @@ impl Command {
                 bar: short(a)?,
                 mark: if b == 0 { None } else { Some(request_from(b - 1)?) },
             }),
+            op::SONG_BAR => Some(Command::SongBar { bar: short(a)?, beats: bar_beats(b)? }),
             op::SONG_LOOP => Some(Command::SongLoop { start: short(a)?, end: short(b)? }),
             op::SET_SONG => Some(Command::SetSong { on: a != 0 }),
             op::SONG_SEEK => Some(Command::SongSeek { bar: short(a)? }),
@@ -373,6 +384,7 @@ impl Command {
             op::LIVE_DOWNBEAT => Some(Command::LiveDownbeat),
             op::LIVE_TEMPO => Some(Command::LiveTempo { double: a != 0 }),
             op::LIVE_RESET => Some(Command::LiveReset),
+            op::LIVE_BAR => Some(Command::LiveBar { frame: a, beats: bar_beats(b)? }),
             op::LIVE_GUIDE => Some(Command::LiveGuide {
                 frame: a,
                 period: float(b).filter(|p| *p > 0.0)?,
@@ -456,6 +468,9 @@ mod tests {
             Command::LiveDownbeat,
             Command::LiveTempo { double: true },
             Command::LiveReset,
+            Command::SongBar { bar: 511, beats: 7 },
+            Command::SongBar { bar: 0, beats: 1 },
+            Command::LiveBar { frame: 4_000_000_000, beats: 3 },
             Command::LiveGuide { frame: 4_000_000_000, period: 22_050.5, one: Some(3), confidence: 200 },
             Command::LiveGuide { frame: 7, period: 24_000.0, one: None, confidence: 0 },
         ] {

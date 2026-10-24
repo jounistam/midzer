@@ -105,7 +105,8 @@ function AlongStage() {
         </p>
       </div>
       <div className={`stage-beats ${locked ? '' : 'waiting'}`} aria-label={locked ? `Beat ${beat + 1}` : 'No beat yet'}>
-        {[0, 1, 2, 3].map((b) => (
+        {/* Four, or more in a longer bar of a song followed. */}
+        {Array.from({ length: Math.max(4, beat + 1) }, (_, b) => b).map((b) => (
           <span key={b} className={`stage-beat ${locked && b === beat ? 'active' : ''} ${b === 0 ? 'one' : ''}`} />
         ))}
       </div>

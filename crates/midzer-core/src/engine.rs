@@ -114,7 +114,7 @@ impl Engine {
                 self.update_keys_held();
             }
             Command::Play if live => self.live.play(self.now, &mut self.events),
-            Command::Play if track => self.backing.play(self.band.bpm(), &mut self.events),
+            Command::Play if track => self.backing.play(self.band.bpm(), self.band.song(), &mut self.events),
             Command::Play => {
                 self.start_in = None;
                 self.band.play(&mut self.events);
@@ -143,6 +143,7 @@ impl Engine {
             Command::SongClear { bars } => self.band.clear_song(bars as u32),
             Command::SongChord { beat, slot } => self.band.set_song_slot(beat as u32, slot),
             Command::SongMark { bar, mark } => self.band.set_song_mark(bar as u32, mark),
+            Command::SongBar { bar, beats } => self.band.set_song_bar(bar as u32, beats),
             Command::SongLoop { start, end } => {
                 self.band.set_song_loop(start as u32, end as u32);
                 self.backing.set_loop(start as u32, end as u32);
@@ -220,6 +221,7 @@ impl Engine {
             Command::LiveDownbeat => self.live.set_downbeat(self.now),
             Command::LiveTempo { double } => self.live.scale_tempo(double),
             Command::LiveReset => self.live.reset(self.now, &mut self.events),
+            Command::LiveBar { frame, beats } => self.live.bar_ahead(frame, beats, self.now),
             Command::LiveGuide { frame, period, one, confidence } => self.live.guide(frame, period, one, confidence, self.now),
             Command::TrackClear { beats } => self.backing.clear_beats(beats as u32),
             Command::TrackBeat { index, seconds } => self.backing.set_beat(index as u32, seconds),
@@ -352,7 +354,7 @@ impl Engine {
             self.live.hit(piece, velocity, self.now, &mut self.events);
         } else if self.backing.active() {
             // Judged against the recording; nothing to lead or count in.
-            self.backing.drum_hit(piece, velocity, self.band.latency_ms(), &mut self.events);
+            self.backing.drum_hit(piece, velocity, self.band.latency_ms(), self.band.song(), &mut self.events);
         } else if self.instrument != Instrument::Drums {
             self.band.onset(0.0);
         } else if self.band.is_playing() {

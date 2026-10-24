@@ -254,7 +254,7 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
  * the landmarks (u32), beat times (f64) and chord codes (i32).
  */
 export function encodeLibrary(songs: LiveLibrarySong[]): Uint8Array {
-  const size = songs.reduce((n, s) => n + 24 + s.landmarks.byteLength + s.beatTimes.byteLength + s.chords.byteLength, 4);
+  const size = songs.reduce((n, s) => n + 32 + s.landmarks.byteLength + s.beatTimes.byteLength + s.chords.byteLength + Math.ceil(s.barBeats.length / 4) * 4, 4);
   const view = new DataView(new ArrayBuffer(size));
   let at = 0;
   const u32 = (v: number) => {
@@ -267,6 +267,8 @@ export function encodeLibrary(songs: LiveLibrarySong[]): Uint8Array {
     u32(s.landmarks.length >> 1);
     u32(s.beatTimes.length);
     u32(s.chords.length);
+    u32(s.barBeats.length);
+    u32(0);
     view.setFloat64(at, s.seconds, true);
     at += 8;
     for (const v of s.landmarks.subarray(0, s.landmarks.length & ~1)) u32(v);
@@ -278,6 +280,9 @@ export function encodeLibrary(songs: LiveLibrarySong[]): Uint8Array {
       view.setInt32(at, v, true);
       at += 4;
     }
+    // One byte a bar, padded to whole words.
+    new Uint8Array(view.buffer, at, s.barBeats.length).set(s.barBeats);
+    at += Math.ceil(s.barBeats.length / 4) * 4;
   }
   return new Uint8Array(view.buffer, 0, at);
 }

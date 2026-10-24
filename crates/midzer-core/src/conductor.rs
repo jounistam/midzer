@@ -79,6 +79,8 @@ pub struct Conductor {
     heard_player: bool,
     idle_beats: u32,
     bars_in_variation: u32,
+    /// How many beats the bar playing has.
+    bar_beats: u8,
     /// False until the first downbeat, which starts the first bar rather
     /// than ending one.
     started: bool,
@@ -111,6 +113,7 @@ impl Default for Conductor {
             heard_player: false,
             idle_beats: 0,
             bars_in_variation: 0,
+            bar_beats: BEATS_PER_BAR as u8,
             started: false,
             song: false,
             drummer: false,
@@ -228,6 +231,11 @@ impl Conductor {
         self.idle_mode = mode;
     }
 
+    /// How many beats the bar starting (or playing) has; songs can have other than four.
+    pub fn set_bar_beats(&mut self, beats: u8) {
+        self.bar_beats = beats.max(1);
+    }
+
     pub fn set_song(&mut self, on: bool) {
         self.song = on;
     }
@@ -319,8 +327,8 @@ impl Conductor {
         if self.section == Section::Main {
             if std::mem::take(&mut self.pending_fill) {
                 self.section = Section::Fill;
-            } else if beat == 2 {
-                // Halfway through a bar: decide whether the next bar changes,
+            } else if beat == self.bar_beats / 2 {
+                // Halfway through a bar (on its 1 if it has one beat): decide whether the next bar changes,
                 // and if so lead into it with a fill.
                 let target = self.target_variation();
                 if self.idle_mode == IdleMode::Rest && self.idle_beats + 2 >= IDLE_BARS * BEATS_PER_BAR {

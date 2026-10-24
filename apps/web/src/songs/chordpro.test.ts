@@ -42,6 +42,11 @@ we sing a[F]long
     expect(song.bars[0]!.section).toBe('B');
   });
 
+  it('makes bars as long as {time} says', () => {
+    const { song } = parseChordPro('{time: 3/4}\n[C]One [G]two\n{time: 6/8}\n| D | Em |');
+    expect(song.bars.map((b) => b.beats)).toEqual([['C', '', ''], ['G', '', ''], ['D', '', ''], ['Em', '', '']]);
+  });
+
   it('falls back to a title', () => {
     expect(parseChordPro('[C]x', 'file name').song.title).toBe('file name');
   });

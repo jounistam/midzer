@@ -52,6 +52,8 @@ const Cmd = {
   LiveTempo: 44,
   LiveGuide: 45,
   LiveReset: 46,
+  SongBar: 47,
+  LiveBar: 48,
 } as const;
 
 /** Ticks per beat in song positions; mirrors `PPQ` in style.rs. */
@@ -173,6 +175,8 @@ export type EngineCommand =
   | { type: 'songClear'; bars: number }
   | { type: 'songChord'; beat: number; slot: ChartSlot }
   | { type: 'songMark'; bar: number; mark: SongMark }
+  /** How many beats song bar `bar` has (1–7); after `songClear` every bar has four. */
+  | { type: 'songBar'; bar: number; beats: number }
   /** Repeats bars `start..end`; an empty range turns the loop off. */
   | { type: 'songLoop'; start: number; end: number }
   /** Whether the song chart, rather than the player, sets the harmony. */
@@ -229,7 +233,9 @@ export type EngineCommand =
    */
   | { type: 'liveGuide'; frame: number; period: number; one: number | null; confidence: number }
   /** Forget everything heard live and listen afresh, as after silence. */
-  | { type: 'liveReset' };
+  | { type: 'liveReset' }
+  /** A bar of `beats` beats starts at the live beat at engine `frame`, as a stored song followed says; sent ahead. */
+  | { type: 'liveBar'; frame: number; beats: number };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -285,6 +291,8 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       if (slot === 'nc') return [Cmd.SongChord, cmd.beat, 1, 0];
       return [Cmd.SongChord, cmd.beat, 2, slot.root | (slot.quality << 8) | (slot.bass << 16)];
     }
+    case 'songBar':
+      return [Cmd.SongBar, cmd.bar, cmd.beats, 0];
     case 'songMark':
       return [Cmd.SongMark, cmd.bar, cmd.mark === null ? 0 : SECTION_REQUESTS.indexOf(cmd.mark) + 1, 0];
     case 'songLoop':
@@ -344,6 +352,8 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.LiveTempo, cmd.double ? 1 : 0, 0, 0];
     case 'liveReset':
       return [Cmd.LiveReset, 0, 0, 0];
+    case 'liveBar':
+      return [Cmd.LiveBar, Math.round(cmd.frame) >>> 0, cmd.beats, 0];
     case 'liveGuide': {
       const one = cmd.one === null ? 0 : (cmd.one & 3) + 1;
       const confidence = Math.round(Math.min(Math.max(cmd.confidence, 0), 1) * 255);

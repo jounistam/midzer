@@ -91,7 +91,7 @@ export function NoteLanes({ low = 36, high = 96 }: NoteLanesProps) {
       const y = (beats: number) => hitY - beats * pxPerBeat;
 
       bars.clear();
-      for (const b of barLines(pos - BEHIND_BEATS, pos + AHEAD_BEATS)) {
+      for (const b of barLines(pos - BEHIND_BEATS, pos + AHEAD_BEATS, practiceLive.barStarts)) {
         bars.rect(0, Math.round(y(b - pos)), width, 1).fill({ color: hex(color.border.strong), alpha: 0.6 });
       }
 

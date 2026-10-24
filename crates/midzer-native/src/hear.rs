@@ -62,13 +62,16 @@ pub(crate) fn decode_library(bytes: &[u8]) -> Result<Library, String> {
     let word = |b: &[u8]| u32::from_le_bytes(b.try_into().unwrap());
     let songs = word(take(4)?);
     for _ in 0..songs {
-        let head = take(24)?;
+        let head = take(32)?;
         let (id, pairs, beats, chords) = (word(&head[..4]), word(&head[4..8]) as usize, word(&head[8..12]) as usize, word(&head[12..16]) as usize);
-        let seconds = f64::from_le_bytes(head[16..].try_into().unwrap());
+        let bars = word(&head[16..20]) as usize;
+        let seconds = f64::from_le_bytes(head[24..].try_into().unwrap());
         let marks = take(pairs * 8)?.as_chunks::<8>().0.iter().map(|p| (word(&p[..4]), word(&p[4..]))).collect();
         let beats = take(beats * 8)?.as_chunks::<8>().0.iter().map(|b| f64::from_le_bytes(*b)).collect();
         let chords = take(chords * 4)?.as_chunks::<4>().0.iter().map(|c| chord_of_code(i32::from_le_bytes(*c))).collect();
-        library.add(StoredSong { id, beats, chords, seconds }, marks);
+        // One byte a bar, padded to whole words.
+        let bar_beats = take(bars.div_ceil(4) * 4)?[..bars].to_vec();
+        library.add(StoredSong { id, beats, chords, seconds, bar_beats }, marks);
     }
     Ok(library)
 }
@@ -171,6 +174,11 @@ pub(crate) fn listen(shared: Arc<Shared>, out: mpsc::Sender<Listened>) {
                     .collect();
                 let _ = out.send(Listened::Chords(flat));
             }
+            Some(Heard::Bars(bars)) => {
+                for (frame, beats) in bars {
+                    let _ = shared.commands.push(Command::LiveBar { frame: frame.round() as u64 as u32, beats }.encode());
+                }
+            }
             Some(Heard::Follow(f)) => {
                 let _ = out.send(f.map_or(Listened::Follow { id: -1, frame: 0.0, seconds: 0.0 }, |f| Listened::Follow { id: f.song as i32, frame: f.frame, seconds: f.seconds }));
             }
@@ -190,7 +198,7 @@ mod tests {
     fn reads_the_library_as_native_ts_lays_it_out() {
         let mut bytes = Vec::new();
         bytes.extend(1u32.to_le_bytes());
-        for w in [7u32, 2, 2, 1] {
+        for w in [7u32, 2, 2, 1, 3, 0] {
             bytes.extend(w.to_le_bytes());
         }
         bytes.extend(30f64.to_le_bytes());
@@ -200,9 +208,11 @@ mod tests {
         bytes.extend(0.5f64.to_le_bytes());
         bytes.extend(1f64.to_le_bytes());
         bytes.extend((-1i32).to_le_bytes());
+        bytes.extend([4, 2, 3, 0]);
         let library = decode_library(&bytes).unwrap();
         let song = library.song(7).unwrap();
         assert_eq!((song.beats.as_slice(), song.chords.as_slice(), song.seconds), ([0.5, 1.0].as_slice(), [None].as_slice(), 30.0));
+        assert_eq!(song.bar_beats, [4, 2, 3]);
         assert!(decode_library(&bytes[..bytes.len() - 1]).is_err());
     }
 }

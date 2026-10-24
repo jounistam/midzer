@@ -49,8 +49,9 @@ fn reference(path: &str, bytes: &[u8]) -> Reference {
         let a = analyze_file(bytes.to_vec(), &mut |_, _| {}).expect("analysis");
         let phase = oracle(bytes, &a.beat_times);
         let mut text = format!("{}\n", a.bpm);
+        let ones = a.downbeats();
         for (i, t) in a.beat_times.iter().enumerate() {
-            text += &format!("{t} {}\n", (i % 4 == 0) as u8 + 2 * (i % 4 == phase) as u8);
+            text += &format!("{t} {}\n", ones[i] as u8 + 2 * (i % 4 == phase) as u8);
         }
         std::fs::write(&cache, &text).expect("write the cache");
         text

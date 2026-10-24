@@ -22,6 +22,8 @@ describe('encodeCommand', () => {
     ]);
     expect(encodeCommand({ type: 'songMark', bar: 4, mark: 'B' })).toEqual([19, 4, 3, 0]);
     expect(encodeCommand({ type: 'songMark', bar: 4, mark: null })).toEqual([19, 4, 0, 0]);
+    expect(encodeCommand({ type: 'songBar', bar: 511, beats: 3 })).toEqual([47, 511, 3, 0]);
+    expect(encodeCommand({ type: 'liveBar', frame: 2 ** 32 + 7.4, beats: 2 })).toEqual([48, 7, 2, 0]);
     expect(encodeCommand({ type: 'songLoop', start: 2, end: 6 })).toEqual([20, 2, 6, 0]);
     expect(encodeCommand({ type: 'setSong', on: true })).toEqual([21, 1, 0, 0]);
     expect(encodeCommand({ type: 'songSeek', bar: 12 })).toEqual([22, 12, 0, 0]);

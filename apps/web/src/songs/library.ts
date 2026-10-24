@@ -8,7 +8,7 @@ import { BUILTIN_SONGS } from './builtin';
 import type { MelodyNote } from './melody';
 import { deleteFingerprint } from './fingerprints';
 import { deleteRecording } from './recordings';
-import { BEATS_PER_BAR, MAX_TRACK_BEATS, type Bar, type Song, type SongBacking, type SongHeard, type SongSection, type SongSource } from './song';
+import { MAX_BAR_BEATS, MAX_TRACK_BEATS, type Bar, type Song, type SongBacking, type SongHeard, type SongSection, type SongSource } from './song';
 
 const LEGACY_KEY = 'midzer.songs';
 const MAX_MELODY_NOTES = 8192;
@@ -29,7 +29,7 @@ function sanitize(value: unknown): Song | null {
   const s = value as Partial<Song>;
   if (typeof s.id !== 'string' || typeof s.title !== 'string' || !Array.isArray(s.bars)) return null;
   const bars: Bar[] = s.bars.flatMap((b: Partial<Bar>) => {
-    if (!Array.isArray(b?.beats) || b.beats.length !== BEATS_PER_BAR) return [];
+    if (!Array.isArray(b?.beats) || b.beats.length < 1 || b.beats.length > MAX_BAR_BEATS) return [];
     const bar: Bar = { beats: b.beats.map((x) => (typeof x === 'string' ? x : '')) };
     if (b.section && SECTIONS.includes(b.section)) bar.section = b.section;
     if (b.fill === true) bar.fill = true;

@@ -37,7 +37,8 @@ fn main() {
         let name = path.rsplit('/').next().unwrap();
         let start = std::time::Instant::now();
         let a = analyze_file(std::fs::read(&path).unwrap(), &mut |_, _| {}).unwrap();
-        let beats: String = a.beat_times.iter().enumerate().map(|(i, t)| format!("{t:.3} {}\n", (i % 4 == 0) as u8)).collect();
+        let ones = a.downbeats();
+        let beats: String = a.beat_times.iter().zip(&ones).map(|(t, &one)| format!("{t:.3} {}\n", one as u8)).collect();
         std::fs::write(format!("{out}/{name}.beats"), beats).unwrap();
         let mut lab = String::new();
         for (i, c) in a.chords.iter().enumerate() {

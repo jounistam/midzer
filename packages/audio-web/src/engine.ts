@@ -81,6 +81,8 @@ export interface LiveLibrarySong {
   chords: Int32Array;
   /** How long that audio was. */
   seconds: number;
+  /** How many beats each bar of the chart has (empty: all four). */
+  barBeats: Uint8Array;
 }
 
 /** A stored song recognised in the live source: `seconds` into it at `timeMs` (the source's time, as for chords). */
@@ -299,6 +301,8 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
       } else if (msg.type === 'song') {
         const song = liveSongOf(msg.samples, msg.samples.length / LIVE_SONG_RATE, msg.flags, msg.followed);
         for (const listener of songListeners) listener(song);
+      } else if (msg.type === 'bars') {
+        for (let i = 0; i + 1 < msg.bars.length; i += 2) send({ type: 'liveBar', frame: msg.bars[i]!, beats: msg.bars[i + 1]! });
       } else if (msg.type === 'follow') {
         const follow = liveFollowOf(msg.id, msg.seconds, timeOfFrame(msg.frame + tap.frameOffset));
         for (const listener of followListeners) listener(follow);

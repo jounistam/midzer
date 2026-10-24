@@ -13,7 +13,7 @@
 import { QUALITY_INTERVALS } from '@midzer/audio-web';
 import { formatChord, Q } from './chords';
 import type { MelodyNote } from './melody';
-import { BEATS_PER_BAR, MAX_BARS, newSongId, type Bar, type Song } from './song';
+import { BEATS_PER_BAR, MAX_BAR_BEATS, MAX_BARS, newSongId, totalBeats, type Bar, type Song } from './song';
 import { readSmf, type Smf, type SmfNote } from './smf';
 
 const DRUM_CHANNEL = 9;
@@ -43,37 +43,34 @@ export function importMidi(data: ArrayBuffer | Uint8Array, title: string): MidiI
   const notes = smf.tracks.flatMap((t) => t.notes).filter((n) => n.channel !== DRUM_CHANNEL && n.duration > 0);
   if (notes.length === 0) throw new Error('This MIDI file has no notes to read chords from.');
 
-  const meter = smf.meters[0];
-  if (meter && (meter.numerator !== 4 || meter.denominator !== 4)) {
-    warnings.push(`The file is in ${meter.numerator}/${meter.denominator}; the chart is read as 4/4.`);
-  }
   if (new Set(smf.tempos.map((t) => t.usPerQuarter)).size > 1) {
     warnings.push('The file changes tempo; the song uses the first tempo.');
   }
 
-  const barTicks = smf.ppq * BEATS_PER_BAR;
-  // Start at the bar of the first note, so silent lead-in bars are dropped.
-  const firstBar = Math.floor(notes.reduce((min, n) => Math.min(min, n.tick), Infinity) / barTicks);
   const end = notes.reduce((max, n) => Math.max(max, n.tick + n.duration), 0);
-  let barCount = Math.ceil(end / barTicks) - firstBar;
-  if (barCount > MAX_BARS) {
+  const all = barsOf(smf, end, warnings);
+  // Start at the bar of the first note, so silent lead-in bars are dropped.
+  const first = notes.reduce((min, n) => Math.min(min, n.tick), Infinity);
+  const firstBar = Math.max(0, all.findIndex((b) => b.tick + b.beats * smf.ppq > first));
+  let kept = all.slice(firstBar);
+  if (kept.length > MAX_BARS) {
     warnings.push(`Only the first ${MAX_BARS} bars were imported.`);
-    barCount = MAX_BARS;
+    kept = kept.slice(0, MAX_BARS);
   }
 
-  const half = barTicks / 2;
   const bars: Bar[] = [];
   let previous: string | null = null;
-  for (let b = 0; b < barCount; b++) {
-    const start = (firstBar + b) * barTicks;
-    const halves = [chordIn(notes, start, start + half), chordIn(notes, start + half, start + barTicks)];
+  for (const { tick: start, beats: length } of kept) {
+    const barTicks = length * smf.ppq;
+    const half = Math.floor(length / 2) * smf.ppq;
+    const halves = length % 2 === 0 && length > 1 ? [chordIn(notes, start, start + half), chordIn(notes, start + half, start + barTicks)] : [null, null];
     const whole = chordIn(notes, start, start + barTicks);
     // One chord for the bar unless the halves clearly differ.
     const names = halves[0] && halves[1] && halves[0] !== halves[1] ? halves : [whole ?? halves[0] ?? halves[1], null];
-    const beats = ['', '', '', ''];
+    const beats = Array<string>(length).fill('');
     names.forEach((name, i) => {
       if (name && name !== previous) {
-        beats[i * 2] = name;
+        beats[i * (length / 2)] = name;
         previous = name;
       }
     });
@@ -89,9 +86,34 @@ export function importMidi(data: ArrayBuffer | Uint8Array, title: string): MidiI
     bars,
     source: 'midi',
   };
-  const found = findMelody(smf, firstBar * barTicks, barCount * BEATS_PER_BAR);
+  const found = findMelody(smf, kept[0]?.tick ?? 0, totalBeats(bars));
   if (found) song.melody = found.notes;
   return { song, warnings, melodyFrom: found?.from };
+}
+
+/**
+ * The file's bars up to tick `end`: where each starts and how many beats
+ * (quarter notes) it has, from its time signatures. A meter that isn't a
+ * whole number of beats up to seven (7/8, 9/4) is read as 4/4, with a warning.
+ */
+function barsOf(smf: Smf, end: number, warnings: string[]): { tick: number; beats: number }[] {
+  const out: { tick: number; beats: number }[] = [];
+  const odd = new Set<string>();
+  let tick = 0;
+  while (tick < end && out.length < MAX_BARS * 4) {
+    const meter = [...smf.meters].reverse().find((m) => m.tick <= tick);
+    let beats = meter ? (meter.numerator * 4) / meter.denominator : BEATS_PER_BAR;
+    if (meter && !(Number.isInteger(beats) && beats >= 1 && beats <= MAX_BAR_BEATS)) {
+      odd.add(`${meter.numerator}/${meter.denominator}`);
+      beats = BEATS_PER_BAR;
+    }
+    // A meter change inside a bar starts a bar there.
+    const next = smf.meters.find((m) => m.tick > tick && m.tick < tick + beats * smf.ppq);
+    out.push({ tick, beats: next ? Math.min(MAX_BAR_BEATS, Math.max(1, Math.round((next.tick - tick) / smf.ppq))) : beats });
+    tick = next ? next.tick : tick + beats * smf.ppq;
+  }
+  for (const m of odd) warnings.push(`The file is in ${m} in places; the chart reads those bars as 4/4.`);
+  return out;
 }
 
 /** The melody line in beats from `startTick`, cut at `beats`. */

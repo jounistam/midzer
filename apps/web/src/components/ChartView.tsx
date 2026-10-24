@@ -41,7 +41,7 @@ export function ChartView(props: ChartViewProps) {
           )}
           {i === currentBar && (
             <span className="bar-progress" aria-hidden>
-              <span style={{ width: `${((props.beat + 1) / 4) * 100}%` }} />
+              <span style={{ width: `${((props.beat + 1) / bar.beats.length) * 100}%` }} />
             </span>
           )}
         </div>
@@ -70,13 +70,14 @@ function BarButton({ index, bar, onSelect }: { index: number; bar: Bar; onSelect
     <button
       className="bar-body"
       onClick={(e: MouseEvent) => onSelect(index, e.shiftKey)}
-      aria-label={`Bar ${index + 1}: ${chords}${bar.fill ? ', fill' : ''}`}
+      aria-label={`Bar ${index + 1}${bar.beats.length !== 4 ? ` (${bar.beats.length} beats)` : ''}: ${chords}${bar.fill ? ', fill' : ''}`}
     >
       <span className="bar-number">
         {index + 1}
+        {bar.beats.length !== 4 && <span className="fill-mark"> · {bar.beats.length}/4</span>}
         {bar.fill && <span className="fill-mark"> · fill</span>}
       </span>
-      <span className="bar-beats">
+      <span className={`bar-beats${bar.beats.length !== 4 ? ` beats-${bar.beats.length}` : ''}`}>
         {bar.beats.map((chord, b) => (
           <span key={b} className={chord ? 'chord' : 'hold'}>
             {chord || (b === 0 ? '%' : '')}
@@ -88,7 +89,7 @@ function BarButton({ index, bar, onSelect }: { index: number; bar: Bar; onSelect
   );
 }
 
-/** One bar as editable chart notation, e.g. "Am . F G7". Applied on Enter or leaving the field. */
+/** One bar as editable chart notation, e.g. "Am . F G7". Applied on Enter or leaving the field; it keeps its length unless a tag like "[3/4]" gives another. */
 function BarEditor({
   index,
   bar,
@@ -107,12 +108,14 @@ function BarEditor({
 
   const commit = () => {
     if (draft.trim() === text) return setError(null);
-    const { bars, unknown } = parseChart(draft.replace(/\|/g, ' '));
+    const { bars, unknown } = parseChart(`[${bar.beats.length}/4] ${draft.replace(/\|/g, ' ')}`);
     if (unknown.length > 0 || bars.length !== 1) {
-      setError(unknown.length ? `Not a chord: ${unknown.join(', ')}` : 'Type one to four chords, e.g. "Am F"');
+      setError(unknown.length ? `Not a chord: ${unknown.join(', ')}` : 'Type the chords of one bar, e.g. "Am F"');
       return;
     }
     setError(null);
+    // The text may not change (a new length, same chords): show it as written now.
+    setDraft(formatBar(bars[0]!));
     onEdit(index, { ...bar, beats: bars[0]!.beats });
   };
   const onKey = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -127,6 +130,7 @@ function BarEditor({
     <div className="bar-body">
       <button className="bar-number" onClick={(e) => onSelect(index, e.shiftKey)} aria-label={`Select bar ${index + 1}`}>
         {index + 1}
+        {bar.beats.length !== 4 && <span className="fill-mark"> · {bar.beats.length}/4</span>}
         {bar.fill && <span className="fill-mark"> · fill</span>}
       </button>
       <input
@@ -134,7 +138,7 @@ function BarEditor({
         value={draft}
         aria-label={`Chords in bar ${index + 1}`}
         aria-invalid={error !== null}
-        title={error ?? 'One to four chords; "." keeps the chord for a beat'}
+        title={error ?? 'A chord for the bar, two for its halves, or one a beat; "." keeps the chord for a beat'}
         spellCheck={false}
         onFocus={() => onSelect(index, false)}
         onChange={(e) => setDraft(e.target.value)}

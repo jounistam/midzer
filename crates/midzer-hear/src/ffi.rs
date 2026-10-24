@@ -8,10 +8,11 @@
 //!   which beat of the bar it is (−1 unknown) and the confidence;
 //! - chords (step returns 2): per span from, to (engine frames), the chord
 //!   as root · 16 + the engine's quality index (−1 for none), and 1 if it is
-//!   predicted from the song's loop rather than heard (else 0).
-//!
+//!   predicted from the song's loop rather than heard (else 0);
 //! - a song followed (step returns 3): its id (−1 when none is any more),
-//!   the engine frame, the seconds into the song there, and the votes.
+//!   the engine frame, the seconds into the song there, and the votes;
+//! - its bar lines (step returns 4): per bar the engine frame of the beat it
+//!   starts on and its length in beats.
 //!
 //! With capture on, each song heard (see [`Hearing::set_capture`]) waits in
 //! [`mzh_take_song`] as 16-bit samples at 22.05 kHz.
@@ -62,7 +63,8 @@ pub unsafe extern "C" fn mzh_push(l: *mut Listener, len: u32, frame: f64) {
     l.hearing.push(&l.input[..len], frame as u64);
 }
 
-/// Runs a network if one is due: 0 nothing, 1 a grid, 2 chords (see the module docs).
+/// Runs a network if one is due: 0 nothing, 1 a grid, 2 chords, 3 a song
+/// followed, 4 its bar lines (see the module docs).
 ///
 /// # Safety
 /// `l` must come from [`mzh_create`].
@@ -79,6 +81,10 @@ pub unsafe extern "C" fn mzh_step(l: *mut Listener) -> u32 {
         Some(Heard::Follow(f)) => {
             l.result.extend(f.map_or([-1.0, 0.0, 0.0, 0.0], |f| [f.song as f64, f.frame, f.seconds, f.votes as f64]));
             3
+        }
+        Some(Heard::Bars(bars)) => {
+            l.result.extend(bars.iter().flat_map(|&(frame, beats)| [frame, beats as f64]));
+            4
         }
         Some(Heard::Chords(spans)) => {
             for s in spans {
@@ -188,18 +194,20 @@ pub unsafe extern "C" fn mzh_free(ptr: *mut u8, bytes: usize) {
 /// Keeps a song to recognise, replacing the one with its id: `pairs`
 /// landmarks (hash, frame), `n_beats` beat times in seconds (the chart's,
 /// plus its end), a chord code per beat (root · 16 + the quality index, −1
-/// none) and the length of the audio the landmarks came from.
+/// none), the length of the audio the landmarks came from, and the beats of
+/// each bar (`n_bars` of them; none means bars of four).
 ///
 /// # Safety
 /// `l` must come from [`mzh_create`]; the buffers from [`mzh_alloc`], holding as many as said.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mzh_library_add(l: *mut Listener, id: u32, marks: *const u32, pairs: u32, beats: *const f64, n_beats: u32, chords: *const i32, n_chords: u32, seconds: f64) {
+pub unsafe extern "C" fn mzh_library_add(l: *mut Listener, id: u32, marks: *const u32, pairs: u32, beats: *const f64, n_beats: u32, chords: *const i32, n_chords: u32, seconds: f64, bar_beats: *const u8, n_bars: u32) {
     let l = unsafe { &mut *l };
     let (marks, beats, chords) = unsafe {
         (std::slice::from_raw_parts(marks, pairs as usize * 2), std::slice::from_raw_parts(beats, n_beats as usize), std::slice::from_raw_parts(chords, n_chords as usize))
     };
+    let bar_beats = if n_bars == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(bar_beats, n_bars as usize) }.to_vec() };
     let chords = chords.iter().map(|&c| chord_of_code(c)).collect();
-    let song = StoredSong { id, beats: beats.to_vec(), chords, seconds };
+    let song = StoredSong { id, beats: beats.to_vec(), chords, seconds, bar_beats };
     l.hearing.library().add(song, marks.as_chunks::<2>().0.iter().map(|p| (p[0], p[1])).collect());
 }
 

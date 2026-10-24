@@ -64,7 +64,7 @@ describe('importMidi', () => {
     expect(song.bars.map((b) => b.beats.filter(Boolean).join(' '))).toEqual(['C', 'Am', 'F', 'G7', '']);
   });
 
-  it('splits bars whose halves differ and warns about other meters', () => {
+  it('splits bars whose halves differ and reads the file meter', () => {
     const ppq = 96;
     const events = [
       [0, 0x90, 60, 80],
@@ -80,11 +80,17 @@ describe('importMidi', () => {
       [ppq * 4, 0x80, 65, 0],
       [ppq * 4, 0x80, 69, 0],
     ];
-    const file = writeSmf(ppq, [{ name: '', events: [[0, 0xff, 0x58, 3, 2, 24, 8], ...events] }]);
-    const { song, warnings } = importMidi(file, '');
-    expect(song.bars[0]!.beats).toEqual(['C', '', 'Dm', '']);
-    expect(song.title).toBe('Imported song');
-    expect(warnings[0]).toMatch(/3\/4/);
+    const plain = importMidi(writeSmf(ppq, [{ name: '', events }]), '');
+    expect(plain.song.bars[0]!.beats).toEqual(['C', '', 'Dm', '']);
+    expect(plain.song.title).toBe('Imported song');
+    expect(plain.warnings).toEqual([]);
+    // In 3/4 the bars are three beats; in 7/8 (not whole beats) they are read as 4/4, with a warning.
+    const waltz = importMidi(writeSmf(ppq, [{ name: '', events: [[0, 0xff, 0x58, 3, 2, 24, 8], ...events] }]), '');
+    expect(waltz.song.bars.map((b) => b.beats.length)).toEqual([3, 3]);
+    expect(waltz.warnings).toEqual([]);
+    const seven = importMidi(writeSmf(ppq, [{ name: '', events: [[0, 0xff, 0x58, 7, 3, 24, 8], ...events] }]), '');
+    expect(seven.song.bars[0]!.beats).toEqual(['C', '', 'Dm', '']);
+    expect(seven.warnings[0]).toMatch(/7\/8/);
   });
 
   it('names inversions and ignores weak passing notes', () => {

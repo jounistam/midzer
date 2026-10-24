@@ -118,3 +118,34 @@ test('songs: play a chart, jump, loop, edit, save, import and export', async ({ 
 
   expect(errors).toEqual([]);
 });
+
+test('songs: a bar of two beats plays as two', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.addInitScript(() => localStorage.setItem('midzer.onboarded', '1'));
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Songs/ }).click();
+  await page.getByRole('button', { name: /Four Chord Anthem/ }).click();
+  await page.getByRole('button', { name: 'Edit chart' }).click();
+  const bar2 = page.getByLabel('Chords in bar 2', { exact: true });
+  await bar2.fill('[2/4] G');
+  await bar2.press('Enter');
+  await expect(bar2).toHaveValue('G');
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.getByRole('button', { name: /^Bar 2 \(2 beats\): G/ })).toBeVisible();
+
+  const play = page.getByRole('button', { name: 'Play', exact: true });
+  await expect(play).toBeEnabled({ timeout: 30_000 });
+  await play.click();
+  // 100 BPM: bar 1 takes 2.4 s, bar 2 only 1.2 s.
+  await expect(page.getByText('Bar 2 of 37')).toBeVisible({ timeout: 4_000 });
+  const from = Date.now();
+  await expect(page.locator('.song-now .beat-dot')).toHaveCount(2);
+  await expect(page.getByText('Bar 3 of 37')).toBeVisible({ timeout: 4_000 });
+  const took = Date.now() - from;
+  expect(took).toBeGreaterThan(700);
+  expect(took).toBeLessThan(1_900);
+  await expect(page.locator('.song-now .beat-dot')).toHaveCount(4);
+  await page.getByRole('button', { name: 'Stop' }).click();
+  expect(errors).toEqual([]);
+});
