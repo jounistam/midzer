@@ -4,7 +4,16 @@
 // as the AudioWorklet, plus native MIDI, since desktop webviews lack Web MIDI.
 
 import { Channel, invoke } from '@tauri-apps/api/core';
-import { decodeChordSpans, type EngineHandle, type EventListener, type LiveChordListener, type LiveDevice, type TrackLoaded } from './engine';
+import {
+  decodeChordSpans,
+  liveSongOf,
+  type EngineHandle,
+  type EventListener,
+  type LiveChordListener,
+  type LiveDevice,
+  type LiveSongListener,
+  type TrackLoaded,
+} from './engine';
 import { decodeEvent, encodeCommand, type EngineCommand } from './protocol';
 
 export { isNativeHost } from './engine';
@@ -35,7 +44,9 @@ type Update =
   | { type: 'input'; words: number[] }
   | ({ type: 'ports' } & MidiPorts)
   /** What the listener heard in the live source; see `decodeChordSpans`. */
-  | { type: 'chords'; spans: number[]; heardFrame: number };
+  | { type: 'chords'; spans: number[]; heardFrame: number }
+  /** A song captured from the live source, kept natively until `analyzeLiveSong`; flags as in `liveSongOf`. */
+  | { type: 'liveSong'; seconds: number; flags: number };
 
 interface Started {
   sampleRate: number;
@@ -73,6 +84,7 @@ export function frameTime(frame: number, heardFrame: number, sampleRate: number,
 export async function startNativeEngine(): Promise<NativeEngineHandle> {
   const listeners = new Set<EventListener>();
   const chordListeners = new Set<LiveChordListener>();
+  const songListeners = new Set<LiveSongListener>();
   const portListeners = new Set<(ports: MidiPorts) => void>();
   const inputListeners = new Set<(cmd: EngineCommand) => void>();
   let ports: MidiPorts = { inputs: [], outputs: [] };
@@ -93,6 +105,9 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
       const now = performance.now();
       const spans = decodeChordSpans(update.spans, (frame) => frameTime(frame, update.heardFrame, sampleRate, now));
       for (const listener of chordListeners) listener(spans);
+    } else if (update.type === 'liveSong') {
+      const song = liveSongOf(null, update.seconds, update.flags);
+      for (const listener of songListeners) listener(song);
     } else if (update.type === 'input') {
       const w = update.words;
       for (let i = 0; i + 3 < w.length; i += 4) {
@@ -131,6 +146,14 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
     onLiveChords(listener) {
       chordListeners.add(listener);
       return () => chordListeners.delete(listener);
+    },
+    onLiveSong(listener) {
+      songListeners.add(listener);
+      return () => songListeners.delete(listener);
+    },
+    canLearnSongs: true,
+    finishLiveSong() {
+      void invoke('live_song_finish');
     },
     async loadSoundFont(bytes) {
       try {
@@ -185,6 +208,7 @@ export async function startNativeEngine(): Promise<NativeEngineHandle> {
     async close() {
       listeners.clear();
       chordListeners.clear();
+      songListeners.clear();
       channel.onmessage = () => {};
     },
     midi: {
@@ -221,6 +245,24 @@ export async function analyzeNative(
   signal?.addEventListener('abort', cancel);
   try {
     return await invoke<string>('audio_analyze', { stems, onProgress: channel });
+  } catch (e) {
+    throw new Error(String(e));
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+  }
+}
+
+/**
+ * Analyses the last song captured from the live source (see `onLiveSong`),
+ * kept in the desktop app, and returns the analysis as JSON.
+ */
+export async function analyzeLiveSong(onProgress: (fraction: number, step: number) => void, signal?: AbortSignal): Promise<string> {
+  const channel = new Channel<{ fraction: number; step: number }>();
+  channel.onmessage = (p) => onProgress(p.fraction, p.step);
+  const cancel = () => void invoke('audio_cancel');
+  signal?.addEventListener('abort', cancel);
+  try {
+    return await invoke<string>('live_song_analyze', { onProgress: channel });
   } catch (e) {
     throw new Error(String(e));
   } finally {

@@ -6,6 +6,7 @@ import { BUILTIN_SONGS } from '../songs/builtin';
 import { AUDIO_ACCEPT, isAudioFile } from '../songs/audio';
 import { importFile, importText, titleOf, type Imported } from '../songs/importing';
 import { deleteUserSong, loadUserSongs, saveUserSong } from '../songs/library';
+import { saveFingerprint } from '../songs/fingerprints';
 import { saveRecording } from '../songs/recordings';
 import { newSongId, parseChart, type Song } from '../songs/song';
 import { AudioImport } from './AudioImport';
@@ -126,6 +127,7 @@ export function Songs() {
             setRecording(null);
             // Kept to play along with; it never leaves the device.
             if (result.song.backing) void saveRecording(result.song.id, recording.bytes);
+            void saveFingerprint(result.song.id, result.fingerprint);
             open(result);
           }}
           onClose={() => setRecording(null)}

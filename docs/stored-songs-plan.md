@@ -21,10 +21,15 @@ Existing pieces this builds on:
 ---
 
 ## Status (2026-10-24)
-- Slices 1 and 2 are built; results and what is open are in `docs/PLAN.md` Status ("Accurate stored songs").
+- Slices 1–3 are built; results and what is open are in `docs/PLAN.md` Status ("Accurate stored songs").
 - Changes from the plan:
   - Slice 1: `Live` ignores guides whose beat is before the last start-over, because a network run already under way re-locked the tracker to the old song.
-  - Slice 2: downbeats were 0.58 → 0.63 F only. The network's own downbeats score 0.91, but one bar phase for the whole song misplaces the 1 after odd bars (2, 3 or 5 beats) that most of the test songs have. Undecided: let the phase change mid-song (the 4-beats-per-bar `Analysis` and chart can't show an odd bar), or leave it to slice 5's downbeat editing. Ask the user.
+  - Slice 2: downbeats were 0.58 → 0.63 F only. The network's own downbeats score 0.91, but one bar phase for the whole song misplaces the 1 after odd bars (2, 3 or 5 beats) that most of the test songs have. The user chose (2026-10-24) to keep one phase and leave wrong 1s to slice 5's downbeat editing.
+  - Slice 3:
+    - The user chose (2026-10-24) to offer learned songs with Keep / Dismiss rather than save them by themselves.
+    - The fingerprint is computed now (matching stays in slice 4), because live songs keep no audio.
+    - Several learned songs can wait to be kept (up to 5).
+    - A capture's end includes the ~0.5 s the level takes to fall.
 - Measuring slice 2 again: `offline_dump` on `files24.txt` (24 songs, ~20 s each natively, under a 4 GB cap) → `score.py` with the Python in `~/.claude/jobs/05b3b04b/tmp/venv` (it has mir_eval; `~/venv` doesn't).
 
 ## Slice 1: reset after silence + a reset button
@@ -99,15 +104,83 @@ Existing pieces this builds on:
 
 ---
 
-## Slice 3 (own plan later): learn a song from live audio
-- Capture the live tap to a rolling buffer at 22.05 kHz mono while following a source: ~5 MB/min, capped at 15 min.
-- When the song ends (a `LiveForgot` silence, a now-playing track change, or the "Save this song" button), run slice 2's analysis on the buffer in the analyse worker (native thread on desktop).
-- Store a Song from it with `source: 'live'` and no recording, plus the fingerprint (slice 4) and a small onset/energy envelope (~100 Hz, 8-bit) so the editor can draw something without audio.
-- Only complete songs are offered. A partial capture is offered as "partial" and can be extended the next time it plays.
+## Slice 3: learn a song from live audio
+
+Where the audio is: the listener (`Hearing`) already resamples the live source to 22.05 kHz mono and sees the silences, so the capture lives there. It stays off unless asked for, so `hear_eval` and the tests are unchanged. The analysis runs where imports run (analyse worker on web, a native thread on desktop), never in the listener.
+
+**Listener (`crates/midzer-hear/src/hearing.rs`)**
+- `set_capture(on)`. While on, a `Capture { samples: Vec<i16>, clean_start: bool, clean_end: bool }` collects the stream:
+  - It starts when sound is first heard after a reset or a silence, with 0.5 s of pre-roll from `audio`.
+  - `clean_start` means at least 0.25 s of quiet came before the sound, so the song was heard from its start. `reset()` zeroes `power`/`quiet`, so a source opened mid-song counts as not clean.
+  - Capped at 15 min (40 MB as i16); past that it stops collecting and the end counts as not clean.
+- It ends three ways:
+  - the silence `forget()`: trailing silence trimmed to 0.5 s, `clean_end = true`;
+  - `finish()` (the "Save this song" button, or closing the source): `clean_end = false`. If the music goes on, a new capture starts at once, not clean;
+  - `reset()` (Start over, a new source): dropped.
+- Ended captures under 30 s are dropped. `take_song() -> Option<Capture>` hands out the last one.
+- ffi: `mzh_set_capture`, `mzh_finish`, `mzh_take_song` (returns the length, 0 if none) with `mzh_song_ptr` and `mzh_song_flags` (bit 0 clean start, bit 1 clean end).
+
+**Fingerprint (new `crates/midzer-hear/src/fingerprint.rs`)**
+- Landmark hashes as in slice 4: 11.025 kHz, STFT 1024 / hop 256, local spectral peaks, each peak paired with a few later ones. A hash packs f1, f2 − f1 and dt into a u32, stored with its frame as `[hash, frame]`.
+- It is in `midzer-hear` because slice 4 hashes the live input in the listener with the same code, and `midzer-analyze` already depends on it.
+- It is computed here, since a live-learned song keeps no audio to compute it from later. Imports and "Analyse again" get it too.
+- Slice 4 does the matching and the hash index; here it is only stored.
+
+**Analysis (`crates/midzer-analyze`)**
+- `Analysis` gains `envelope: Vec<u8>` (100 Hz, the level in dB mapped to 0–255, for the slice 5 editor) and `fingerprint: Vec<u32>` (flat pairs).
+- `analyze_mix(samples_i16_22k, progress)` = `analyze` on the capture, with no title. ffi `mza_analyze_mix(ptr, len)`; `mza_alloc` already gives the bytes.
+- Desktop: the hear thread puts a taken capture in `Shared.captured` and sends `UiUpdate::LiveSong { seconds, clean_start, clean_end }`. A `live_song_analyze(on_progress)` command takes it and runs `analyze_mix` on the analysis thread, like `audio_analyze`. `live_song_finish` sets a flag the hear thread turns into `finish()`.
+
+**Plumbing (`packages/audio-web`)**
+- `EngineHandle.onLiveSong(listener)` with `LiveSongCapture { seconds, complete, samples?: Int16Array }`. `complete` = clean start and clean end. `samples` is on web only; desktop keeps them natively.
+- `finishLiveSong()`. Closing a live source finishes first.
+- The hear worker gets `capture`/`finish` messages and posts `{type:'song', samples, flags}` with the buffer transferred.
+- Without the listener (no cross-origin isolation) nothing is captured, and the button is hidden.
+
+**App**
+- `Song.source` adds `'live'`, and a new `heard?: { beatTimes, seconds, complete, envelope }`. It is kept apart from `backing`, which means there is a recording. Slices 4 and 5 read `backing ?? heard` as the beat map.
+- `songFromAnalysis` builds either. `library.ts` sanitises `heard` like `backing`.
+- A `fingerprints` store keyed by song id holds `Uint32Array`s for imports and live songs. `DB_VERSION` → 3; the now-playing plan's `tracks` store goes into the same version if it lands first. Deleting a song deletes its fingerprint.
+- `analyzeAudio.ts`: `analyzeCapture(capture, options)`, through the worker on web and `live_song_analyze` natively.
+- `session.ts`:
+  - Capture is on while a source is on.
+  - `onLiveSong` analyses one capture at a time; a newer one waits.
+  - State `liveLearned: null | {status:'analysing', progress} | {status:'ready', song, complete} | {status:'failed', message}`.
+  - `keepLearnedSong()` saves the song and its fingerprint; `dismissLearnedSong()`; `saveLiveSong()` calls `finishLiveSong()`.
+  - Title: "Heard <date time>", editable in the editor.
+- `PlayAlong.tsx`:
+  - "Save this song" next to Start over.
+  - A Stage/club card with the progress, then "Learned a song: 3:41 · 118 BPM · A minor", a "partial" tag when not complete, and Keep / Dismiss buttons.
+- Extending a partial song when it plays again needs recognition, so it moves to slice 4.
+
+**Tests**
+- hearing:
+  - A song from silence to silence gives a clean capture of about its length.
+  - Opening mid-song gives a not-clean start.
+  - `finish()` gives a not-clean end, and the music goes on as a new capture.
+  - `reset()` drops the capture; short captures are dropped; capture off collects nothing.
+- fingerprint:
+  - The same audio, shifted, gives matching hashes at a constant frame offset.
+  - Noise gives few matches.
+- analyze: `analyze_mix` on the band test signal gives beats, an envelope and a fingerprint.
+- Vitest:
+  - `songFromAnalysis` with `heard`;
+  - library sanitising;
+  - the hear message decode.
+- Playwright (rebuild first): with the fake source, "Save this song" → the card → Keep → the song is in Songs, with `source: 'live'`.
+- Desktop parts are type-checked only, as before.
 
 ## Slice 4 (own plan later): recognise songs and follow the stored grid
 - Metadata: implement `docs/now-playing-plan.md`. A track id maps to a stored song id.
-- Fingerprint: landmark hashes (spectral-peak pairs, Shazam-style) at 11 kHz. They are computed in slice 2/3 analysis and stored in an IndexedDB `fingerprints` store keyed by hash. The listener hashes the live input every ~2 s and votes on (song, time offset). A clear vote (N matching hashes on one offset) means a match **and** the position in the song.
+- Fingerprint: landmark hashes (spectral-peak pairs, Shazam-style) at 11 kHz. They are computed in slice 2/3 analysis and stored in an IndexedDB `fingerprints` store keyed by **song id**, as a `Uint32Array` of hash, frame pairs (`apps/web/src/songs/fingerprints.ts`). Slice 4 builds the hash → (song, frame) index from it in memory at start-up.
+  - What exists (slice 3): `midzer_hear::fingerprint(&[f32] at 22.05 kHz) -> Vec<(hash, frame)>` in `crates/midzer-hear/src/fingerprint.rs`.
+    - Frames run at `fingerprint::FPS` (≈43.07/s; 11.025 kHz, hop 256), from the start of the analysed audio. For imports that is the file's start; for live songs it is the capture's start, which is also where `Song.heard.beatTimes` count from.
+    - Hash = f1 << 13 | (df + 64) << 6 | dt.
+    - The listener can hash a rolling window of its 22.05 kHz `audio` with the same function.
+    - Checked on real songs: a 10 s noisy excerpt gives ~500 votes on the right offset against ~10 for the next best (`best_offset` in the fingerprint test shows the voting).
+  - Beat maps: `Song.backing` (with a recording) or `Song.heard` (live-learned; `complete`, `envelope`, `heardAt`); read `backing ?? heard`.
+  - `Capture.from` is the engine frame of a capture's first sample, if following ever needs it.
+  - Partial live songs (`heard.complete === false`) should be extended when recognised again (moved here from slice 3). The listener hashes the live input every ~2 s and votes on (song, time offset). A clear vote (N matching hashes on one offset) means a match **and** the position in the song.
 - Song change without metadata: silence, a lost match, a jump in tempo or key, or a sudden novelty in chroma.
 - Following: when matched, the engine gets the stored beat map (a new `LiveSong` command: beat times + downbeat). It plays the beats and the 1 from it, locked by the fingerprint offset and refined by onset cross-correlation. The live tracker only watches for drift, a lost match or a skip (seek). All chords are known ahead.
 
@@ -118,5 +191,7 @@ Existing pieces this builds on:
   - add a tempo change point;
   - tap along to re-grid a selection;
   - drag a chord edge to a beat, and change a chord by picking or typing it.
+- The live-learned envelope is `Song.heard.envelope`: a `Uint8Array`, 100 frames a second, 0–255 for −60–0 dBFS (`envelope` in `crates/midzer-analyze/src/lib.rs`).
+- The bar phase is one per song (the user's choice for slice 2's open question): fixing wrong 1s by hand belongs here.
 - Edits are stored on the song and survive "Analyse again" (merge, or ask).
 - Corrections to live-learned songs also tune their fingerprint offset.

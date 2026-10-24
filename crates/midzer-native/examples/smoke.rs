@@ -21,7 +21,7 @@ fn main() -> Result<(), String> {
             }
         }
         Update::Ports(ports) => println!("MIDI: {ports:?}"),
-        Update::Input { .. } | Update::Chords { .. } => {}
+        Update::Input { .. } | Update::Chords { .. } | Update::LiveSong { .. } => {}
     }))?;
     println!("rate {} Hz, output latency {:.1} ms", engine.sample_rate(), engine.output_latency_ms());
 

@@ -28,6 +28,10 @@ export interface AudioAnalysis {
   tracks: AnalysedTrack[];
   stemsDir: string | null;
   warnings: string[];
+  /** The level, 100 a second, 0–255 for −60–0 dBFS. */
+  envelope: number[];
+  /** Landmark hashes: hash, frame, hash, frame, … */
+  fingerprint: number[];
 }
 
 export interface AnalysedNote {
@@ -76,9 +80,18 @@ export function isAudioFile(name: string, head: Uint8Array): boolean {
 export interface FromAudio {
   song: Song;
   notes: string[];
+  /** To keep with the song (see fingerprints.ts). */
+  fingerprint: Uint32Array;
 }
 
-export function songFromAnalysis(a: AudioAnalysis, fallbackTitle: string): FromAudio {
+/** How a song learned from live audio was heard. */
+export interface HeardLive {
+  complete: boolean;
+  heardAt: number;
+}
+
+/** A song from a recording's analysis, or with `live` from a song heard live, which keeps no recording. */
+export function songFromAnalysis(a: AudioAnalysis, fallbackTitle: string, live?: HeardLive): FromAudio {
   const barCount = Math.min(MAX_BARS, Math.floor(a.chords.length / BEATS_PER_BAR));
   const bars: Bar[] = [];
   let previous: string | null = null;
@@ -102,22 +115,28 @@ export function songFromAnalysis(a: AudioAnalysis, fallbackTitle: string): FromA
     bpm: Math.round(Math.min(240, Math.max(40, a.bpm))),
     style: 0,
     bars,
-    source: 'audio',
+    source: live ? 'live' : 'audio',
   };
   if (a.artist?.trim()) song.artist = a.artist.trim();
   if (melody.length > 0) song.melody = melody;
   if (a.tracks.length > 0) song.transcription = a.tracks;
   if (a.beatTimes.length >= 2) {
-    song.backing = { beatTimes: a.beatTimes.slice(0, Math.min(MAX_TRACK_BEATS, barCount * BEATS_PER_BAR + 1)), seconds: a.duration };
-    if (a.stemsDir) song.backing.stemsDir = a.stemsDir;
+    const beatTimes = a.beatTimes.slice(0, Math.min(MAX_TRACK_BEATS, barCount * BEATS_PER_BAR + 1));
+    if (live) {
+      song.heard = { beatTimes, seconds: a.duration, complete: live.complete, envelope: Uint8Array.from(a.envelope), heardAt: live.heardAt };
+    } else {
+      song.backing = { beatTimes, seconds: a.duration };
+      if (a.stemsDir) song.backing.stemsDir = a.stemsDir;
+    }
   }
 
   const key = `${NOTE_NAMES[a.key.tonic]}${a.key.minor ? ' minor' : ' major'}`;
-  const notes = [`Read from the recording: ${song.bpm} BPM, in ${key}. Check the chords and sections in the editor.`];
+  const from = live ? (live.complete ? 'Heard live' : 'Heard live (only part of the song)') : 'Read from the recording';
+  const notes = [`${from}: ${song.bpm} BPM, in ${key}. Check the chords and sections in the editor.`];
   if (a.melodyFrom === 'mix') notes.push('The melody for Learn is a rough guess from the whole mix.');
   if (a.melodyFrom === 'vocals') notes.push('The melody for Learn comes from the separated vocals.');
   if (a.stemsDir) notes.push(`The separated instruments are saved as WAV files in ${a.stemsDir}.`);
-  return { song, notes: [...notes, ...a.warnings] };
+  return { song, notes: [...notes, ...a.warnings], fingerprint: Uint32Array.from(a.fingerprint) };
 }
 
 const PPQ = 480;

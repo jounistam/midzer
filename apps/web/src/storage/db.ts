@@ -1,9 +1,9 @@
 // Persistent key-value stores in IndexedDB: the player's songs, the recordings
-// they were read from, and Learn progress. Falls back to memory when IndexedDB
+// they were read from, their fingerprints, and Learn progress. Falls back to memory when IndexedDB
 // is missing or blocked (some private modes), so the app still works, just
 // without keeping anything.
 
-export type StoreName = 'songs' | 'progress' | 'recordings';
+export type StoreName = 'songs' | 'progress' | 'recordings' | 'fingerprints';
 
 export interface Store<T> {
   get(key: string): Promise<T | undefined>;
@@ -13,8 +13,8 @@ export interface Store<T> {
 }
 
 const DB_NAME = 'midzer';
-const DB_VERSION = 2;
-const STORES: StoreName[] = ['songs', 'progress', 'recordings'];
+const DB_VERSION = 3;
+const STORES: StoreName[] = ['songs', 'progress', 'recordings', 'fingerprints'];
 
 let opening: Promise<IDBDatabase | null> | null = null;
 

@@ -205,3 +205,58 @@ test('play along on keys: the keys of each chord fall onto the keyboard, by leve
   expect(prefs.alongLevel).toBe(4);
   expect(errors).toEqual([]);
 });
+
+test('play along: a song heard is learned and kept, without its audio', async ({ page }) => {
+  // Half a minute of listening at least, then the analysis.
+  test.setTimeout(150_000);
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  await page.addInitScript(() => localStorage.setItem('midzer.onboarded', '1'));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Play along/ }).click();
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeEnabled({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Listen' }).click();
+  await expect(page.getByTestId('along-status')).toHaveText('Found the beat', { timeout: 20_000 });
+  // Shorter songs aren't kept.
+  await page.waitForTimeout(32_000);
+  await page.getByRole('button', { name: 'Save this song' }).click();
+  const learned = page.getByTestId('along-learned');
+  await expect(learned).toContainText('Learning the song heard');
+  // The input was loud from the first moment: only part of a song.
+  await expect(learned.getByRole('button', { name: 'Keep' })).toBeVisible({ timeout: 60_000 });
+  await expect(learned).toContainText(/12\d BPM/);
+  await expect(learned).toContainText('partial');
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/17-play-along-learned.png` });
+  await learned.getByRole('button', { name: 'Keep' }).click();
+  await expect(learned).toContainText('in My songs');
+
+  await page.getByRole('button', { name: 'Stop listening' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: /^Songs/ }).click();
+  await expect(page.locator('.song-card-title', { hasText: /^Heard / })).toBeVisible();
+  const kept = await page.evaluate(
+    () =>
+      new Promise<{ source: string; beats: number; envelope: number; fingerprint: number }>((resolve, reject) => {
+        const req = indexedDB.open('midzer');
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const tx = req.result.transaction(['songs', 'fingerprints', 'recordings']);
+          const songs = tx.objectStore('songs').getAll();
+          const prints = tx.objectStore('fingerprints').getAll();
+          const recordings = tx.objectStore('recordings').count();
+          tx.oncomplete = () => {
+            const song = songs.result[0].song;
+            if (recordings.result !== 0) reject(new Error('audio was kept'));
+            resolve({ source: song.source, beats: song.heard.beatTimes.length, envelope: song.heard.envelope.length, fingerprint: prints.result[0].length });
+          };
+        };
+      }),
+  );
+  expect(kept.source).toBe('live');
+  expect(kept.beats).toBeGreaterThan(40);
+  expect(kept.envelope).toBeGreaterThan(3000);
+  expect(kept.fingerprint).toBeGreaterThan(1000);
+  expect(errors).toEqual([]);
+});

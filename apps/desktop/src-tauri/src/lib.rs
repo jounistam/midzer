@@ -49,6 +49,7 @@ enum UiUpdate {
     Input { words: Vec<u32> },
     Ports { inputs: Vec<Port>, outputs: Vec<Port> },
     Chords { spans: Vec<f64>, heard_frame: f64 },
+    LiveSong { seconds: f64, flags: u32 },
 }
 
 impl From<Ports> for UiUpdate {
@@ -81,6 +82,7 @@ fn engine_start(state: State<AppEngine>, on_update: Channel<UiUpdate>) -> Result
             Update::Input { words } => UiUpdate::Input { words },
             Update::Ports(ports) => ports.into(),
             Update::Chords { spans, heard_frame } => UiUpdate::Chords { spans, heard_frame },
+            Update::LiveSong { seconds, flags } => UiUpdate::LiveSong { seconds, flags },
         };
         let _ = on_update.send(update);
     }))?;
@@ -145,6 +147,29 @@ fn live_close(state: State<AppEngine>) -> Result<(), String> {
         engine.close_live();
         Ok(())
     })
+}
+
+#[tauri::command]
+fn live_song_finish(state: State<AppEngine>) -> Result<(), String> {
+    with_engine(&state, |engine| {
+        engine.finish_live_song();
+        Ok(())
+    })
+}
+
+/// Analyses the last song captured from the live source into a song (JSON, see `midzer_analyze::Analysis`).
+#[tauri::command]
+async fn live_song_analyze(app: AppHandle, on_progress: Channel<AudioProgress>) -> Result<String, String> {
+    let song = with_engine(&app.state::<AppEngine>(), |engine| engine.take_live_song().ok_or_else(|| "No song was heard.".to_string()))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut progress = |fraction: f32, step: midzer_analyze::Step| {
+            let _ = on_progress.send(AudioProgress { fraction, step: step as u32 });
+        };
+        let analysis = midzer_analyze::analyze_heard(&song.samples, &mut progress)?;
+        serde_json::to_string(&analysis).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -289,6 +314,8 @@ pub fn run() {
             live_open,
             live_reset,
             live_close,
+            live_song_finish,
+            live_song_analyze,
             midi_ports,
             midi_set_output,
             audio_load,

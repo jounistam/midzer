@@ -34,6 +34,8 @@ pub use track::backing_track;
 
 /// The sample rate everything is analysed at.
 pub const RATE: u32 = 22_050;
+/// The level envelope's frames a second.
+pub const ENVELOPE_FPS: usize = 100;
 /// Mirrors `MAX_SONG_BARS` in the engine.
 pub const MAX_BARS: usize = 512;
 const MAX_MELODY_NOTES: usize = 8192;
@@ -147,6 +149,11 @@ pub struct Analysis {
     pub stems_dir: Option<String>,
     /// Things the user should know about the result.
     pub warnings: Vec<String>,
+    /// The level, [`ENVELOPE_FPS`] a second, from −60 dBFS (0) to 0 dBFS (255):
+    /// enough to draw the song without its audio.
+    pub envelope: Vec<u8>,
+    /// Landmarks to recognise the song by (`midzer_hear::fingerprint`), as hash, frame pairs.
+    pub fingerprint: Vec<u32>,
 }
 
 /// Better sources than the mix, from stem separation.
@@ -173,6 +180,12 @@ pub fn analyze_file(bytes: Vec<u8>, progress: Progress) -> Result<Analysis, Stri
         analysis.warnings.push(format!("Only the first {} minutes were read.", decode::MAX_SECONDS / 60));
     }
     Ok(analysis)
+}
+
+/// Analyses a song heard live: 16-bit mono at [`RATE`], with no file to read a title from.
+pub fn analyze_heard(samples: &[i16], progress: Progress) -> Result<Analysis, String> {
+    let mix: Vec<f32> = samples.iter().map(|&s| s as f32 / 32768.0).collect();
+    analyze(&mix, Extras::default(), progress)
 }
 
 /// Analyses a mono mix at [`RATE`].
@@ -313,6 +326,7 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
             drums: t.drums,
         })
         .collect();
+    let fingerprint = midzer_hear::fingerprint(mix).into_iter().flat_map(|(h, t)| [h, t]).collect();
     progress(1.0, Step::Melody);
 
     Ok(Analysis {
@@ -331,7 +345,23 @@ pub fn analyze(mix: &[f32], extras: Extras, progress: Progress) -> Result<Analys
         tracks,
         stems_dir: None,
         warnings,
+        envelope: envelope(mix),
+        fingerprint,
     })
+}
+
+/// The level of each 10 ms, in dB from −60 (0) to 0 (255).
+fn envelope(mix: &[f32]) -> Vec<u8> {
+    // 220.5 samples a frame: the bounds are rounded so they don't drift.
+    let at = |k: usize| (k * RATE as usize / ENVELOPE_FPS).min(mix.len());
+    (0..(mix.len() * ENVELOPE_FPS).div_ceil(RATE as usize))
+        .map(|k| {
+            let c = &mix[at(k)..at(k + 1)];
+            let power = c.iter().map(|x| x * x).sum::<f32>() / c.len() as f32;
+            let db = 10.0 * power.max(1e-12).log10();
+            ((db + 60.0) / 60.0 * 255.0).clamp(0.0, 255.0).round() as u8
+        })
+        .collect()
 }
 
 /// Which beat (mod 4) the bars start on, by the downbeats' majority, and
@@ -396,5 +426,14 @@ mod tests {
         let waltz: Vec<f64> = (0..13).map(|b| beats[1 + 3 * b]).collect();
         assert!(bar_phase(&beats, &waltz).1, "three beats to the bar");
         assert_eq!(bar_phase(&beats, &[]), (0, false));
+    }
+
+    #[test]
+    fn the_envelope_spans_silence_to_full_scale() {
+        // Frames of 220, 221, 220… samples: silence, full scale, −40 dB.
+        let mut mix = vec![0.0f32; 220];
+        mix.extend((0..221).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }));
+        mix.extend(vec![0.01f32; 100]);
+        assert_eq!(envelope(&mix), vec![0, 255, 85]);
     }
 }

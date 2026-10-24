@@ -1,8 +1,17 @@
 import { describe, expect, it } from 'vitest';
+import { liveSongOf } from './engine';
 import { decodeInputCommand, frameTime } from './native';
 import { encodeCommand } from './protocol';
 
 describe('native host', () => {
+  it('reads a captured song as complete only when heard from start to end', () => {
+    expect(liveSongOf(null, 200, 3)).toEqual({ seconds: 200, complete: true });
+    expect(liveSongOf(null, 200, 1).complete).toBe(false);
+    expect(liveSongOf(null, 200, 2).complete).toBe(false);
+    const samples = new Int16Array(4);
+    expect(liveSongOf(samples, 1, 3).samples).toBe(samples);
+  });
+
   it('times frames against the frame being heard', () => {
     expect(frameTime(48_000 + 480, 48_000, 48_000, 1000)).toBeCloseTo(1010);
     expect(frameTime(47_520, 48_000, 48_000, 1000)).toBeCloseTo(990);

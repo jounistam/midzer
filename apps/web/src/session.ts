@@ -28,6 +28,7 @@ import {
   type ListenMode,
   type LiveChordSpan,
   type LiveDevice,
+  type LiveSongCapture,
   type LiveSource,
   type NativeMidi,
   type SectionRequest,
@@ -56,7 +57,8 @@ import { COUNT_IN_OPTIONS, countInPieces, type CountInChoice } from './drums/sta
 import { offsetToBeat, SYNC_TAPS, syncedOffset } from './playalong/sync';
 import { qwertyToNote } from './qwerty';
 import { isBuiltin, saveUserSong } from './songs/library';
-import { analyzeAudio, decodeRecording } from './songs/analyzeAudio';
+import { analyzeAudio, analyzeCapture, decodeRecording } from './songs/analyzeAudio';
+import { saveFingerprint } from './songs/fingerprints';
 import { songFromAnalysis, transcriptionMidi } from './songs/audio';
 import { Recorder } from './songs/recorder';
 import { loadRecording } from './songs/recordings';
@@ -89,6 +91,20 @@ export type LiveSourceState =
   /** It stopped by itself, e.g. the browser's "Stop sharing". */
   | { status: 'ended'; key: string }
   | { status: 'error'; key: string; message: string };
+
+/** A song learned from the live source, offered to keep. */
+export interface LearnedSong {
+  song: Song;
+  notes: string[];
+  fingerprint: Uint32Array;
+}
+
+/** Songs learned from the live source: the one being analysed, those offered (newest first), and why the last one failed. */
+export interface LiveLearning {
+  analysing: { fraction: number; seconds: number } | null;
+  offered: LearnedSong[];
+  error: string | null;
+}
 
 /** What the beat tracker says about the live source. */
 export interface LiveTracker {
@@ -193,6 +209,7 @@ interface SessionState {
   liveTracker: LiveTracker;
   /** The chord heard in the live source now, and the ones before it. */
   liveChord: ChordNow;
+  liveLearning: LiveLearning;
   /** How much a keys player playing along is asked to play; see ALONG_LEVELS. */
   alongLevel: AlongLevel;
   /** Inputs to play along with; names may be missing until audio input is allowed. */
@@ -384,6 +401,7 @@ export const useSession = create<SessionState>(() => ({
   liveSource: { status: 'none' },
   liveTracker: { locked: false, confidence: 0, level: 0 },
   liveChord: { current: null, before: [], next: null },
+  liveLearning: { analysing: null, offered: [], error: null },
   alongLevel: prefs.alongLevel,
   liveDevices: [],
   liveOffsets: prefs.liveOffsets,
@@ -447,6 +465,7 @@ export async function startAudio(): Promise<void> {
     }
     engine.onEvent(onEngineEvent);
     engine.onLiveChords(onLiveChords);
+    engine.onLiveSong(onLiveSong);
     const { bpm, volume, split, muted, style, idleMode, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers } = get();
     set({ outputLatencyMs: engine.outputLatencyMs });
     engine.send({ type: 'setBandDrums', mode: bandDrums });
@@ -1055,7 +1074,8 @@ export async function analyzeSongAgain(onProgress: (fraction: number, step: numb
   const analysis = await analyzeAudio(bytes, { stems: false, onProgress, signal });
   const current = get().song;
   if (signal?.aborted || current?.id !== song.id || !current.backing) return;
-  const { song: fresh, notes } = songFromAnalysis(analysis, current.title);
+  const { song: fresh, notes, fingerprint } = songFromAnalysis(analysis, current.title);
+  void saveFingerprint(song.id, fingerprint);
   const next: Song = {
     ...current,
     bpm: fresh.bpm,
@@ -1137,6 +1157,71 @@ function forgetLiveSong(): void {
   set({ liveChord: { current: null, before: [], next: null } });
   setAlongHints(new Map());
   resetLive();
+}
+
+// ---- Learning songs heard live ---------------------------------------------------
+
+/** At most this many learned songs wait to be kept. */
+const MAX_OFFERED = 5;
+/** The next song to analyse; a newer one replaces it. */
+let nextCapture: LiveSongCapture | null = null;
+let analysingCapture = false;
+
+/** Whether songs played along with can be learned here. */
+export function canLearnLiveSongs(): boolean {
+  return engine?.canLearnSongs ?? false;
+}
+
+/** Ends the live song here and learns it (the "Save this song" button). */
+export function saveLiveSong(): void {
+  engine?.finishLiveSong();
+}
+
+function onLiveSong(capture: LiveSongCapture): void {
+  nextCapture = capture;
+  if (!analysingCapture) void learnNext();
+}
+
+const learning = () => get().liveLearning;
+
+async function learnNext(): Promise<void> {
+  const capture = nextCapture;
+  nextCapture = null;
+  if (!capture) return;
+  analysingCapture = true;
+  const seconds = capture.seconds;
+  set({ liveLearning: { ...learning(), analysing: { fraction: 0, seconds }, error: null } });
+  try {
+    const analysis = await analyzeCapture(capture, {
+      onProgress: (fraction) => set({ liveLearning: { ...learning(), analysing: { fraction, seconds } } }),
+    });
+    const heardAt = Date.now() - seconds * 1000;
+    const when = new Date(heardAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const learned = songFromAnalysis(analysis, `Heard ${when}`, { complete: capture.complete, heardAt });
+    set({ liveLearning: { ...learning(), analysing: null, offered: [learned, ...learning().offered].slice(0, MAX_OFFERED) } });
+  } catch (e) {
+    set({ liveLearning: { ...learning(), analysing: null, error: e instanceof Error ? e.message : String(e) } });
+  } finally {
+    analysingCapture = false;
+    if (nextCapture) void learnNext();
+  }
+}
+
+/** Keeps a learned song in My songs, with its fingerprint. Resolves false if it could not be stored. */
+export async function keepLearnedSong(id: string): Promise<boolean> {
+  const learned = learning().offered.find((l) => l.song.id === id);
+  if (!learned || !(await saveUserSong(learned.song))) return false;
+  void saveFingerprint(id, learned.fingerprint);
+  dismissLearnedSong(id);
+  return true;
+}
+
+export function dismissLearnedSong(id: string): void {
+  set({ liveLearning: { ...learning(), offered: learning().offered.filter((l) => l.song.id !== id) } });
+}
+
+export function clearLearnError(): void {
+  set({ liveLearning: { ...learning(), error: null } });
 }
 
 /** Starts the live song over: the engine and the listener forget it and listen afresh. */

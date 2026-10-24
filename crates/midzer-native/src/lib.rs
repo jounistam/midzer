@@ -49,6 +49,9 @@ pub enum Update {
     /// predicted] per span, in engine frames, code root · 16 + quality or −1
     /// (see `midzer-hear`'s ffi).
     Chords { spans: Vec<f64>, heard_frame: f64 },
+    /// A song heard in the live source, waiting in [`NativeEngine::take_live_song`];
+    /// flags bit 0 heard from its start, bit 1 to its end.
+    LiveSong { seconds: f64, flags: u32 },
 }
 
 pub type UpdateFn = Box<dyn FnMut(Update) + Send>;
@@ -68,6 +71,9 @@ struct Shared {
     tap: ArrayQueue<hear::TapBlock>,
     /// Bumped whenever live audio opens or closes: the listener starts afresh.
     live_generation: AtomicU32,
+    /// Asks the listener to end the song being captured; the last song captured.
+    song_finish: AtomicBool,
+    live_song: Mutex<Option<midzer_hear::Capture>>,
     /// A freshly loaded synth for the audio thread, and old ones to drop elsewhere.
     synth_in: ArrayQueue<Box<Synth>>,
     synth_out: ArrayQueue<Box<Synth>>,
@@ -131,19 +137,19 @@ impl NativeEngine {
         let shared = ready_rx.recv().map_err(|_| "the audio thread stopped".to_string())??;
 
         let midi = Arc::new(Mutex::new(midi::Midi::new(shared.clone())));
-        let (chords_tx, chords_rx) = mpsc::channel();
+        let (heard_tx, heard_rx) = mpsc::channel();
         let forwarder = {
             let (shared, midi) = (shared.clone(), midi.clone());
             std::thread::Builder::new()
                 .name("midzer-forwarder".into())
-                .spawn(move || forward(shared, midi, chords_rx, on_update))
+                .spawn(move || forward(shared, midi, heard_rx, on_update))
                 .map_err(|e| e.to_string())?
         };
         let listener = {
             let shared = shared.clone();
             std::thread::Builder::new()
                 .name("midzer-listener".into())
-                .spawn(move || hear::listen(shared, chords_tx))
+                .spawn(move || hear::listen(shared, heard_tx))
                 .map_err(|e| e.to_string())?
         };
         // Give the first callback a moment to measure the latency.
@@ -212,8 +218,20 @@ impl NativeEngine {
         self.send(Command::LiveReset.encode());
     }
 
+    /// Stops following live audio; the song so far is offered as captured.
     pub fn close_live(&self) {
+        self.shared.song_finish.store(true, Ordering::Release);
         let _ = self.control.send(Control::CloseLive);
+    }
+
+    /// Ends the live song being captured here (see [`Update::LiveSong`]).
+    pub fn finish_live_song(&self) {
+        self.shared.song_finish.store(true, Ordering::Release);
+    }
+
+    /// The last song captured from the live source, once.
+    pub fn take_live_song(&self) -> Option<midzer_hear::Capture> {
+        self.shared.live_song.lock().ok()?.take()
     }
 
     pub fn midi_ports(&self) -> Ports {
@@ -238,7 +256,7 @@ impl Drop for NativeEngine {
 
 /// Moves events to the UI and MIDI out, drops replaced synths and rescans
 /// MIDI devices, until the engine stops.
-fn forward(shared: Arc<Shared>, midi: Arc<Mutex<midi::Midi>>, chords: mpsc::Receiver<Vec<f64>>, mut on_update: UpdateFn) {
+fn forward(shared: Arc<Shared>, midi: Arc<Mutex<midi::Midi>>, heard: mpsc::Receiver<hear::Listened>, mut on_update: UpdateFn) {
     let mut last_scan = Instant::now() - PORT_SCAN_EVERY;
     let mut words = Vec::new();
     let mut inputs = Vec::new();
@@ -266,8 +284,11 @@ fn forward(shared: Arc<Shared>, midi: Arc<Mutex<midi::Midi>>, chords: mpsc::Rece
         if !inputs.is_empty() {
             on_update(Update::Input { words: std::mem::take(&mut inputs) });
         }
-        while let Ok(spans) = chords.try_recv() {
-            on_update(Update::Chords { spans, heard_frame: shared.heard_frame() });
+        while let Ok(h) = heard.try_recv() {
+            on_update(match h {
+                hear::Listened::Chords(spans) => Update::Chords { spans, heard_frame: shared.heard_frame() },
+                hear::Listened::Song { seconds, flags } => Update::LiveSong { seconds, flags },
+            });
         }
         while shared.synth_out.pop().is_some() {}
         while shared.track_out.pop().is_some() {}

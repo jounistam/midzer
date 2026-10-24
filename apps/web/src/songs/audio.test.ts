@@ -27,6 +27,8 @@ function analysis(over: Partial<AudioAnalysis> = {}): AudioAnalysis {
     tracks: [],
     stemsDir: null,
     warnings: [],
+    envelope: [0, 200, 255],
+    fingerprint: [7, 0, 9, 3],
     ...over,
   };
 }
@@ -62,6 +64,17 @@ describe('songs from recordings', () => {
     expect(song.backing!.beatTimes[4]).toBeCloseTo(3);
     // Too short a map to play along with.
     expect(songFromAnalysis(analysis({ beatTimes: [0.5] }), 'file').song.backing).toBeUndefined();
+  });
+
+  it('keeps a song heard live with its beat map and level, without a recording', () => {
+    const { song, notes, fingerprint } = songFromAnalysis(analysis(), 'Heard', { complete: false, heardAt: 1000 });
+    expect(song.source).toBe('live');
+    expect(song.backing).toBeUndefined();
+    expect(song.heard).toMatchObject({ seconds: 10, complete: false, heardAt: 1000 });
+    expect(song.heard!.beatTimes).toHaveLength(13);
+    expect(song.heard!.envelope).toEqual(new Uint8Array([0, 200, 255]));
+    expect(fingerprint).toEqual(new Uint32Array([7, 0, 9, 3]));
+    expect(notes[0]).toContain('only part of the song');
   });
 
   it('exports the transcribed parts as MIDI on the beat grid', () => {

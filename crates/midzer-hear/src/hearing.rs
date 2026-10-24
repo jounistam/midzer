@@ -64,6 +64,14 @@ const SILENT_S: f64 = 2.5;
 const STEADY_RUNS: u32 = 3;
 /// Beats within this many seconds of the fitted grid count as on it.
 const ON_GRID_S: f64 = 0.035;
+/// A capture starts this long before the sound, ends this long after it,
+/// and is kept only if at least `CAPTURE_MIN_S` long; it holds at most
+/// `CAPTURE_MAX_S`. Quiet for `CLEAN_START_S` before the sound means the
+/// song was heard from its start.
+const PRE_ROLL_S: f64 = 0.5;
+const CAPTURE_MIN_S: f64 = 30.0;
+const CAPTURE_MAX_S: f64 = 15.0 * 60.0;
+const CLEAN_START_S: f64 = 0.25;
 
 /// How the listening runs; the defaults are what `examples/hear_eval.rs` found best.
 #[derive(Clone, Copy, Debug)]
@@ -119,6 +127,28 @@ pub struct ChordSpan {
     pub predicted: bool,
 }
 
+/// A song heard whole or in part, to analyse and keep (see [`Hearing::set_capture`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Capture {
+    /// The song at 22.05 kHz.
+    pub samples: Vec<i16>,
+    /// The engine frame of its first sample.
+    pub from: f64,
+    /// Heard from its start (quiet came before it), and to its end (quiet came after it).
+    pub clean_start: bool,
+    pub clean_end: bool,
+}
+
+impl Capture {
+    pub fn seconds(&self) -> f64 {
+        self.samples.len() as f64 / RATE
+    }
+
+    pub fn complete(&self) -> bool {
+        self.clean_start && self.clean_end
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Heard {
     Grid(Grid),
@@ -170,6 +200,10 @@ pub struct Hearing {
     power: f32,
     quiet: u64,
     heard: bool,
+    /// Whether songs are captured, the one being captured, and the last one ended.
+    capturing: bool,
+    capture: Option<Capture>,
+    captured: Option<Capture>,
 }
 
 impl Hearing {
@@ -198,6 +232,9 @@ impl Hearing {
             power: 0.0,
             quiet: 0,
             heard: false,
+            capturing: false,
+            capture: None,
+            captured: None,
         }
     }
 
@@ -220,7 +257,56 @@ impl Hearing {
         self.state = None;
         self.candidate = None;
         self.chords.clear();
+        self.power = 0.0;
+        self.quiet = 0;
         self.heard = false;
+        self.capture = None;
+    }
+
+    /// Captures the songs heard from now on (or stops, dropping the one
+    /// under way). Each ends at a silence or [`Hearing::finish`], and
+    /// [`Hearing::take_song`] hands it out.
+    pub fn set_capture(&mut self, on: bool) {
+        self.capturing = on;
+        if !on {
+            self.capture = None;
+        }
+    }
+
+    /// Ends the song being captured here; if the music goes on, a new capture starts at once.
+    pub fn finish(&mut self) {
+        self.end_capture(None);
+        if self.capturing && self.heard {
+            self.capture = Some(Capture { from: self.frame_of(self.total() as f64), ..Capture::default() });
+        }
+    }
+
+    /// The last song captured, if long enough to keep.
+    pub fn take_song(&mut self) -> Option<Capture> {
+        self.captured.take()
+    }
+
+    /// Ends the capture; `quiet` is how many of its last samples were silence (it ended cleanly).
+    fn end_capture(&mut self, quiet: Option<u64>) {
+        let Some(mut c) = self.capture.take() else { return };
+        // A capture that filled up missed the end.
+        if let Some(quiet) = quiet.filter(|_| c.samples.len() < (CAPTURE_MAX_S * RATE) as usize) {
+            let keep = (c.samples.len() as u64).saturating_sub(quiet) + (PRE_ROLL_S * RATE) as u64;
+            c.samples.truncate(keep as usize);
+            c.clean_end = true;
+        }
+        if c.seconds() >= CAPTURE_MIN_S {
+            self.captured = Some(c);
+        }
+    }
+
+    /// Adds the stream from sample `from` on to the capture.
+    fn add_to_capture(&mut self, from: u64) {
+        let Some(c) = self.capture.as_mut() else { return };
+        let room = ((CAPTURE_MAX_S * RATE) as usize).saturating_sub(c.samples.len());
+        let at = from.saturating_sub(self.audio_base) as usize;
+        let new = &self.audio[at.min(self.audio.len())..];
+        c.samples.extend(new.iter().take(room).map(|&x| (x.clamp(-1.0, 1.0) * 32767.0) as i16));
     }
 
     /// Forgets the song but not the stream: the audio so far, the grid, the
@@ -272,18 +358,33 @@ impl Hearing {
         self.expect = Some(frame + input.len() as u64);
         self.resampler.push(input, &mut out);
         let floor = 10f32.powf(SILENT_DB / 10.0);
-        for &x in &out {
+        // Where the sound began in this input, and the quiet before it.
+        let mut sound = None;
+        for (i, &x) in out.iter().enumerate() {
             self.power += (x * x - self.power) * (1.0 / (0.05 * RATE as f32));
             if self.power < floor {
                 self.quiet += 1;
             } else {
+                if !self.heard {
+                    sound = Some((i, self.quiet));
+                }
                 self.quiet = 0;
                 self.heard = true;
             }
         }
+        let start = self.total();
         self.audio.extend_from_slice(&out);
+        match sound {
+            Some((i, quiet)) if self.capturing && self.capture.is_none() => {
+                let at = (start + i as u64).saturating_sub((PRE_ROLL_S * RATE) as u64).max(self.audio_base);
+                self.capture = Some(Capture { from: self.frame_of(at as f64), clean_start: quiet as f64 >= CLEAN_START_S * RATE, ..Capture::default() });
+                self.add_to_capture(at);
+            }
+            _ => self.add_to_capture(start),
+        }
         if self.silent() && self.heard {
             // The song stopped; what comes next may be another.
+            self.end_capture(Some(self.quiet));
             self.forget();
         }
         if self.next_beat == 0 {
@@ -775,6 +876,67 @@ mod tests {
         listen(&mut hearing, &loud, at);
         let before = |c: &(f64, f64, Option<Chord>)| c.2.is_some() && hearing.frame_of(c.1) < at as f64;
         assert!(hearing.state.is_some() && !hearing.chords.is_empty() && !hearing.chords.iter().any(before));
+    }
+
+    /// Pushes without running the networks: capturing needs only the input.
+    fn feed(hearing: &mut Hearing, signal: &[f32], from: u64) -> u64 {
+        for (i, block) in signal.chunks(2048).enumerate() {
+            hearing.push(block, from + (i * 2048) as u64);
+        }
+        from + signal.len() as u64
+    }
+
+    #[test]
+    fn a_song_from_silence_to_silence_is_captured_whole() {
+        let mut hearing = Hearing::with_models(RATE as f32).unwrap();
+        hearing.set_capture(true);
+        let at = feed(&mut hearing, &vec![0.0; RATE as usize], 0);
+        let at = feed(&mut hearing, &song(35.0, 3.0), at);
+        let c = hearing.take_song().expect("a song");
+        assert!(c.complete());
+        // Half a second either side of the music, plus the level's fall after it.
+        assert!((36.0..36.6).contains(&c.seconds()), "{} s", c.seconds());
+        assert!((c.from - 0.5 * RATE).abs() < 2048.0, "from {}", c.from);
+        assert!(hearing.take_song().is_none());
+
+        // Opened mid-song: the start is missing.
+        hearing.reset();
+        feed(&mut hearing, &song(35.0, 3.0), at + 100_000);
+        let c = hearing.take_song().expect("a song");
+        assert!(!c.clean_start && c.clean_end);
+    }
+
+    #[test]
+    fn finishing_ends_the_capture_and_the_music_goes_on_in_a_new_one() {
+        let mut hearing = Hearing::with_models(RATE as f32).unwrap();
+        hearing.set_capture(true);
+        let music = song(66.0, 3.0);
+        let at = feed(&mut hearing, &vec![0.0; RATE as usize], 0);
+        let cut = (35.0 * RATE) as usize;
+        let at2 = feed(&mut hearing, &music[..cut], at);
+        hearing.finish();
+        let c = hearing.take_song().expect("the first part");
+        assert!(c.clean_start && !c.clean_end);
+        feed(&mut hearing, &music[cut..], at2);
+        let c = hearing.take_song().expect("the rest");
+        assert!(!c.clean_start && c.clean_end);
+        assert!((31.5..32.1).contains(&c.seconds()), "{} s", c.seconds());
+    }
+
+    #[test]
+    fn short_songs_a_reset_and_capture_off_keep_nothing() {
+        let mut hearing = Hearing::with_models(RATE as f32).unwrap();
+        hearing.set_capture(true);
+        let at = feed(&mut hearing, &song(10.0, 3.0), 0);
+        assert!(hearing.take_song().is_none(), "too short");
+        let music = song(40.0, 3.0);
+        let at = feed(&mut hearing, &music[..(35.0 * RATE) as usize], at);
+        hearing.reset();
+        feed(&mut hearing, &vec![0.0; 3 * RATE as usize], at);
+        assert!(hearing.take_song().is_none(), "reset drops it");
+        hearing.set_capture(false);
+        feed(&mut hearing, &music, at + 200_000);
+        assert!(hearing.take_song().is_none() && hearing.capture.is_none());
     }
 
     #[test]

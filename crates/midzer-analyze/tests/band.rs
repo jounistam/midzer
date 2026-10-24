@@ -95,6 +95,10 @@ fn reads_back_what_the_band_played() {
         let expected: Vec<String> = (0..found.len()).map(|b| chart[b % 4].to_string()).collect();
         let right = found.iter().zip(&expected).take(16).filter(|(f, e)| f == e).count();
         assert!(right >= 14, "style {style}: {found:?}");
+        // Enough to draw and recognise it by, without the audio.
+        assert_eq!(a.envelope.len(), (a.duration * 100.0).ceil() as usize);
+        assert!(a.envelope.iter().any(|&l| l > 128), "style {style}: never loud");
+        assert!(a.fingerprint.len() / 2 > a.duration as usize * 10 && a.fingerprint.len().is_multiple_of(2), "style {style}: {} landmarks", a.fingerprint.len() / 2);
     }
 }
 

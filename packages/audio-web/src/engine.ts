@@ -52,6 +52,31 @@ export function decodeChordSpans(spans: ArrayLike<number>, timeOfFrame: (frame: 
   return out;
 }
 
+/**
+ * A song heard in the live source, from a silence to a silence (or part of
+ * one), for the app to analyse and keep. Live sources are captured while
+ * open; a song ends at a silence, with `finishLiveSong`, or when the source closes.
+ */
+export interface LiveSongCapture {
+  seconds: number;
+  /** Heard from its start to its end; otherwise only part of the song. */
+  complete: boolean;
+  /** Mono 16-bit samples at 22.05 kHz, in the browser; the desktop app keeps them natively (see `analyzeLiveSong`). */
+  samples?: Int16Array;
+}
+
+export type LiveSongListener = (song: LiveSongCapture) => void;
+
+/** The rate captured songs are in. */
+export const LIVE_SONG_RATE = 22_050;
+
+/** A captured song as the listener sends it. */
+export function liveSongOf(samples: Int16Array | null, seconds: number, flags: number): LiveSongCapture {
+  const song: LiveSongCapture = { seconds, complete: (flags & 3) === 3 };
+  if (samples) song.samples = samples;
+  return song;
+}
+
 export interface MicOptions {
   /** Off with headphones: echo cancellation blurs pitch, but with speakers it keeps the band out. */
   echoCancellation: boolean;
@@ -96,6 +121,12 @@ export interface EngineHandle {
   onEvent(listener: EventListener): () => void;
   /** Chords the listener hears in the live source; returns an unsubscribe function. Needs cross-origin isolation in the browser. */
   onLiveChords(listener: LiveChordListener): () => void;
+  /** Songs heard in live sources; returns an unsubscribe function. */
+  onLiveSong(listener: LiveSongListener): () => void;
+  /** Whether live songs are captured at all (the listener runs; in the browser it needs cross-origin isolation). */
+  readonly canLearnSongs: boolean;
+  /** Ends the live song being captured here, so `onLiveSong` gets it now. */
+  finishLiveSong(): void;
   /** Loads an SF2 file; resolves false if it could not be parsed. */
   loadSoundFont(bytes: ArrayBuffer): Promise<boolean>;
   /** Hands the engine a backing track (its sample arrays are moved), or frees it with null. Rejects if it can't be read. */
@@ -159,6 +190,7 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
 
   const listeners = new Set<EventListener>();
   const chordListeners = new Set<LiveChordListener>();
+  const songListeners = new Set<LiveSongListener>();
   const sampleRate = context.sampleRate;
 
   /** Maps an AudioContext frame to the performance.now() time it is heard. */
@@ -224,12 +256,16 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
         const offset = tap.frameOffset;
         const spans = decodeChordSpans(msg.spans, (frame) => timeOfFrame(frame + offset));
         for (const listener of chordListeners) listener(spans);
+      } else if (msg.type === 'song') {
+        const song = liveSongOf(msg.samples, msg.samples.length / LIVE_SONG_RATE, msg.flags);
+        for (const listener of songListeners) listener(song);
       } else {
         console.warn(`midzer: the listener stopped: ${msg.message}`);
         tap.enabled = false;
       }
     };
     hearing.postMessage({ type: 'start', wasmUrl: hearUrl, tap: tap.buffer, sampleRate } satisfies HearRequest);
+    hearing.postMessage({ type: 'capture', on: true } satisfies HearRequest);
   };
 
   const { outputLatency = 0, baseLatency = 0 } = context;
@@ -245,6 +281,14 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
     onLiveChords(listener) {
       chordListeners.add(listener);
       return () => chordListeners.delete(listener);
+    },
+    onLiveSong(listener) {
+      songListeners.add(listener);
+      return () => songListeners.delete(listener);
+    },
+    canLearnSongs: tap !== null,
+    finishLiveSong() {
+      hearing?.postMessage({ type: 'finish' } satisfies HearRequest);
     },
     loadSoundFont(bytes) {
       return new Promise((resolve) => {
@@ -316,6 +360,8 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
         if (!open) return;
         open = false;
         if (tap) tap.enabled = false;
+        // The song so far is offered before the listener forgets it.
+        hearing?.postMessage({ type: 'finish' } satisfies HearRequest);
         hearing?.postMessage({ type: 'reset' } satisfies HearRequest);
         input.disconnect();
         for (const track of stream.getTracks()) track.stop();
@@ -336,6 +382,7 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
       hearing?.terminate();
       listeners.clear();
       chordListeners.clear();
+      songListeners.clear();
       node.disconnect();
       await context.close();
     },

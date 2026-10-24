@@ -15,12 +15,17 @@ import { useStageHeight } from '../components/stageHeight';
 import {
   cancelLiveSync,
   canCaptureTab,
+  canLearnLiveSongs,
+  clearLearnError,
+  dismissLearnedSong,
   goTo,
+  keepLearnedSong,
   liveDownbeat,
   liveSourceKey,
   liveTempo,
   refreshLiveDevices,
   resetLiveSource,
+  saveLiveSong,
   setAlongLevel,
   setInstrument,
   setMissSound,
@@ -49,6 +54,7 @@ export function PlayAlong() {
           <AlongStage />
           {!drums && <AlongChords split={split} />}
           <AlongTiming />
+          <LearnedSongs />
           <LoadingStatus />
         </div>
         <aside className="panel control-panel">
@@ -307,7 +313,74 @@ function deviceLabel(d: LiveDevice): string {
   return d.loopback ? `System audio · ${d.name}` : d.name;
 }
 
-/** When the beat found is off: the 1 in the wrong place, or twice or half the tempo; or start the song over. */
+const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.round(seconds % 60)).padStart(2, '0')}`;
+
+/**
+ * Songs heard while playing along, learned from start to end (a silence
+ * either side) or up to "Save this song": the one being read, then each
+ * offered to keep in My songs. Only the beat map, chords and a fingerprint
+ * are kept, never the audio.
+ */
+function LearnedSongs() {
+  const { analysing, offered, error } = useSession((s) => s.liveLearning);
+  const [kept, setKept] = useState<string | null>(null);
+  if (!analysing && offered.length === 0 && !error && !kept) return null;
+  const keep = async (id: string, title: string) => {
+    setKept((await keepLearnedSong(id)) ? `Kept “${title}” in My songs.` : 'It could not be kept on this device.');
+  };
+  return (
+    <section className="panel along-learned" aria-live="polite" data-testid="along-learned">
+      <p className="eyebrow">Songs heard</p>
+      {analysing && (
+        <div className="status-line" role="status">
+          <span>Learning the song heard ({clock(analysing.seconds)})… {Math.round(analysing.fraction * 100)}%</span>
+          <span className="progress" aria-hidden>
+            <span style={{ width: `${Math.round(analysing.fraction * 100)}%` }} />
+          </span>
+        </div>
+      )}
+      {offered.map(({ song }) => (
+        <div key={song.id} className="learned-song">
+          <div className="learned-info">
+            <span className="learned-title">{song.title}</span>
+            <span className="learned-meta">
+              {clock(song.heard?.seconds ?? 0)} · {song.bpm} BPM · {song.bars.length} bars
+              {song.heard && !song.heard.complete && (
+                <span className="badge" title="Heard from the middle, or saved before it ended">
+                  partial
+                </span>
+              )}
+            </span>
+          </div>
+          <button className="btn btn-secondary" onClick={() => void keep(song.id, song.title)}>
+            Keep
+          </button>
+          <button className="btn btn-ghost" onClick={() => dismissLearnedSong(song.id)}>
+            Dismiss
+          </button>
+        </div>
+      ))}
+      {kept && offered.length === 0 && !analysing && (
+        <p className="status-line" role="status">
+          {kept}
+          <button className="btn btn-ghost" onClick={() => setKept(null)}>
+            OK
+          </button>
+        </p>
+      )}
+      {error && (
+        <p className="status-line error" role="alert">
+          The song heard could not be learned: {error}
+          <button className="btn btn-ghost" onClick={clearLearnError}>
+            OK
+          </button>
+        </p>
+      )}
+    </section>
+  );
+}
+
+/** When the beat found is off: the 1 in the wrong place, or twice or half the tempo; or start the song over, or save it. */
 function BeatFixes() {
   const on = useSession((s) => s.liveSource.status === 'on');
   const locked = useSession((s) => s.liveSource.status === 'on' && s.liveTracker.locked);
@@ -328,6 +401,11 @@ function BeatFixes() {
       <button className="btn btn-ghost" disabled={!on} onClick={resetLiveSource} title="Forget the beat and chords heard and listen afresh, as when a new song starts">
         Start over
       </button>
+      {canLearnLiveSongs() && (
+        <button className="btn btn-ghost" disabled={!on} onClick={saveLiveSong} title="Learn the song heard so far now; songs are also learned by themselves when they end in a silence">
+          Save this song
+        </button>
+      )}
     </div>
   );
 }

@@ -48,4 +48,19 @@ describe('my songs', () => {
     await lib.deleteUserSong('rec');
     expect(await recordings.loadRecording('rec')).toBeNull();
   });
+
+  it('keeps a song heard live with its fingerprint, and deletes them together', async () => {
+    const lib = await import('./library');
+    const prints = await import('./fingerprints');
+    const heard = { beatTimes: [0.5, 1, 1.5], seconds: 40, complete: true, envelope: new Uint8Array([1, 2]), heardAt: 5 };
+    await lib.saveUserSong({ ...song('live'), source: 'live', heard });
+    await lib.saveUserSong({ ...song('odd'), source: 'live', heard: { ...heard, beatTimes: [2, 1], envelope: [1] as unknown as Uint8Array } });
+    await prints.saveFingerprint('live', new Uint32Array([1, 0, 2, 4]));
+    const list = await lib.loadUserSongs();
+    expect(list.find((s) => s.id === 'live')).toMatchObject({ source: 'live', heard });
+    expect(list.find((s) => s.id === 'odd')!.heard).toBeUndefined();
+    expect(await prints.loadFingerprint('live')).toEqual(new Uint32Array([1, 0, 2, 4]));
+    await lib.deleteUserSong('live');
+    expect(await prints.loadFingerprint('live')).toBeNull();
+  });
 });

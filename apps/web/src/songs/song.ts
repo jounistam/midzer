@@ -37,7 +37,7 @@ export interface Bar {
   lyric?: string;
 }
 
-export type SongSource = 'builtin' | 'user' | 'chordpro' | 'midi' | 'audio';
+export type SongSource = 'builtin' | 'user' | 'chordpro' | 'midi' | 'audio' | 'live';
 
 export interface Song {
   id: string;
@@ -53,6 +53,8 @@ export interface Song {
   transcription?: AnalysedTrack[];
   /** The recording the song was read from, to play along with (kept in storage/db under the song's id). */
   backing?: SongBacking;
+  /** How the chart lines up with the song as it was heard live; no recording is kept. */
+  heard?: SongHeard;
   source: SongSource;
 }
 
@@ -73,6 +75,20 @@ export interface SongBacking {
   seconds: number;
   /** Where the desktop app saved the separated instruments, if it did. */
   stemsDir?: string;
+}
+
+/** A song learned from live audio: its beat map, and enough to draw it without the audio. */
+export interface SongHeard {
+  /** When each chart beat was heard, in seconds from the start of what was captured, plus the end of the last bar. */
+  beatTimes: number[];
+  /** How long the capture is, in seconds. */
+  seconds: number;
+  /** Heard from its start to its end; otherwise only part of the song. */
+  complete: boolean;
+  /** The level, 100 a second, from −60 dBFS (0) to 0 dBFS (255). */
+  envelope: Uint8Array;
+  /** When it was heard, in ms since 1970. */
+  heardAt: number;
 }
 
 const TAGS: Record<string, SongSection | 'fill'> = {

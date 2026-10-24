@@ -2024,6 +2024,44 @@ code {
 
 /* ---- Play along with live audio --------------------------------------------- */
 
+.along-learned {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-6);
+}
+
+.learned-song {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.learned-info {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  flex: 1;
+  min-width: 0;
+}
+
+.learned-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.learned-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
 .jam-stage .along-strip {
   flex: none;
   display: grid;

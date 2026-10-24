@@ -1,14 +1,15 @@
 //! The listening thread: runs `midzer-hear` over the live source while it is
 //! followed. The audio callback hands it blocks tagged with their engine
 //! frames; its beat grids go to the engine as `LiveGuide` commands and its
-//! chords to the forwarder, for the UI.
+//! chords to the forwarder, for the UI. Each song it captures waits in
+//! `Shared::live_song` to be analysed, and the forwarder tells the UI.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use midzer_core::{Command, Quality};
-use midzer_hear::{Heard, Hearing};
+use midzer_hear::{Capture, Heard, Hearing};
 
 use crate::Shared;
 
@@ -34,12 +35,40 @@ impl TapBlock {
     }
 }
 
-pub(crate) fn listen(shared: Arc<Shared>, chords: mpsc::Sender<Vec<f64>>) {
+/// What the listener tells the UI, through the forwarder.
+pub(crate) enum Listened {
+    /// Chord spans, as in `Update::Chords`.
+    Chords(Vec<f64>),
+    /// A song captured, now in `Shared::live_song`.
+    Song { seconds: f64, flags: u32 },
+}
+
+fn offer(shared: &Shared, out: &mpsc::Sender<Listened>, song: Capture) {
+    let (seconds, flags) = (song.seconds(), song.clean_start as u32 | (song.clean_end as u32) << 1);
+    if let Ok(mut slot) = shared.live_song.lock() {
+        *slot = Some(song);
+        let _ = out.send(Listened::Song { seconds, flags });
+    }
+}
+
+pub(crate) fn listen(shared: Arc<Shared>, out: mpsc::Sender<Listened>) {
     let mut hearing: Option<Hearing> = None;
     let mut generation = shared.live_generation.load(Ordering::Acquire);
     let mut run: Vec<f32> = Vec::new();
     let mut run_start = 0u64;
     while shared.running.load(Ordering::Acquire) {
+        // Before a reset: closing the source ends the song first.
+        if shared.song_finish.swap(false, Ordering::AcqRel)
+            && let Some(h) = hearing.as_mut()
+        {
+            while let Some(block) = shared.tap.pop() {
+                h.push(&block.samples[..block.len as usize], block.frame);
+            }
+            h.finish();
+            if let Some(song) = h.take_song() {
+                offer(&shared, &out, song);
+            }
+        }
         let now = shared.live_generation.load(Ordering::Acquire);
         if now != generation {
             generation = now;
@@ -56,7 +85,10 @@ pub(crate) fn listen(shared: Arc<Shared>, chords: mpsc::Sender<Vec<f64>>) {
         let h = match hearing.as_mut() {
             Some(h) => h,
             None => match Hearing::with_models(shared.sample_rate as f32) {
-                Ok(h) => hearing.insert(h),
+                Ok(mut h) => {
+                    h.set_capture(true);
+                    hearing.insert(h)
+                }
                 Err(e) => {
                     eprintln!("midzer: the listener did not load: {e}");
                     return;
@@ -90,9 +122,12 @@ pub(crate) fn listen(shared: Arc<Shared>, chords: mpsc::Sender<Vec<f64>>) {
                         [s.from, s.to, code, s.predicted as u8 as f64]
                     })
                     .collect();
-                let _ = chords.send(flat);
+                let _ = out.send(Listened::Chords(flat));
             }
             None => std::thread::sleep(POLL),
+        }
+        if let Some(song) = h.take_song() {
+            offer(&shared, &out, song);
         }
     }
 }

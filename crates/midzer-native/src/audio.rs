@@ -2,7 +2,7 @@
 //! input callbacks feed it the microphone and the live source.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -125,6 +125,8 @@ fn open_output(host: &cpal::Host) -> Result<(Arc<Shared>, Stream), String> {
         live_open: AtomicBool::new(false),
         tap: ArrayQueue::new(crate::hear::TAP_BLOCKS),
         live_generation: AtomicU32::new(0),
+        song_finish: AtomicBool::new(false),
+        live_song: Mutex::new(None),
         synth_in: ArrayQueue::new(1),
         synth_out: ArrayQueue::new(4),
         track_in: ArrayQueue::new(1),

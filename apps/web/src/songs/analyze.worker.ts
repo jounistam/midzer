@@ -1,12 +1,13 @@
 // Runs the recording analysis (crates/midzer-analyze, built to
-// public/wasm/analyze.wasm) off the main thread, or decodes a recording to
-// play along with. One worker per job: it is terminated afterwards, which
+// public/wasm/analyze.wasm) off the main thread, or a song heard live, or
+// decodes a recording to play along with. One worker per job: it is terminated afterwards, which
 // frees the memory the job needed.
 
 interface Exports {
   memory: WebAssembly.Memory;
   mza_alloc(len: number): number;
   mza_analyze(ptr: number, len: number): number;
+  mza_analyze_heard(ptr: number, len: number): number;
   mza_result_ptr(): number;
   mza_result_len(): number;
   mza_track(ptr: number, len: number, rate: number): number;
@@ -14,10 +15,15 @@ interface Exports {
   mza_samples_len(): number;
 }
 
-/** Analyse the file, or with `rate` decode it as interleaved stereo at that rate. */
+/**
+ * Analyse the file, or with `rate` decode it as interleaved stereo at that
+ * rate, or with `heard` analyse a song heard live (`bytes` are then 16-bit
+ * mono samples at 22.05 kHz).
+ */
 export interface WorkerJob {
   bytes: ArrayBuffer;
   rate?: number;
+  heard?: boolean;
 }
 
 export type WorkerReply =
@@ -43,7 +49,7 @@ onmessage = async (e: MessageEvent<WorkerJob>) => {
       postMessage({ type: 'samples', samples } satisfies WorkerReply, { transfer: [samples.buffer] });
       return;
     }
-    const ok = x.mza_analyze(ptr, bytes.length);
+    const ok = e.data.heard ? x.mza_analyze_heard(ptr, bytes.length) : x.mza_analyze(ptr, bytes.length);
     const text = result();
     post(ok ? { type: 'done', json: text } : { type: 'error', message: text });
   } catch (err) {

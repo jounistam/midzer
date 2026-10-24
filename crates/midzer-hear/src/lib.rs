@@ -16,6 +16,7 @@
 pub mod beat_this;
 pub mod btc;
 pub mod cqt;
+pub mod fingerprint;
 #[cfg(target_arch = "wasm32")]
 mod ffi;
 pub mod hearing;
@@ -27,7 +28,8 @@ pub mod resample;
 
 pub use beat_this::BeatThis;
 pub use btc::Btc;
-pub use hearing::{ChordSpan, Grid, Heard, Hearing, Settings, chord_over};
+pub use fingerprint::{Landmark, fingerprint};
+pub use hearing::{Capture, ChordSpan, Grid, Heard, Hearing, Settings, chord_over};
 pub use offline::{SongHeard, TimedChord, hear_beats, hear_chords, hear_song};
 
 /// The weights, as converted.

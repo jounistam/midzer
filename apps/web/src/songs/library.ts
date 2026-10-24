@@ -6,8 +6,9 @@ import { store } from '../storage/db';
 import type { AnalysedTrack } from './audio';
 import { BUILTIN_SONGS } from './builtin';
 import type { MelodyNote } from './melody';
+import { deleteFingerprint } from './fingerprints';
 import { deleteRecording } from './recordings';
-import { BEATS_PER_BAR, MAX_TRACK_BEATS, type Bar, type Song, type SongBacking, type SongSection } from './song';
+import { BEATS_PER_BAR, MAX_TRACK_BEATS, type Bar, type Song, type SongBacking, type SongHeard, type SongSection, type SongSource } from './song';
 
 const LEGACY_KEY = 'midzer.songs';
 const MAX_MELODY_NOTES = 8192;
@@ -20,6 +21,7 @@ interface Saved {
 
 const songs = store<Saved>('songs');
 const SECTIONS: SongSection[] = ['intro', 'A', 'B', 'C', 'ending'];
+const SOURCES: SongSource[] = ['chordpro', 'midi', 'audio', 'live'];
 
 /** Keeps only well-formed songs, so a damaged entry can't break the app. */
 function sanitize(value: unknown): Song | null {
@@ -42,19 +44,38 @@ function sanitize(value: unknown): Song | null {
     style: Number.isInteger(s.style) && STYLES[s.style!] ? s.style! : 0,
     bars,
     melody: Array.isArray(s.melody) ? sanitizeMelody(s.melody) : undefined,
-    source: s.source === 'chordpro' || s.source === 'midi' || s.source === 'audio' ? s.source : 'user',
+    source: s.source && SOURCES.includes(s.source) ? s.source : 'user',
     transcription: Array.isArray(s.transcription) ? sanitizeTracks(s.transcription) : undefined,
     backing: sanitizeBacking(s.backing),
+    heard: sanitizeHeard(s.heard),
   };
+}
+
+/** A beat map's times, if well-formed: at least two, only ever moving forward. */
+function beatMap(beatTimes: unknown): number[] | undefined {
+  if (!Array.isArray(beatTimes)) return undefined;
+  const times = beatTimes.slice(0, MAX_TRACK_BEATS);
+  return times.length >= 2 && times.every((t, i) => typeof t === 'number' && t >= 0 && (i === 0 || t > times[i - 1]!)) ? times : undefined;
 }
 
 function sanitizeBacking(value: unknown): SongBacking | undefined {
   const { beatTimes, seconds, stemsDir } = (value ?? {}) as Partial<SongBacking>;
-  if (!Array.isArray(beatTimes) || typeof seconds !== 'number' || !(seconds > 0)) return undefined;
-  const times = beatTimes.slice(0, MAX_TRACK_BEATS);
-  // Beat times only ever move forward.
-  if (times.length < 2 || !times.every((t, i) => typeof t === 'number' && t >= 0 && (i === 0 || t > times[i - 1]!))) return undefined;
+  const times = beatMap(beatTimes);
+  if (!times || typeof seconds !== 'number' || !(seconds > 0)) return undefined;
   return typeof stemsDir === 'string' ? { beatTimes: times, seconds, stemsDir } : { beatTimes: times, seconds };
+}
+
+function sanitizeHeard(value: unknown): SongHeard | undefined {
+  const { beatTimes, seconds, complete, envelope, heardAt } = (value ?? {}) as Partial<SongHeard>;
+  const times = beatMap(beatTimes);
+  if (!times || typeof seconds !== 'number' || !(seconds > 0)) return undefined;
+  return {
+    beatTimes: times,
+    seconds,
+    complete: complete === true,
+    envelope: envelope instanceof Uint8Array ? envelope : new Uint8Array(0),
+    heardAt: typeof heardAt === 'number' ? heardAt : 0,
+  };
 }
 
 function sanitizeTracks(tracks: unknown[]): AnalysedTrack[] | undefined {
@@ -131,6 +152,7 @@ export async function saveUserSong(song: Song): Promise<boolean> {
 
 export async function deleteUserSong(id: string): Promise<void> {
   void deleteRecording(id);
+  void deleteFingerprint(id);
   try {
     await songs.delete(id);
   } catch {

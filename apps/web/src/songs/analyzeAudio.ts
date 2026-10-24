@@ -1,7 +1,7 @@
 // Analyses a recording where it runs best: in a worker (wasm) in the
 // browser, natively in the desktop app, which can also separate the stems.
 
-import { isNativeHost } from '@midzer/audio-web';
+import { isNativeHost, type LiveSongCapture } from '@midzer/audio-web';
 import type { AudioAnalysis } from './audio';
 import type { WorkerJob, WorkerReply } from './analyze.worker';
 
@@ -21,7 +21,20 @@ export async function analyzeAudio(bytes: Uint8Array, options: AnalyzeOptions): 
     const json = await analyzeNative(bytes, options.stems, options.onProgress, options.signal);
     return JSON.parse(json) as AudioAnalysis;
   }
-  const reply = await runWorker(bytes, undefined, options.onProgress, options.signal);
+  const reply = await runWorker(bytes, {}, options.onProgress, options.signal);
+  if (reply.type !== 'done') throw new Error('The analysis stopped.');
+  return JSON.parse(reply.json) as AudioAnalysis;
+}
+
+/** Analyses a song heard live (see `onLiveSong`): in a worker in the browser, natively where the desktop app kept it. */
+export async function analyzeCapture(capture: LiveSongCapture, options: Omit<AnalyzeOptions, 'stems'>): Promise<AudioAnalysis> {
+  if (isNativeHost()) {
+    const { analyzeLiveSong } = await import('@midzer/audio-web/native');
+    return JSON.parse(await analyzeLiveSong(options.onProgress, options.signal)) as AudioAnalysis;
+  }
+  if (!capture.samples) throw new Error('The song heard is no longer kept.');
+  const s = capture.samples;
+  const reply = await runWorker(new Uint8Array(s.buffer, s.byteOffset, s.byteLength), { heard: true }, options.onProgress, options.signal);
   if (reply.type !== 'done') throw new Error('The analysis stopped.');
   return JSON.parse(reply.json) as AudioAnalysis;
 }
@@ -32,14 +45,14 @@ export async function analyzeAudio(bytes: Uint8Array, options: AnalyzeOptions): 
  * Interleaved stereo at `rate`.
  */
 export async function decodeRecording(bytes: Uint8Array, rate: number, signal?: AbortSignal): Promise<Int16Array> {
-  const reply = await runWorker(bytes, rate, () => {}, signal);
+  const reply = await runWorker(bytes, { rate }, () => {}, signal);
   if (reply.type !== 'samples') throw new Error('The recording could not be read.');
   return reply.samples;
 }
 
 function runWorker(
   bytes: Uint8Array,
-  rate: number | undefined,
+  job: Omit<WorkerJob, 'bytes'>,
   onProgress: (fraction: number, step: number) => void,
   signal?: AbortSignal,
 ): Promise<WorkerReply> {
@@ -54,6 +67,6 @@ function runWorker(
       else resolve(reply);
     };
     const copy = bytes.slice().buffer;
-    worker.postMessage({ bytes: copy, rate } satisfies WorkerJob, [copy]);
+    worker.postMessage({ ...job, bytes: copy } satisfies WorkerJob, [copy]);
   }).finally(() => worker.terminate());
 }
