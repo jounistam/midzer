@@ -37,6 +37,7 @@ use crate::drums::Piece;
 use crate::engine::PLAYER_CHANNEL;
 use crate::event::{CallPhase, EngineEvent, EventBuffer, PLAYER_DRUM_CHANNEL};
 use crate::style::{PPQ, TICKS_PER_BAR};
+use crate::taps::{Taps, energy_of, follow};
 
 /// The highest level the UI may ask for.
 pub const MAX_SOLO_LEVEL: u8 = 5;
@@ -45,11 +46,6 @@ pub const MAX_KIT_LEVEL: u8 = 4;
 /// The most a lead may be, in ms (see [`Solo::set_level`]).
 pub const MAX_LEAD_MS: f32 = 500.0;
 
-/// Taps per beat counted at most.
-const MAX_RATE: f64 = 4.0;
-/// How fast the energy follows the taps, up and down, in beats.
-const RISE_BEATS: f64 = 0.25;
-const FALL_BEATS: f64 = 0.75;
 /// Below this energy the solo is resting.
 const SILENT: f32 = 0.06;
 /// A tap after this many beats without a note sounds at once instead of waiting for the grid.
@@ -71,8 +67,6 @@ const STEER_LOW: f32 = -5.0;
 const STEER_HIGH: f32 = 7.0;
 /// Level 3 fills only this long after the player's last note.
 const FILL_AFTER_BEATS: f64 = 0.5;
-/// Notes this close together are one chord, not faster playing.
-const CHORD_BEATS: f64 = 0.1;
 /// A long note's vibrato starts this far in and reaches its depth (CC1) this much later.
 const VIBRATO_AFTER_BEATS: f64 = 0.5;
 const VIBRATO_BEATS: f64 = 1.0;
@@ -154,7 +148,7 @@ pub struct Grid {
 
 impl Grid {
     /// The frame of sixteenth `q` (four per beat, counted like the beats).
-    fn frame(&self, q: i64) -> f64 {
+    pub(crate) fn frame(&self, q: i64) -> f64 {
         self.at + (q as f64 / 4.0 - self.index as f64) * self.period
     }
 
@@ -162,7 +156,7 @@ impl Grid {
         (self.index as f64 + (frame - self.at) / self.period) * 4.0
     }
 
-    fn beat_in_bar(&self, q: i64) -> i64 {
+    pub(crate) fn beat_in_bar(&self, q: i64) -> i64 {
         (q.div_euclid(4) - self.one).rem_euclid(4)
     }
 }
@@ -184,11 +178,8 @@ pub struct Solo {
     tonic: u8,
     scale: u16,
     chord: u16,
-    /// Taps per beat, smoothed, and the frame of the last tap.
-    rate: f64,
-    last_tap: Option<u64>,
-    /// The taps' velocity, smoothed.
-    touch: f32,
+    /// How fast and how hard the player taps.
+    taps: Taps,
     energy: f32,
     /// The driving key held, and since when.
     held: Option<(u8, u64)>,
@@ -269,9 +260,7 @@ impl Solo {
             tonic: 0,
             scale: DEFAULT_SCALE,
             chord: 0,
-            rate: 0.0,
-            last_tap: None,
-            touch: 0.0,
+            taps: Taps::default(),
             energy: 0.0,
             held: None,
             long: Long::None,
@@ -418,7 +407,7 @@ impl Solo {
         self.tap(velocity, now, grid);
         if (now as f64 - self.last_note) / grid.period > PICKUP_AFTER_BEATS {
             // Straight away, so the tap is heard to start it.
-            self.energy = self.energy.max(energy_of(self.rate));
+            self.energy = self.energy.max(energy_of(self.taps.rate));
             self.phrase_left = 0;
             self.rest_left = 0;
             let key = self.pick(true);
@@ -465,7 +454,7 @@ impl Solo {
         }
         if (now as f64 - self.last_note) / grid.period > PICKUP_AFTER_BEATS {
             // Straight away, so the tap is heard to start it.
-            self.energy = self.energy.max(energy_of(self.rate));
+            self.energy = self.energy.max(energy_of(self.taps.rate));
             let velocity = self.velocity(0);
             self.hit(key, velocity, now as f64, now, false, out);
             self.last_note = now as f64;
@@ -490,16 +479,8 @@ impl Solo {
 
     /// Counts a tap (or a note of the player's) towards the rate and the touch.
     fn tap(&mut self, velocity: u8, now: u64, grid: Grid) {
-        let since = self.last_tap.map(|last| (now - last) as f64 / grid.period);
-        self.rate = match since {
-            // A chord's notes are one tap.
-            Some(dt) if dt < CHORD_BEATS && self.level >= OWN_NOTES_FROM => self.rate,
-            Some(dt) if dt < self.gap() => 0.5 * self.rate + 0.5 * (1.0 / dt.max(1.0 / MAX_RATE)),
-            // The first tap, or the first after a while: eighths to start with.
-            _ => 1.0,
-        };
-        self.last_tap = Some(now);
-        self.touch = if since.is_some() { 0.6 * self.touch + 0.4 * velocity as f32 } else { velocity as f32 };
+        // A chord's notes are one tap once the player plays the notes.
+        self.taps.tap(velocity, now, grid.period, self.level >= OWN_NOTES_FROM);
     }
 
     /// Levels 3–5: the player's own note, snapped to the scale below level 5, sounding at once.
@@ -534,7 +515,7 @@ impl Solo {
         }
         if self.own_held == 0 {
             // The solo carries on from the note let go.
-            self.last_tap = self.last_tap.map(|_| now);
+            self.taps.last_tap = self.taps.last_tap.map(|_| now);
         }
     }
 
@@ -573,7 +554,7 @@ impl Solo {
             }
             if self.long != Long::None {
                 // The solo carries on from here as if just tapped.
-                self.last_tap = Some(now);
+                self.taps.last_tap = Some(now);
             }
             self.long = Long::None;
         }
@@ -594,8 +575,7 @@ impl Solo {
         self.steer = 0;
         self.held = None;
         self.long = Long::None;
-        self.last_tap = None;
-        self.rate = 0.0;
+        self.taps.clear();
         self.energy = 0.0;
         self.next = None;
         self.phrase_left = 0;
@@ -696,14 +676,9 @@ impl Solo {
         }
     }
 
-    /// How many beats may pass between taps before the solo winds down.
-    fn gap(&self) -> f64 {
-        1.25 / self.rate.max(0.25) + 0.5
-    }
-
     /// Whether the taps still drive the solo at engine frame `at`.
     fn driven(&self, at: u64, period: f64) -> bool {
-        self.held.is_some() || self.own_held > 0 || self.last_tap.is_some_and(|last| at.saturating_sub(last) as f64 / period <= self.gap())
+        self.held.is_some() || self.own_held > 0 || self.taps.recent(at, period)
     }
 
     fn update_energy(&mut self, frames: u32, now: u64, g: Grid) {
@@ -713,10 +688,8 @@ impl Solo {
         if self.long != Long::None {
             return;
         }
-        let target = if self.driven(now, g.period) { energy_of(self.rate) } else { 0.0 };
-        let beats = frames as f64 / g.period;
-        let k = (beats / if target > self.energy { RISE_BEATS } else { FALL_BEATS }).min(1.0) as f32;
-        self.energy += (target - self.energy) * k;
+        let target = if self.driven(now, g.period) { energy_of(self.taps.rate) } else { 0.0 };
+        self.energy = follow(self.energy, target, frames as f64 / g.period);
     }
 
     /// Sixteenth `q`, heard at engine frame `t` (sent `lead` before).
@@ -1179,7 +1152,7 @@ impl Solo {
             _ => -10.0,
         };
         let jitter = self.below(11) as f32 - 5.0;
-        (0.6 * self.touch + 30.0 + 20.0 * self.energy + accent + jitter).clamp(30.0, 127.0) as u8
+        (0.6 * self.taps.touch + 30.0 + 20.0 * self.energy + accent + jitter).clamp(30.0, 127.0) as u8
     }
 
     /// Starts `key` at engine frame `t`, on sixteenth `pos` of its beat, for
@@ -1272,15 +1245,6 @@ impl Solo {
     fn below(&mut self, n: u32) -> u32 {
         self.next_random() % n
     }
-}
-
-/// 0.5 taps a beat is calm (0.25), one is eighths (0.5), two sixteenths
-/// (0.75), four and more everything (1).
-fn energy_of(rate: f64) -> f32 {
-    if rate <= 0.0 {
-        return 0.0;
-    }
-    (0.25 + 0.25 * (rate / 0.5).log2()).clamp(0.0, 1.0) as f32
 }
 
 /// How likely sixteenth `pos` of a beat is played at `energy`: the beats

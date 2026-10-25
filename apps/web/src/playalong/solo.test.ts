@@ -58,6 +58,7 @@ describe('solo levels', () => {
     expect(parseSoloLevel(5)).toBe(5);
     expect(parseSoloLevel(9)).toBe(1);
     expect(parseAlongMode('solo')).toBe('solo');
+    expect(parseAlongMode('accompany')).toBe('accompany');
     expect(parseAlongMode('x')).toBe('chords');
   });
 

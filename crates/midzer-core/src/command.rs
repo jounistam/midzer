@@ -134,6 +134,12 @@ pub enum Command {
     /// Replays the solo from the start, or stops it. Without a live beat it
     /// plays at `bpm`, the run's tempo.
     ReplayPlay { on: bool, bpm: f32 },
+    /// Accompanying over live audio at `level` (1–2; 0 is off) with
+    /// `pattern` (see `ACCOMP_PATTERNS` in the UI), on the keys below `split`
+    /// (0 for all of them). `lead_ms` is as in [`Command::SetSolo`].
+    SetAccomp { level: u8, pattern: u8, split: u8, lead_ms: f32 },
+    /// The chord to accompany from now on.
+    AccompChord { slot: Slot },
 }
 
 mod op {
@@ -194,6 +200,8 @@ mod op {
     pub const REPLAY_CLEAR: u32 = 55;
     pub const REPLAY_NOTE: u32 = 56;
     pub const REPLAY_PLAY: u32 = 57;
+    pub const SET_ACCOMP: u32 = 58;
+    pub const ACCOMP_CHORD: u32 = 59;
 }
 
 /// MIDI channel 10, where e-kits and drum pads send.
@@ -336,6 +344,11 @@ impl Command {
             Command::ReplayClear => [op::REPLAY_CLEAR, 0, 0, 0],
             Command::ReplayNote { tick, len, key, velocity, drum } => [op::REPLAY_NOTE, tick, len, key as u32 | (velocity as u32) << 8 | (drum as u32) << 16],
             Command::ReplayPlay { on, bpm } => [op::REPLAY_PLAY, on as u32, bpm.to_bits(), 0],
+            Command::SetAccomp { level, pattern, split, lead_ms } => [op::SET_ACCOMP, level as u32 | (pattern as u32) << 8 | (split as u32) << 16, lead_ms.to_bits(), 0],
+            Command::AccompChord { slot } => {
+                let (kind, packed) = slot_words(slot);
+                [op::ACCOMP_CHORD, kind, packed, 0]
+            }
             Command::LiveGuide { frame, period, one, confidence, known } => [op::LIVE_GUIDE, frame, period.to_bits(), one.map_or(0, |o| o as u32 + 1) | (confidence as u32) << 8 | (known as u32) << 16],
         }
     }
@@ -451,6 +464,13 @@ impl Command {
                 drum: c >> 16 & 1 != 0,
             }),
             op::REPLAY_PLAY => Some(Command::ReplayPlay { on: a != 0, bpm: float(b).filter(|bpm| *bpm > 0.0)? }),
+            op::SET_ACCOMP => Some(Command::SetAccomp {
+                level: u8::try_from(a & 0xff).ok().filter(|l| *l <= crate::accomp::MAX_ACCOMP_LEVEL)?,
+                pattern: u8::try_from(a >> 8 & 0xff).ok().filter(|p| *p < crate::accomp::PATTERNS)?,
+                split: midi(a >> 16)?,
+                lead_ms: float(b).filter(|ms| (0.0..=crate::solo::MAX_LEAD_MS).contains(ms))?,
+            }),
+            op::ACCOMP_CHORD => Some(Command::AccompChord { slot: slot_from(a, b)? }),
             op::LIVE_GUIDE => Some(Command::LiveGuide {
                 frame: a,
                 period: float(b).filter(|p| *p > 0.0)?,
@@ -552,6 +572,10 @@ mod tests {
             Command::ReplayNote { tick: 0, len: 120, key: 38, velocity: 127, drum: true },
             Command::ReplayPlay { on: true, bpm: 97.5 },
             Command::ReplayPlay { on: false, bpm: 120.0 },
+            Command::SetAccomp { level: 2, pattern: 4, split: 60, lead_ms: 42.5 },
+            Command::SetAccomp { level: 0, pattern: 0, split: 0, lead_ms: 0.0 },
+            Command::AccompChord { slot: Slot::Chord(Chord { root: 9, quality: Quality::Minor7, bass: 0 }) },
+            Command::AccompChord { slot: Slot::NoChord },
         ] {
             assert_eq!(Command::decode(cmd.encode()), Some(cmd));
         }
@@ -601,5 +625,9 @@ mod tests {
         assert_eq!(Command::decode([op::REPLAY_NOTE, 0, 240, 60]), None);
         assert_eq!(Command::decode([op::REPLAY_NOTE, 0, 240, 128 | 90 << 8]), None);
         assert_eq!(Command::decode([op::REPLAY_PLAY, 1, 0f32.to_bits(), 0]), None);
+        assert_eq!(Command::decode([op::SET_ACCOMP, 3, 0, 0]), None);
+        assert_eq!(Command::decode([op::SET_ACCOMP, 1 | 5 << 8, 0, 0]), None);
+        assert_eq!(Command::decode([op::SET_ACCOMP, 1 | 128 << 16, 0, 0]), None);
+        assert_eq!(Command::decode([op::ACCOMP_CHORD, 2, 12, 0]), None);
     }
 }

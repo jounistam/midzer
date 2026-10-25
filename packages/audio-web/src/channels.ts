@@ -6,6 +6,8 @@ export const BASS_CHANNEL = 2;
 export const PAD_CHANNEL = 3;
 /** The song's tune, played under the band in Learn; not shown on the keys. Mirrors `MELODY_CHANNEL` in melody.rs. */
 export const MELODY_CHANNEL = 4;
+/** midzer's accompaniment to the player's taps; not shown on the keys. Mirrors `ACCOMP_CHANNEL` in accomp.rs. */
+export const ACCOMP_CHANNEL = 5;
 export const DRUM_CHANNEL = 9;
 /** The player's drum hits, one General MIDI key per piece. Mirrors `PLAYER_DRUM_CHANNEL` in event.rs. */
 export const PLAYER_DRUM_CHANNEL = 14;

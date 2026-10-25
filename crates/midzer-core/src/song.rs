@@ -31,7 +31,7 @@ pub enum Slot {
 }
 
 impl Slot {
-    fn chord(self) -> Option<Option<Chord>> {
+    pub(crate) fn chord(self) -> Option<Option<Chord>> {
         match self {
             Slot::Hold => None,
             Slot::NoChord => Some(None),

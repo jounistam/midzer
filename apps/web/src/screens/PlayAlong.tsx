@@ -11,6 +11,7 @@ import { TimingReport } from '../components/TimingReport';
 import { TopBar } from '../components/TopBar';
 import type { ChordNow } from '../playalong/chords';
 import { MISS_SOUND_OPTIONS } from '../playalong/feedback';
+import { ACCOMP_LEVELS, ACCOMP_PATTERNS, type AccompLevel } from '../playalong/accomp';
 import { ALONG_LEVELS } from '../playalong/levels';
 import { isDrumTake, ownShare } from '../playalong/replay';
 import { keyName } from '../playalong/scale';
@@ -35,6 +36,8 @@ import {
   refreshLiveDevices,
   resetLiveSource,
   saveLiveSong,
+  setAccompLevel,
+  setAccompPattern,
   setAlongLevel,
   setAlongMode,
   setInstrument,
@@ -60,6 +63,7 @@ import { LoadingStatus } from './LoadingStatus';
 export function PlayAlong() {
   const drums = useSession((s) => s.instrument === 'drums');
   const solo = useSession((s) => s.alongMode === 'solo');
+  const accompany = useSession((s) => s.alongMode === 'accompany' && s.instrument === 'keys');
   const split = useSession((s) => s.split);
   const height = useStageHeight();
   return (
@@ -70,7 +74,7 @@ export function PlayAlong() {
           <AlongStage />
           <FollowedSong />
           {!drums && <FollowedChords />}
-          {solo ? <SoloPlay split={split} /> : !drums && <AlongChords split={split} />}
+          {solo ? <SoloPlay split={split} /> : accompany ? <AccompPlay split={split} /> : !drums && <AlongChords split={split} />}
           {solo && <SoloReplay />}
           <AlongTiming />
           <LearnedSongs />
@@ -83,7 +87,9 @@ export function PlayAlong() {
           <SoundPicker />
           <ModePicker />
           {solo && <SoloLevelPicker />}
-          {!drums && <LevelPicker label={solo ? 'Chord guide' : 'Level'} />}
+          {accompany && <AccompLevelPicker />}
+          {accompany && <PatternPicker />}
+          {!drums && !accompany && <LevelPicker label={solo ? 'Chord guide' : 'Level'} />}
           {solo && <CallToggle />}
           <BeatFixes />
           <SyncControl />
@@ -173,8 +179,10 @@ function Meter({ label, value }: { label: string; value: number }) {
 function AlongTiming() {
   const playing = useSession((s) => s.playing);
   const drums = useSession((s) => s.instrument === 'drums');
-  // Taps that drive a solo aren't timed.
-  const tapping = useSession((s) => s.alongMode === 'solo' && (s.instrument === 'drums' ? s.drumSoloLevel : s.soloLevel) <= 3);
+  // Taps that drive a solo or an accompaniment aren't timed.
+  const tapping = useSession(
+    (s) => (s.alongMode === 'solo' && (s.instrument === 'drums' ? s.drumSoloLevel : s.soloLevel) <= 3) || (s.alongMode === 'accompany' && s.instrument === 'keys'),
+  );
   if (tapping) return null;
   // On keys the chords coming take the room; the timing stays in view, smaller.
   if (playing) return <HitFeedback against="the track" lagging compact={!drums} />;
@@ -206,9 +214,9 @@ function AlongChords({ split }: { split: number }) {
   );
 }
 
-/** The colours of the falling chords. */
-function HandLegend() {
-  const twoHands = useSession((s) => s.alongLevel >= 4);
+/** The colours of the falling chords; `oneHand` when only the right hand's keys fall. */
+function HandLegend({ oneHand = false }: { oneHand?: boolean }) {
+  const twoHands = useSession((s) => s.alongLevel >= 4) && !oneHand;
   return (
     <p className="along-legend">
       {twoHands && <span className="hand left">Left hand</span>}
@@ -261,6 +269,48 @@ function KeysSoloPlay({ split }: { split: number }) {
   );
 }
 
+/**
+ * Accompanying: midzer plays a keys pattern, driven by the player's taps on
+ * the chord's root, which falls down its lane as each chord comes. How hard
+ * the pattern is driven shows above the lanes.
+ */
+function AccompPlay({ split }: { split: number }) {
+  const level = useSession((s) => s.accompLevel);
+  const pattern = useSession((s) => ACCOMP_PATTERNS.find((p) => p.id === s.accompPattern)!);
+  const feel = useSession((s) => s.accompFeel);
+  const locked = useSession((s) => s.liveSource.status === 'on' && s.liveTracker.locked);
+  const prompt = !locked ? 'The pattern starts once the beat is found.' : accompPrompt(level);
+  return (
+    <section className="panel along-play solo-play accomp-play">
+      <div className="along-play-head">
+        <p className="eyebrow">Accompany · {pattern.name}</p>
+        <p className="setting-note" data-testid="accomp-prompt">
+          {prompt}
+        </p>
+      </div>
+      <div className="solo-feel compact">
+        <FeelMeter feel={feel} testId="accomp-feel" />
+      </div>
+      <div className="along-play-head solo-guide">
+        <p className="eyebrow">Roots</p>
+        <HandLegend oneHand />
+      </div>
+      <ChordLanes level={1} />
+      <Keyboard split={split} height={150} />
+    </section>
+  );
+}
+
+/** What to do at accompany `level`. */
+function accompPrompt(level: AccompLevel): string {
+  switch (level) {
+    case 1:
+      return "Tap the lit key, the chord's root (or the space bar). Faster for a busier pattern, harder for louder.";
+    case 2:
+      return 'Hold the lit root (or the space bar) and the pattern plays while you hold it. Press it again faster for a busier one.';
+  }
+}
+
 /** A drum solo: midzer plays the kit (shown below the stage), driven by the player's taps, or around their own playing. */
 function DrumSoloPlay() {
   const level = useSession((s) => s.drumSoloLevel);
@@ -286,19 +336,33 @@ function DrumSoloPlay() {
 /** How hard the solo is driven, big: a word and a meter; with call and response, where it is instead of the word. */
 function SoloFeel({ call, tapping }: { call: CallNow | null; tapping: boolean }) {
   const feel = useSession((s) => s.soloFeel);
+  return call ? (
+    <>
+      <CallStatus call={call} tapping={tapping} />
+      <FeelTrack feel={feel} />
+    </>
+  ) : (
+    <FeelMeter feel={feel} testId="solo-feel" />
+  );
+}
+
+/** A feel, 0..1, as a word and a meter. */
+function FeelMeter({ feel, testId }: { feel: number; testId: string }) {
   return (
     <>
-      {call ? (
-        <CallStatus call={call} tapping={tapping} />
-      ) : (
-        <p className="solo-feel-word" data-testid="solo-feel">
-          {feelWord(feel)}
-        </p>
-      )}
-      <div className="solo-feel-track" role="meter" aria-label="Feel" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(feel * 100)}>
-        <div className="solo-feel-fill" style={{ width: `${Math.round(feel * 100)}%` }} />
-      </div>
+      <p className="solo-feel-word" data-testid={testId}>
+        {feelWord(feel)}
+      </p>
+      <FeelTrack feel={feel} />
     </>
+  );
+}
+
+function FeelTrack({ feel }: { feel: number }) {
+  return (
+    <div className="solo-feel-track" role="meter" aria-label="Feel" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(feel * 100)}>
+      <div className="solo-feel-fill" style={{ width: `${Math.round(feel * 100)}%` }} />
+    </div>
   );
 }
 
@@ -430,23 +494,68 @@ function SoloFit({ fit, snapped }: { fit: FitCount; snapped: boolean }) {
   );
 }
 
-/** Play along with the chords, or solo over them. */
+/** Play along with the chords, accompany them (keys only), or solo over them. */
 function ModePicker() {
-  const mode = useSession((s) => s.alongMode);
   const drums = useSession((s) => s.instrument === 'drums');
+  // On drums there is no accompanying: that mode plays along.
+  const mode = useSession((s) => (drums && s.alongMode === 'accompany' ? 'chords' : s.alongMode));
+  const modes = drums ? (['chords', 'solo'] as const) : (['chords', 'accompany', 'solo'] as const);
+  const names = { chords: drums ? 'Along' : 'Chords', accompany: 'Accompany', solo: 'Solo' };
   return (
     <div className="control-group">
       <p className="label" id="along-mode-label">
         Play
       </p>
       <div className="segmented" role="group" aria-labelledby="along-mode-label">
-        {(['chords', 'solo'] as const).map((m) => (
+        {modes.map((m) => (
           <button key={m} className={`seg ${mode === m ? 'on' : ''}`} aria-pressed={mode === m} onClick={() => setAlongMode(m)}>
-            {m === 'solo' ? 'Solo' : drums ? 'Along' : 'Chords'}
+            {names[m]}
           </button>
         ))}
       </div>
     </div>
+  );
+}
+
+/** How much of the accompaniment the player plays: tapping the root while midzer plays the pattern, up to all of it. */
+function AccompLevelPicker() {
+  const level = useSession((s) => s.accompLevel);
+  const current = ACCOMP_LEVELS.find((l) => l.level === level) ?? ACCOMP_LEVELS[0]!;
+  return (
+    <div className="control-group">
+      <p className="label" id="accomp-level-label">
+        Accompany level
+      </p>
+      <div className="segmented" role="group" aria-labelledby="accomp-level-label">
+        {ACCOMP_LEVELS.map((l) => (
+          <button key={l.level} className={`seg ${level === l.level ? 'on' : ''}`} aria-pressed={level === l.level} title={l.name} onClick={() => setAccompLevel(l.level)}>
+            {l.level}
+          </button>
+        ))}
+      </div>
+      <p className="setting-note" data-testid="accomp-level">
+        <strong>{current.name}.</strong> {current.detail}
+      </p>
+    </div>
+  );
+}
+
+/** The pattern midzer accompanies with; tapping faster makes it busier within it. */
+function PatternPicker() {
+  const pattern = useSession((s) => s.accompPattern);
+  const current = ACCOMP_PATTERNS.find((p) => p.id === pattern) ?? ACCOMP_PATTERNS[0]!;
+  return (
+    <label className="control-group">
+      <span className="label">Pattern</span>
+      <select value={pattern} onChange={(e) => setAccompPattern(e.target.value as typeof pattern)} aria-label="Pattern" data-testid="accomp-pattern">
+        {ACCOMP_PATTERNS.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
+      </select>
+      <span className="setting-note">{current.detail}</span>
+    </label>
   );
 }
 

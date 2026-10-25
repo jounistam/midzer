@@ -74,6 +74,8 @@ pub enum EngineEvent {
     SoloNote { key: u8, velocity: u8, bar: u16, tick: u16, own: bool, drum: bool },
     /// A replay of the player's solo reached its start, or ended or was stopped.
     Replaying { playing: bool },
+    /// How much the accompaniment is driven by the player's taps, 0..=255 (see [`crate::Command::SetAccomp`]).
+    AccompFeel { energy: u8 },
 }
 
 /// Where call and response is.
@@ -138,6 +140,7 @@ mod op {
     pub const SOLO_CALL: u32 = 20;
     pub const SOLO_NOTE: u32 = 21;
     pub const REPLAYING: u32 = 22;
+    pub const ACCOMP_FEEL: u32 = 23;
 }
 
 const NO_CHORD: u32 = 0xff;
@@ -189,6 +192,7 @@ impl EngineEvent {
                 [op::SOLO_NOTE, key as u32 | (velocity as u32) << 8 | (own as u32) << 16 | (drum as u32) << 17, bar as u32 | (tick as u32) << 16, frame]
             }
             EngineEvent::Replaying { playing } => [op::REPLAYING, playing as u32, 0, frame],
+            EngineEvent::AccompFeel { energy } => [op::ACCOMP_FEEL, energy as u32, 0, frame],
             EngineEvent::KeysJudged { ms, sixteenth, bar, chord } => {
                 let chord = match chord {
                     None => 0,
@@ -262,6 +266,7 @@ impl EngineEvent {
                 drum: a >> 17 & 1 != 0,
             },
             op::REPLAYING => EngineEvent::Replaying { playing: a != 0 },
+            op::ACCOMP_FEEL => EngineEvent::AccompFeel { energy: byte(a) },
             op::KEYS_JUDGED => EngineEvent::KeysJudged {
                 ms: f32::from_bits(a),
                 sixteenth: byte(b),
@@ -470,6 +475,7 @@ mod tests {
             EngineEvent::SoloNote { key: 0, velocity: 0, bar: 0, tick: 0, own: false, drum: false },
             EngineEvent::SoloNote { key: 38, velocity: 100, bar: 7, tick: 480, own: false, drum: true },
             EngineEvent::Replaying { playing: true },
+            EngineEvent::AccompFeel { energy: 201 },
         ] {
             assert_eq!(EngineEvent::decode(event.encode(42)), Some((event, 42)));
         }

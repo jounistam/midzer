@@ -1,3 +1,4 @@
+use crate::accomp::{ACCOMP_CHANNEL, Accomp};
 use crate::backing::{Backing, Track};
 use crate::band::{Band, BandDrums};
 use crate::chord::recognize;
@@ -63,6 +64,8 @@ pub struct Engine {
     solo: Solo,
     /// The player's solo played back.
     replay: Replay,
+    /// Accompanying over the live audio: the player's taps drive a keys pattern.
+    accomp: Accomp,
 }
 
 impl Engine {
@@ -91,6 +94,7 @@ impl Engine {
             live: Live::new(sample_rate),
             solo: Solo::new(sample_rate),
             replay: Replay::new(sample_rate),
+            accomp: Accomp::new(sample_rate),
         }
     }
 
@@ -99,6 +103,7 @@ impl Engine {
         let track = self.backing.active();
         let live = self.live.active();
         let solo = !drums && live && self.solo.level() > 0;
+        let accompany = !drums && live && !solo && self.accomp.level() > 0;
         match cmd {
             Command::NoteOn { note, velocity } if drums => self.drum_note(note, velocity),
             Command::NoteOff { .. } if drums => {}
@@ -114,6 +119,16 @@ impl Engine {
             }
             Command::NoteOn { note, .. } | Command::NoteOff { note } if solo => {
                 self.solo.release(note, self.now, &mut self.events);
+            }
+            Command::NoteOn { note, velocity } if accompany && velocity > 0 => {
+                let grid = self.live.grid();
+                if self.accomp.press(note, velocity, self.now, grid, &mut self.events) != Pressed::Free && grid.is_some() {
+                    // The pattern's run, timed like the player's own.
+                    self.live.play(self.now, &mut self.events);
+                }
+            }
+            Command::NoteOn { note, .. } | Command::NoteOff { note } if accompany => {
+                self.accomp.release(note, self.now);
             }
             Command::NoteOn { note, velocity: 0 } | Command::NoteOff { note } => {
                 self.held[note as usize] = false;
@@ -133,6 +148,7 @@ impl Engine {
             }
             Command::AllNotesOff => {
                 self.solo.silence(0, &mut self.events);
+                self.accomp.silence(0, &mut self.events);
                 self.replay.stop(0, &mut self.events);
                 for note in 0..128u8 {
                     if std::mem::take(&mut self.held[note as usize]) {
@@ -147,11 +163,12 @@ impl Engine {
                 self.start_in = None;
                 self.band.play(&mut self.events);
                 // Again after the transport, so a take records the player's sound.
-                self.events.push(0, EngineEvent::ProgramChange { channel: PLAYER_CHANNEL, program: self.sound });
+                self.sound_changes();
             }
             Command::Stop => {
                 self.start_in = None;
                 self.solo.silence(0, &mut self.events);
+                self.accomp.silence(0, &mut self.events);
                 self.replay.stop(0, &mut self.events);
                 self.band.stop(&mut self.events);
                 if self.backing.is_playing() {
@@ -191,7 +208,7 @@ impl Engine {
             Command::SetMelody { volume } => self.band.set_melody_volume(volume, &mut self.events),
             Command::SetSound { program } => {
                 self.sound = program;
-                self.events.push(0, EngineEvent::ProgramChange { channel: PLAYER_CHANNEL, program });
+                self.sound_changes();
             }
             Command::SetListen { mode, gate_db } => {
                 let mut heard = HeardList::default();
@@ -262,16 +279,24 @@ impl Engine {
             Command::LiveTempo { double } => self.live.scale_tempo(double),
             Command::LiveReset => {
                 self.solo.silence(0, &mut self.events);
+                self.accomp.silence(0, &mut self.events);
                 self.live.reset(self.now, &mut self.events);
             }
             Command::SetSolo { level, call, lead_ms } => self.solo.set_level(level, call, lead_ms, &mut self.events),
             Command::SoloHarmony { tonic, scale, chord } => self.solo.set_harmony(tonic, scale, chord),
+            Command::SetAccomp { level, pattern, split, lead_ms } => self.accomp.set(level, pattern, split, lead_ms, &mut self.events),
+            Command::AccompChord { slot } => {
+                if let Some(chord) = slot.chord() {
+                    self.accomp.set_chord(chord, &mut self.events);
+                }
+            }
             Command::ReplayClear => self.replay.clear(&mut self.events),
             Command::ReplayNote { tick, len, key, velocity, drum } => self.replay.add(ReplayNote { tick, len, key, velocity, drum }),
             Command::ReplayPlay { on, bpm } => {
                 // The solo stops for its replay.
                 if on {
                     self.solo.silence(0, &mut self.events);
+                    self.accomp.silence(0, &mut self.events);
                 }
                 self.replay.set_playing(on, bpm, &mut self.events);
             }
@@ -285,6 +310,13 @@ impl Engine {
             // The synth's gain is the host's to set; the recording follows it.
             Command::SetGain { gain } => self.backing.set_gain(gain),
             Command::SetKitSound { .. } => {}
+        }
+    }
+
+    /// The player's sound, on their channel and the accompaniment's.
+    fn sound_changes(&mut self) {
+        for channel in [PLAYER_CHANNEL, ACCOMP_CHANNEL] {
+            self.events.push(0, EngineEvent::ProgramChange { channel, program: self.sound });
         }
     }
 
@@ -515,6 +547,7 @@ impl Engine {
                 self.live.process(frames, self.now, &mut self.events);
                 let grid = self.live.grid();
                 self.solo.process(frames, self.now, grid, &mut self.events);
+                self.accomp.process(frames, self.now, grid, &mut self.events);
                 self.replay.process(frames, self.now, grid, self.solo.lead(), &mut self.events);
             }
             None if self.backing.active() => {
@@ -582,6 +615,7 @@ mod tests {
     use super::*;
     use crate::chord::{Chord, Quality};
     use crate::event::CallPhase;
+    use crate::song::Slot;
 
     fn chord_events(events: &[Timed]) -> Vec<Option<Chord>> {
         events
@@ -665,7 +699,9 @@ mod tests {
         let mut engine = Engine::new(48_000.0);
         engine.handle(Command::SetSound { program: 89 });
         let sound = EngineEvent::ProgramChange { channel: PLAYER_CHANNEL, program: 89 };
-        assert!(engine.process(128).iter().any(|t| t.event == sound));
+        let events = engine.process(128);
+        assert!(events.iter().any(|t| t.event == sound));
+        assert!(events.iter().any(|t| t.event == EngineEvent::ProgramChange { channel: ACCOMP_CHANNEL, program: 89 }), "the accompaniment's too");
         engine.end_block();
         engine.handle(Command::Play);
         let events: Vec<_> = engine.process(128).iter().map(|t| t.event).collect();
@@ -1099,12 +1135,19 @@ mod tests {
 
     /// Like `solo_over_clicks_calling`, on `instrument`: on drums the keys are the kit's notes.
     fn solo_over_clicks_on(instrument: Instrument, level: u8, call: bool, keys: &[u8], seconds: u64) -> (Engine, Vec<(u64, EngineEvent)>) {
+        over_clicks(instrument, keys, seconds, |engine| {
+            engine.handle(Command::SetSolo { level, call, lead_ms: 20.0 });
+            engine.handle(Command::SoloHarmony { tonic: 0, scale: 0b0010_1001_0101, chord: 0b0000_1001_0001 });
+        })
+    }
+
+    /// Clicks as in `solo_over_clicks_on`, the engine set up by `setup`.
+    fn over_clicks(instrument: Instrument, keys: &[u8], seconds: u64, setup: impl FnOnce(&mut Engine)) -> (Engine, Vec<(u64, EngineEvent)>) {
         let mut engine = Engine::new(48_000.0);
         engine.handle(Command::SetInstrument { instrument });
         engine.handle(Command::SetLiveOffset { ms: 0.0 });
         engine.handle(Command::SetLive { on: true });
-        engine.handle(Command::SetSolo { level, call, lead_ms: 20.0 });
-        engine.handle(Command::SoloHarmony { tonic: 0, scale: 0b0010_1001_0101, chord: 0b0000_1001_0001 });
+        setup(&mut engine);
         let first_tap = 48_000 * 8;
         let mut events = Vec::new();
         let mut input = [0.0f32; 128];
@@ -1215,6 +1258,24 @@ mod tests {
         engine.handle(Command::SetSolo { level: 0, call: false, lead_ms: 20.0 });
         engine.handle(Command::NoteOn { note: 61, velocity: 100 });
         assert!(engine.process(128).iter().any(|t| t.event == EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key: 61, velocity: 100 }));
+    }
+
+    #[test]
+    fn an_accompaniment_takes_the_keys_over_live_audio() {
+        let c = Chord::new(0, Quality::Major);
+        let (mut engine, events) = over_clicks(Instrument::Keys, &[60, 62], 12, |engine| {
+            engine.handle(Command::SetAccomp { level: 1, pattern: 0, split: 0, lead_ms: 20.0 });
+            engine.handle(Command::AccompChord { slot: Slot::Chord(c) });
+        });
+        let notes: Vec<_> = events.iter().filter(|(_, e)| matches!(e, EngineEvent::NoteOn { channel: ACCOMP_CHANNEL, .. })).collect();
+        assert!(notes.len() > 12, "the taps play a pattern: {notes:?}");
+        assert!(!events.iter().any(|(_, e)| matches!(e, EngineEvent::NoteOn { channel: PLAYER_CHANNEL, .. })), "the keys themselves are silent");
+        assert!(events.iter().any(|(_, e)| *e == EngineEvent::Transport { playing: true }), "the pattern is a run");
+        assert!(events.iter().any(|(_, e)| matches!(e, EngineEvent::AccompFeel { energy } if *energy > 100)));
+        // Off, the keys play as they are.
+        engine.handle(Command::SetAccomp { level: 0, pattern: 0, split: 0, lead_ms: 20.0 });
+        engine.handle(Command::NoteOn { note: 62, velocity: 100 });
+        assert!(engine.process(128).iter().any(|t| t.event == EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key: 62, velocity: 100 }));
     }
 
     #[test]

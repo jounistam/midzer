@@ -63,6 +63,8 @@ const Cmd = {
   ReplayClear: 55,
   ReplayNote: 56,
   ReplayPlay: 57,
+  SetAccomp: 58,
+  AccompChord: 59,
 } as const;
 
 /** Ticks per beat in song positions; mirrors `PPQ` in style.rs. */
@@ -266,7 +268,14 @@ export type EngineCommand =
   /** A note of the solo to replay: from `tick` (PPQ per beat) after the run's first bar's 1, `len` ticks long. */
   | { type: 'replayNote'; tick: number; len: number; key: number; velocity: number; drum?: boolean }
   /** Replays the solo from the start, or stops it. Without a live beat it plays at `bpm`, the run's tempo. */
-  | { type: 'replayPlay'; on: boolean; bpm: number };
+  | { type: 'replayPlay'; on: boolean; bpm: number }
+  /**
+   * Accompanying over live audio at `level` (1–2; 0 is off) with `pattern` (an index into `ACCOMP_PATTERNS` in the
+   * app), on the keys below `split` (0 for all of them). `leadMs` as in `setSolo`.
+   */
+  | { type: 'setAccomp'; level: number; pattern: number; split: number; leadMs: number }
+  /** The chord to accompany from now on. */
+  | { type: 'accompChord'; slot: ChartSlot };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -279,6 +288,13 @@ const bitsFloat = (bits: number) => {
   f32Bits[0] = bits;
   return f32[0]!;
 };
+
+/** A chart slot as `[kind, packed]`: kind 0 hold, 1 no chord, 2 a chord packed as `root | quality << 8 | bass << 16`. */
+function slotWords(slot: ChartSlot): [number, number] {
+  if (slot === 'hold') return [0, 0];
+  if (slot === 'nc') return [1, 0];
+  return [2, slot.root | (slot.quality << 8) | (slot.bass << 16)];
+}
 
 export function encodeCommand(cmd: EngineCommand): RecordWords {
   switch (cmd.type) {
@@ -317,10 +333,8 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
     case 'songClear':
       return [Cmd.SongClear, cmd.bars, 0, 0];
     case 'songChord': {
-      const { slot } = cmd;
-      if (slot === 'hold') return [Cmd.SongChord, cmd.beat, 0, 0];
-      if (slot === 'nc') return [Cmd.SongChord, cmd.beat, 1, 0];
-      return [Cmd.SongChord, cmd.beat, 2, slot.root | (slot.quality << 8) | (slot.bass << 16)];
+      const [kind, packed] = slotWords(cmd.slot);
+      return [Cmd.SongChord, cmd.beat, kind, packed];
     }
     case 'songBar':
       return [Cmd.SongBar, cmd.bar, cmd.beats, 0];
@@ -401,6 +415,12 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.ReplayNote, Math.max(0, Math.round(cmd.tick)) >>> 0, Math.max(1, Math.round(cmd.len)) >>> 0, (cmd.key & 127) | (Math.min(Math.max(Math.round(cmd.velocity), 1), 127) << 8) | (cmd.drum ? 1 << 16 : 0)];
     case 'replayPlay':
       return [Cmd.ReplayPlay, cmd.on ? 1 : 0, floatBits(Math.max(cmd.bpm, 1)), 0];
+    case 'setAccomp':
+      return [Cmd.SetAccomp, (cmd.level & 0xff) | ((cmd.pattern & 0xff) << 8) | ((cmd.split & 127) << 16), floatBits(Math.min(Math.max(cmd.leadMs, 0), 500)), 0];
+    case 'accompChord': {
+      const [kind, packed] = slotWords(cmd.slot);
+      return [Cmd.AccompChord, kind, packed, 0];
+    }
     case 'liveBar':
       return [Cmd.LiveBar, Math.round(cmd.frame) >>> 0, cmd.beats, 0];
     case 'liveGuide': {
@@ -507,7 +527,9 @@ export type EngineEvent =
    */
   | { type: 'soloNote'; key: number; velocity: number; bar: number; tick: number; own: boolean; drum: boolean }
   /** A replay of the player's solo reached its start, or ended or was stopped. */
-  | { type: 'replaying'; playing: boolean };
+  | { type: 'replaying'; playing: boolean }
+  /** How much the player's taps drive the accompaniment, 0..1. */
+  | { type: 'accompFeel'; energy: number };
 
 /** Where call and response is: waiting for a tap, midzer calling, the player answering, the answer just scored. */
 export type CallPhase = 'idle' | 'listen' | 'answer' | 'scored';
@@ -599,6 +621,8 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
       return { type: 'soloNote', key: a & 0xff, velocity: (a >> 8) & 0xff, bar: b & 0xffff, tick: b >>> 16, own: ((a >> 16) & 1) !== 0, drum: ((a >> 17) & 1) !== 0, frame };
     case 22:
       return { type: 'replaying', playing: a !== 0, frame };
+    case 23:
+      return { type: 'accompFeel', energy: (a & 0xff) / 255, frame };
     default:
       return null;
   }

@@ -3,6 +3,7 @@
 //! Everything here must be safe to call from a real-time audio callback:
 //! no I/O, no locks, and no allocation after construction.
 
+mod accomp;
 mod backing;
 mod band;
 mod chord;
@@ -21,9 +22,11 @@ mod replay;
 mod solo;
 mod song;
 pub mod style;
+mod taps;
 mod tracker;
 mod voicing;
 
+pub use accomp::ACCOMP_CHANNEL;
 pub use backing::{MAX_TRACK_BEATS, Track};
 pub use band::BandDrums;
 pub use chord::{Chord, PitchSet, Quality, recognize as recognize_chord};

@@ -5,8 +5,8 @@
 import { DRUM_PIECES, type CallPhase, type DrumPiece, type TimedEvent } from '@midzer/audio-web';
 import { pentatonic, type SongKey } from './scale';
 
-/** Play the chords heard, or solo over them. */
-export type AlongMode = 'chords' | 'solo';
+/** Play the chords heard, accompany them with a pattern midzer plays (keys only), or solo over them. */
+export type AlongMode = 'chords' | 'accompany' | 'solo';
 
 export type SoloLevel = 1 | 2 | 3 | 4 | 5;
 
@@ -39,7 +39,7 @@ export function parseDrumSoloLevel(value: unknown): DrumSoloLevel {
 }
 
 export function parseAlongMode(value: unknown): AlongMode {
-  return value === 'solo' ? 'solo' : 'chords';
+  return value === 'solo' || value === 'accompany' ? value : 'chords';
 }
 
 /** The key to tap: the home note from middle C up, as the engine's `Solo::home`. */

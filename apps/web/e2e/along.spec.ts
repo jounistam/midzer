@@ -289,6 +289,56 @@ test('play along: a solo driven by tapping one key', async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
+test('play along: accompanying by tapping the chord’s root', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  await page.addInitScript(() => localStorage.setItem('midzer.onboarded', '1'));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Play along/ }).click();
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeEnabled({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Keys', exact: true }).click();
+  await page.getByRole('button', { name: 'Accompany', exact: true }).click();
+  await expect(page.getByTestId('accomp-level')).toContainText('Tap the root');
+  await page.getByTestId('accomp-pattern').selectOption('stabs');
+  await expect(page.getByTestId('chord-lanes')).toBeVisible();
+  // The chord level is the lanes' own here: they show the root to tap.
+  await expect(page.getByTestId('along-level')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Listen' }).click();
+  await expect(page.getByTestId('accomp-prompt')).toContainText("Tap the lit key, the chord's root", { timeout: 30_000 });
+  await expect(page.getByTestId('accomp-feel')).toHaveText('Resting');
+  // Wait for a chord, so the space bar has a root to tap.
+  await expect(page.getByTestId('along-chord')).toHaveText(/^[A-G]/, { timeout: 30_000 });
+
+  // The space bar is the root: four taps a beat for a few seconds.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        let taps = 0;
+        const timer = setInterval(() => {
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space' }));
+          setTimeout(() => window.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space' })), 40);
+          if (++taps >= 24) {
+            clearInterval(timer);
+            resolve();
+          }
+        }, 125);
+      }),
+  );
+  await expect(page.getByTestId('accomp-feel')).toHaveText(/Burning|On fire/);
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/21-play-along-accompany.png` });
+  // Taps aren't timed; the space bar didn't start or stop anything else.
+  await expect(page.getByTestId('timing-report')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
+
+  const prefs = await page.evaluate(() => JSON.parse(localStorage.getItem('midzer.prefs') ?? '{}'));
+  expect(prefs.alongMode).toBe('accompany');
+  expect(prefs.accompPattern).toBe('stabs');
+  expect(errors).toEqual([]);
+});
+
 test('play along: a drum solo driven by tapping the snare', async ({ page }) => {
   test.setTimeout(120_000);
   const errors: string[] = [];

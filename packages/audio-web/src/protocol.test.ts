@@ -94,6 +94,9 @@ describe('encodeCommand', () => {
     expect(encodeCommand({ type: 'replayNote', tick: 4_000_000, len: 0, key: 72, velocity: 0 })).toEqual([56, 4_000_000, 1, 72 | (1 << 8)]);
     expect(encodeCommand({ type: 'replayNote', tick: 0, len: 120, key: 38, velocity: 90, drum: true })).toEqual([56, 0, 120, 38 | (90 << 8) | (1 << 16)]);
     expect(encodeCommand({ type: 'replayPlay', on: true, bpm: 97.5 })).toEqual([57, 1, new Uint32Array(new Float32Array([97.5]).buffer)[0], 0]);
+    expect(encodeCommand({ type: 'setAccomp', level: 2, pattern: 4, split: 60, leadMs: 42.5 })).toEqual([58, 2 | (4 << 8) | (60 << 16), new Uint32Array(new Float32Array([42.5]).buffer)[0], 0]);
+    expect(encodeCommand({ type: 'accompChord', slot: { root: 9, quality: 11, bass: 0 } })).toEqual([59, 2, 9 | (11 << 8), 0]);
+    expect(encodeCommand({ type: 'accompChord', slot: 'nc' })).toEqual([59, 1, 0, 0]);
   });
 
   it('knows each piece by its General MIDI key', () => {
@@ -181,6 +184,7 @@ describe('decodeEvent', () => {
     expect(decodeEvent(21, 60, 3, 4)).toEqual({ type: 'soloNote', key: 60, velocity: 0, bar: 3, tick: 0, own: false, drum: false, frame: 4 });
     expect(decodeEvent(21, 38 | (90 << 8) | (1 << 17), 2, 4)).toEqual({ type: 'soloNote', key: 38, velocity: 90, bar: 2, tick: 0, own: false, drum: true, frame: 4 });
     expect(decodeEvent(22, 1, 0, 4)).toEqual({ type: 'replaying', playing: true, frame: 4 });
+    expect(decodeEvent(23, 255, 0, 4)).toEqual({ type: 'accompFeel', energy: 1, frame: 4 });
   });
 
   it('decodes song positions', () => {

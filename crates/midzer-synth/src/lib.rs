@@ -125,7 +125,8 @@ fn apply(synth: &mut Synthesizer, event: &EngineEvent, kit_sound: bool) {
             | EngineEvent::SoloFeel { .. }
             | EngineEvent::SoloCall { .. }
             | EngineEvent::SoloNote { .. }
-            | EngineEvent::Replaying { .. } => {}
+            | EngineEvent::Replaying { .. }
+            | EngineEvent::AccompFeel { .. } => {}
     }
 }
 

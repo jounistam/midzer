@@ -22,6 +22,8 @@ interface ChordLanesProps {
   /** Same range as the keyboard below, so the lanes line up with its keys. */
   low?: number;
   high?: number;
+  /** The keys to draw for each chord, instead of the player's chord level (accompanying draws the root alone). */
+  level?: AlongLevel;
 }
 
 /**
@@ -35,9 +37,10 @@ interface ChordLanesProps {
  * the ones just heard stay in view.
  * Fills the height its container gives it.
  */
-export function ChordLanes({ low = 36, high = 96 }: ChordLanesProps) {
+export function ChordLanes({ low = 36, high = 96, level: shown }: ChordLanesProps) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const level = useSession((s) => s.alongLevel);
+  const chosen = useSession((s) => s.alongLevel);
+  const level = shown ?? chosen;
   const bpm = useSession((s) => s.bpm);
   const locked = useSession((s) => s.liveSource.status === 'on' && s.liveTracker.locked);
   const listening = useSession((s) => s.liveSource.status === 'on');
