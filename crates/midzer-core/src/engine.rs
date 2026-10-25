@@ -9,6 +9,7 @@ use crate::event::{EngineEvent, EventBuffer, MIC_CHANNEL, PLAYER_DRUM_CHANNEL, T
 use crate::listen::{Heard, HeardList, ListenMode, Listener};
 use crate::live::Live;
 use crate::melody::MelodyNote;
+use crate::solo::Solo;
 
 /// MIDI channel for the player's own notes.
 pub const PLAYER_CHANNEL: u8 = 0;
@@ -57,6 +58,8 @@ pub struct Engine {
     backing: Backing,
     /// Live audio the player plays along with, instead of the band.
     live: Live,
+    /// Improvising over the live audio: the player's keys drive a solo.
+    solo: Solo,
 }
 
 impl Engine {
@@ -83,6 +86,7 @@ impl Engine {
             band_drums: BandDrums::Off,
             backing: Backing::new(sample_rate),
             live: Live::new(sample_rate),
+            solo: Solo::new(sample_rate),
         }
     }
 
@@ -90,9 +94,20 @@ impl Engine {
         let drums = self.instrument == Instrument::Drums;
         let track = self.backing.active();
         let live = self.live.active();
+        let solo = !drums && live && self.solo.level() > 0;
         match cmd {
             Command::NoteOn { note, velocity } if drums => self.drum_note(note, velocity),
             Command::NoteOff { .. } if drums => {}
+            Command::NoteOn { note, velocity } if solo && velocity > 0 => {
+                let grid = self.live.grid();
+                if self.solo.press(note, velocity, self.now, grid, &mut self.events) && grid.is_some() {
+                    // The solo's run, timed like the player's own.
+                    self.live.play(self.now, &mut self.events);
+                }
+            }
+            Command::NoteOn { note, .. } | Command::NoteOff { note } if solo => {
+                self.solo.release(note, self.now, &mut self.events);
+            }
             Command::NoteOn { note, velocity: 0 } | Command::NoteOff { note } => {
                 self.held[note as usize] = false;
                 self.events.push(0, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key: note });
@@ -110,6 +125,7 @@ impl Engine {
                 }
             }
             Command::AllNotesOff => {
+                self.solo.silence(0, &mut self.events);
                 for note in 0..128u8 {
                     if std::mem::take(&mut self.held[note as usize]) {
                         self.events.push(0, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key: note });
@@ -127,6 +143,7 @@ impl Engine {
             }
             Command::Stop => {
                 self.start_in = None;
+                self.solo.silence(0, &mut self.events);
                 self.band.stop(&mut self.events);
                 if self.backing.is_playing() {
                     self.backing.stop(0, &mut self.events);
@@ -233,7 +250,12 @@ impl Engine {
             Command::SetLiveOffset { ms } => self.live.set_offset(ms),
             Command::LiveDownbeat => self.live.set_downbeat(self.now),
             Command::LiveTempo { double } => self.live.scale_tempo(double),
-            Command::LiveReset => self.live.reset(self.now, &mut self.events),
+            Command::LiveReset => {
+                self.solo.silence(0, &mut self.events);
+                self.live.reset(self.now, &mut self.events);
+            }
+            Command::SetSolo { level, call: _, lead_ms } => self.solo.set_level(level, lead_ms, &mut self.events),
+            Command::SoloHarmony { tonic, scale, chord } => self.solo.set_harmony(tonic, scale, chord),
             Command::LiveBar { frame, beats } => self.live.bar_ahead(frame, beats, self.now),
             Command::LiveGuide { frame, period, one, confidence, known } => self.live.guide(frame, period, one, confidence, known, self.now),
             Command::TrackClear { beats } => self.backing.clear_beats(beats as u32),
@@ -450,7 +472,10 @@ impl Engine {
                 self.band.process(frames - delay as u32, &mut self.events);
                 self.events.shift_from(mark, delay as u32);
             }
-            None if self.live.active() => self.live.process(frames, self.now, &mut self.events),
+            None if self.live.active() => {
+                self.live.process(frames, self.now, &mut self.events);
+                self.solo.process(frames, self.now, self.live.grid(), &mut self.events);
+            }
             None if self.backing.active() => {
                 let mark = self.events.len();
                 self.backing.process(frames, self.band.song(), &mut self.events);
@@ -1016,6 +1041,51 @@ mod tests {
         let off = engine.process(128).to_vec();
         assert!(off.iter().any(|t| t.event == EngineEvent::Transport { playing: false }));
         assert!(!engine.is_playing());
+    }
+
+    #[test]
+    fn a_solo_takes_the_keys_over_live_audio() {
+        let mut engine = Engine::new(48_000.0);
+        engine.handle(Command::SetLiveOffset { ms: 0.0 });
+        engine.handle(Command::SetLive { on: true });
+        engine.handle(Command::SetSolo { level: 1, call: false, lead_ms: 20.0 });
+        engine.handle(Command::SoloHarmony { tonic: 0, scale: 0b0010_1001_0101, chord: 0b0000_1001_0001 });
+        let click = |f: u64| {
+            let into = (f as f64 / 48_000.0 - 0.25).rem_euclid(0.5);
+            if f >= 12_000 && into < 0.01 { ((f * 7919) % 200) as f32 / 200.0 - 0.5 } else { 0.0 }
+        };
+        let first_tap = 48_000 * 8;
+        let mut events = Vec::new();
+        let mut input = [0.0f32; 128];
+        for block in 0..(48_000 * 12 / 128) as u64 {
+            let at = block * 128;
+            for (i, x) in input.iter_mut().enumerate() {
+                *x = click(at + i as u64);
+            }
+            // The home note twice a beat for three seconds, and a key that isn't it.
+            if at >= first_tap && at < first_tap + 48_000 * 3 && at % 12_000 < 128 {
+                engine.handle(Command::NoteOn { note: 60, velocity: 100 });
+                engine.handle(Command::NoteOn { note: 61, velocity: 100 });
+            }
+            if at % 12_000 >= 2_000 && at % 12_000 < 2_128 {
+                engine.handle(Command::NoteOff { note: 60 });
+                engine.handle(Command::NoteOff { note: 61 });
+            }
+            engine.listen_live(&input);
+            events.extend(engine.process(128).iter().map(|t| (at + t.frame as u64, t.event)));
+            engine.end_block();
+        }
+        let notes: Vec<_> = events.iter().filter_map(|(f, e)| if let EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key, .. } = e { Some((*f, *key)) } else { None }).collect();
+        assert!(notes.first().is_some_and(|n| n.0 >= first_tap), "nothing before the taps");
+        assert!(notes.len() > 12, "the taps play a solo: {notes:?}");
+        assert!(notes.iter().all(|n| n.1 != 61), "the key that isn't the home note stays silent");
+        assert!(events.iter().any(|(_, e)| *e == EngineEvent::Transport { playing: true }), "the solo is a run");
+        assert!(!events.iter().any(|(_, e)| matches!(e, EngineEvent::KeysJudged { .. })), "taps aren't judged");
+        assert!(events.iter().any(|(_, e)| matches!(e, EngineEvent::SoloFeel { energy } if *energy > 128)));
+        // Off again: the keys sound themselves.
+        engine.handle(Command::SetSolo { level: 0, call: false, lead_ms: 20.0 });
+        engine.handle(Command::NoteOn { note: 61, velocity: 100 });
+        assert!(engine.process(128).iter().any(|t| t.event == EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key: 61, velocity: 100 }));
     }
 
     #[test]

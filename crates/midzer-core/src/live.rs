@@ -21,6 +21,7 @@ use crate::drummer::keeps_time;
 use crate::drums::Piece;
 use crate::event::{EngineEvent, EventBuffer};
 use crate::harmony::{Harmony, change};
+use crate::solo::Grid;
 use crate::tracker::{BeatList, BeatTracker, TrackedBeat};
 
 const BEATS: u32 = 4;
@@ -597,6 +598,14 @@ impl Live {
         }
     }
 
+    /// Where the player hears the beats, as [`EngineEvent::Beat`] says; none
+    /// until the beat is found.
+    pub fn grid(&self) -> Option<Grid> {
+        let (at, index, period) = self.tracker.last_beat().filter(|_| self.active && self.tracker.locked())?;
+        let (_, beat) = self.place(index as i64);
+        Some(Grid { at: at + self.offset, index: index as i64, period, one: index as i64 - beat as i64 })
+    }
+
     fn show_beats(&mut self, frames: u32, now: u64, out: &mut EventBuffer) {
         let Some((at, index, period)) = self.tracker.last_beat().filter(|_| self.tracker.locked()) else {
             self.next_shown = None;
@@ -778,6 +787,24 @@ mod tests {
         let tempo = events.iter().rev().find_map(|(_, e)| if let EngineEvent::Tempo { bpm } = e { Some(*bpm) } else { None }).unwrap();
         assert!((tempo - 120.0).abs() < 0.5, "{tempo}");
         assert!(!events.iter().any(|(_, e)| matches!(e, EngineEvent::Transport { .. })), "no run without hits");
+    }
+
+    #[test]
+    fn the_grid_is_where_the_beats_are_shown() {
+        let mut live = Live::new(SR);
+        assert_eq!(live.grid(), None);
+        live.set_active(true, &mut EventBuffer::default());
+        live.set_offset(30.0);
+        run(&mut live, &source(10.0), 0, &[]);
+        let grid = live.grid().expect("the beat is found");
+        let tail = run(&mut live, &source(11.0)[frame(10.0) as usize..], frame(10.0), &[]);
+        let beats: Vec<_> = tail.iter().filter_map(|(f, e)| if let EngineEvent::Beat { beat, .. } = e { Some((*f, *beat)) } else { None }).collect();
+        assert!(beats.len() >= 2);
+        for (f, beat) in beats {
+            let j = grid.index as f64 + (f as f64 - grid.at) / grid.period;
+            assert!((j - j.round()).abs() * grid.period < 2.0 * 128.0, "beat at {f} is off the grid");
+            assert_eq!((j.round() as i64 - grid.one).rem_euclid(4), beat as i64);
+        }
     }
 
     #[test]

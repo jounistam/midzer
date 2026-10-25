@@ -57,6 +57,8 @@ pub enum EngineEvent {
     /// Live audio went quiet (or the player started over) and everything
     /// heard was forgotten: the beat, the 1 and the harmony.
     LiveForgot,
+    /// How much the solo is driven by the player's taps, 0..=255 (see [`crate::Command::SetSolo`]).
+    SoloFeel { energy: u8 },
 }
 
 /// What the band is doing, for the UI.
@@ -99,6 +101,7 @@ mod op {
     pub const LIVE: u32 = 15;
     pub const KEYS_JUDGED: u32 = 16;
     pub const LIVE_FORGOT: u32 = 17;
+    pub const SOLO_FEEL: u32 = 18;
 }
 
 const NO_CHORD: u32 = 0xff;
@@ -138,6 +141,7 @@ impl EngineEvent {
                 [op::LIVE, locked as u32 | (confidence as u32) << 8 | (level as u32) << 16, 0, frame]
             }
             EngineEvent::LiveForgot => [op::LIVE_FORGOT, 0, 0, frame],
+            EngineEvent::SoloFeel { energy } => [op::SOLO_FEEL, energy as u32, 0, frame],
             EngineEvent::KeysJudged { ms, sixteenth, bar, chord } => {
                 let chord = match chord {
                     None => 0,
@@ -194,6 +198,7 @@ impl EngineEvent {
             },
             op::LIVE => EngineEvent::Live { locked: a & 1 != 0, confidence: byte(a >> 8), level: byte(a >> 16) },
             op::LIVE_FORGOT => EngineEvent::LiveForgot,
+            op::SOLO_FEEL => EngineEvent::SoloFeel { energy: byte(a) },
             op::KEYS_JUDGED => EngineEvent::KeysJudged {
                 ms: f32::from_bits(a),
                 sixteenth: byte(b),
@@ -394,6 +399,7 @@ mod tests {
             EngineEvent::KeysJudged { ms: -12.5, sixteenth: 15, bar: 300, chord: Some(false) },
             EngineEvent::KeysJudged { ms: 3.0, sixteenth: 0, bar: 0, chord: None },
             EngineEvent::LiveForgot,
+            EngineEvent::SoloFeel { energy: 201 },
         ] {
             assert_eq!(EngineEvent::decode(event.encode(42)), Some((event, 42)));
         }

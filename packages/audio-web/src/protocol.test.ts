@@ -88,6 +88,8 @@ describe('encodeCommand', () => {
     expect(encodeCommand({ type: 'melodyNote', tick: 960.2, len: 240, key: 72 })).toEqual([50, 960, 240, 72]);
     expect(new Float32Array(new Uint32Array([encodeCommand({ type: 'setMelody', volume: 2 })[1]!]).buffer)[0]).toBe(1);
     expect(encodeCommand({ type: 'setSound', program: 89 })).toEqual([52, 89, 0, 0]);
+    expect(encodeCommand({ type: 'setSolo', level: 3, call: true, leadMs: 42.5 })).toEqual([53, 3 | (1 << 8), new Uint32Array(new Float32Array([42.5]).buffer)[0], 0]);
+    expect(encodeCommand({ type: 'soloHarmony', tonic: 9, scale: 0b0100_1010_1001, chord: 0b1001_0001 })).toEqual([54, 9, 0b0100_1010_1001, 0b1001_0001]);
   });
 
   it('knows each piece by its General MIDI key', () => {
@@ -165,6 +167,7 @@ describe('decodeEvent', () => {
     expect(decodeEvent(15, 0, 0, 4)).toEqual({ type: 'live', locked: false, confidence: 0, level: 0, frame: 4 });
     expect(decodeEvent(16, new Uint32Array(new Float32Array([-6.5]).buffer)[0]!, 3 | (2 << 8) | (7 << 16), 4)).toEqual({ type: 'keysJudged', ms: -6.5, sixteenth: 3, bar: 7, chord: false, frame: 4 });
     expect(decodeEvent(16, new Uint32Array(new Float32Array([1]).buffer)[0]!, 0, 4)).toEqual({ type: 'keysJudged', ms: 1, sixteenth: 0, bar: 0, chord: null, frame: 4 });
+    expect(decodeEvent(18, 255, 0, 4)).toEqual({ type: 'soloFeel', energy: 1, frame: 4 });
     expect(decodeEvent(17, 0, 0, 4)).toEqual({ type: 'liveForgot', frame: 4 });
   });
 

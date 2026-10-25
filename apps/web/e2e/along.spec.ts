@@ -206,6 +206,53 @@ test('play along on keys: the keys of each chord fall onto the keyboard, by leve
   expect(errors).toEqual([]);
 });
 
+test('play along: a solo driven by tapping one key', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  await page.addInitScript(() => localStorage.setItem('midzer.onboarded', '1'));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Play along/ }).click();
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeEnabled({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Keys', exact: true }).click();
+  await page.getByRole('button', { name: 'Solo', exact: true }).click();
+  await expect(page.getByTestId('solo-level')).toContainText('One key');
+  await expect(page.getByTestId('chord-lanes')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Listen' }).click();
+  // C then G: the home note is one of them, and it is the key to tap.
+  await expect(page.getByTestId('solo-prompt')).toContainText(/^Tap (C|G) /, { timeout: 30_000 });
+  await expect(page.getByTestId('solo-feel')).toHaveText('Resting');
+
+  // The space bar is the home note: four taps a beat for a few seconds.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        let taps = 0;
+        const timer = setInterval(() => {
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space' }));
+          setTimeout(() => window.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space' })), 40);
+          if (++taps >= 24) {
+            clearInterval(timer);
+            resolve();
+          }
+        }, 125);
+      }),
+  );
+  await expect(page.getByRole('meter', { name: 'Feel' })).not.toHaveAttribute('aria-valuenow', /^([0-9]|[1-4][0-9])$/);
+  await expect(page.getByTestId('solo-feel')).toHaveText(/Burning|On fire/);
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/17-play-along-solo.png` });
+  // Left alone, it winds down.
+  await expect(page.getByTestId('solo-feel')).toHaveText('Resting', { timeout: 10_000 });
+  // Taps aren't timed; the space bar didn't start or stop anything else.
+  await expect(page.getByTestId('timing-report')).toHaveCount(0);
+
+  const prefs = await page.evaluate(() => JSON.parse(localStorage.getItem('midzer.prefs') ?? '{}'));
+  expect(prefs.alongMode).toBe('solo');
+  expect(errors).toEqual([]);
+});
+
 test('play along: a song heard is learned and kept, without its audio, and recognised again', async ({ page }) => {
   // Half a minute of listening at least, then the analysis, then recognising it.
   test.setTimeout(210_000);

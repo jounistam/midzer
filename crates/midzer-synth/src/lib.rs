@@ -118,7 +118,8 @@ fn apply(synth: &mut Synthesizer, event: &EngineEvent, kit_sound: bool) {
         | EngineEvent::Judged { .. }
             | EngineEvent::Live { .. }
             | EngineEvent::KeysJudged { .. }
-            | EngineEvent::LiveForgot => {}
+            | EngineEvent::LiveForgot
+            | EngineEvent::SoloFeel { .. } => {}
     }
 }
 

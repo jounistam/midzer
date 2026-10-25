@@ -58,6 +58,8 @@ const Cmd = {
   MelodyNote: 50,
   SetMelody: 51,
   SetSound: 52,
+  SetSolo: 53,
+  SoloHarmony: 54,
 } as const;
 
 /** Ticks per beat in song positions; mirrors `PPQ` in style.rs. */
@@ -248,7 +250,14 @@ export type EngineCommand =
   /** How loud the tune plays under the band, 0 (not at all) to 1. */
   | { type: 'setMelody'; volume: number }
   /** The General MIDI program the player's keys sound with. */
-  | { type: 'setSound'; program: number };
+  | { type: 'setSound'; program: number }
+  /**
+   * Improvising over live audio at `level` (1–5; 0 is off), with call and response or not.
+   * `leadMs`: how long the output takes to be heard, so the solo's notes go out that much early.
+   */
+  | { type: 'setSolo'; level: number; call: boolean; leadMs: number }
+  /** The song's home note (0 is C), the scale to solo in and the chord heard now (0 none), as pitch-class bit sets (bit 0 is C). */
+  | { type: 'soloHarmony'; tonic: number; scale: number; chord: number };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -373,6 +382,10 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.SetMelody, floatBits(Math.min(Math.max(cmd.volume, 0), 1)), 0, 0];
     case 'setSound':
       return [Cmd.SetSound, cmd.program & 127, 0, 0];
+    case 'setSolo':
+      return [Cmd.SetSolo, (cmd.level & 0xff) | (cmd.call ? 1 << 8 : 0), floatBits(Math.min(Math.max(cmd.leadMs, 0), 500)), 0];
+    case 'soloHarmony':
+      return [Cmd.SoloHarmony, cmd.tonic % 12, cmd.scale & 0xfff, cmd.chord & 0xfff];
     case 'liveBar':
       return [Cmd.LiveBar, Math.round(cmd.frame) >>> 0, cmd.beats, 0];
     case 'liveGuide': {
@@ -462,7 +475,9 @@ export type EngineEvent =
    */
   | { type: 'keysJudged'; ms: number; sixteenth: number; bar: number; chord: boolean | null }
   /** Live audio went quiet (or `liveReset`) and everything heard was forgotten: the beat, the 1 and the harmony. */
-  | { type: 'liveForgot' };
+  | { type: 'liveForgot' }
+  /** How much the player's taps drive the solo, 0..1. */
+  | { type: 'soloFeel'; energy: number };
 
 /** An event plus the AudioContext frame at which it sounds. */
 export type TimedEvent = EngineEvent & { frame: number };
@@ -538,6 +553,8 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
     }
     case 17:
       return { type: 'liveForgot', frame };
+    case 18:
+      return { type: 'soloFeel', energy: (a & 0xff) / 255, frame };
     default:
       return null;
   }

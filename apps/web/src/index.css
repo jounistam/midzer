@@ -2314,6 +2314,40 @@ code {
   overflow: hidden;
 }
 
+.solo-feel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-6);
+}
+
+.solo-feel-word {
+  margin: 0;
+  text-align: center;
+  font-size: clamp(2rem, 6vw, 4rem);
+  font-weight: 700;
+  font-family: var(--font-family-display);
+  color: var(--color-text-primary);
+}
+
+.solo-feel-track {
+  position: relative;
+  height: 16px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-track);
+  overflow: hidden;
+}
+
+/* Calm cyan warming to the primary pink as the solo heats up. */
+.solo-feel-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--color-accent-default), var(--color-primary-default));
+  transition: width var(--motion-duration-fast);
+}
+
 .along-play-head {
   display: flex;
   align-items: baseline;

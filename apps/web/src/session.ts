@@ -52,6 +52,8 @@ import {
 } from './drums/kit';
 import { pickProgression, progressionCommands } from './drums/progressions';
 import { ChordTimeline, keyHints, snapToBeats, type ChordNow, type HeardChord } from './playalong/chords';
+import { chordBits, KeyFollower, keyOf, pentatonic, type SongKey, type WeightedChord } from './playalong/scale';
+import { homeKey, parseAlongMode, parseSoloLevel, soloHints, type AlongMode, type SoloLevel } from './playalong/solo';
 import { parseLevel, type AlongLevel } from './playalong/levels';
 import { MISS_SOUND_OPTIONS, missOf, playMiss, type MissSound } from './playalong/feedback';
 import type { JudgedHit } from './drums/judging';
@@ -67,7 +69,8 @@ import { songFromAnalysis, transcriptionMidi } from './songs/audio';
 import { Recorder } from './songs/recorder';
 import { loadRecording } from './songs/recordings';
 import { melodyCommands } from './songs/melody';
-import { barAt, barStarts, chartCommands, chordsUsed, newSongId, trackCommands, type Bar, type Song } from './songs/song';
+import { barAt, barStarts, chartCommands, chordsUsed, newSongId, resolvedBeats, trackCommands, type Bar, type Song } from './songs/song';
+import { parseChord } from './songs/chords';
 import { keepFixes, timelineOf, withTimeline } from './songs/timeline';
 import { recordingEnvelope } from './songs/envelope';
 
@@ -234,6 +237,16 @@ interface SessionState {
   liveFollow: LiveFollowed | null;
   /** How much a keys player playing along is asked to play; see ALONG_LEVELS. */
   alongLevel: AlongLevel;
+  /** Playing the chords heard, or soloing over them. */
+  alongMode: AlongMode;
+  /** How much of the solo the player plays; see SOLO_LEVELS. */
+  soloLevel: SoloLevel;
+  /** Call and response while soloing. */
+  soloCall: boolean;
+  /** How much the player's taps drive the solo now, 0..1. */
+  soloFeel: number;
+  /** The live song's key, which the solo plays in. */
+  soloKey: SongKey | null;
   /** Inputs to play along with; names may be missing until audio input is allowed. */
   liveDevices: LiveDevice[];
   /** How much later the player hears each source than midzer does, in ms, by `liveSourceKey`. */
@@ -299,6 +312,9 @@ interface Prefs {
   liveOffsets: Record<string, number>;
   missSound: MissSound;
   alongLevel: AlongLevel;
+  alongMode: AlongMode;
+  soloLevel: SoloLevel;
+  soloCall: boolean;
   melodyVolume: number;
   /** The General MIDI program the player's keys sound with. */
   sound: number;
@@ -324,6 +340,9 @@ function readPrefs(): Prefs {
     liveOffsets: {},
     missSound: 'soft',
     alongLevel: parseLevel(undefined),
+    alongMode: 'chords',
+    soloLevel: parseSoloLevel(undefined),
+    soloCall: false,
     melodyVolume: 0.4,
     sound: 0,
   };
@@ -349,19 +368,22 @@ function readPrefs(): Prefs {
     );
     const missSound = MISS_SOUND_OPTIONS.some((o) => o.value === saved.missSound) ? saved.missSound! : defaults.missSound;
     const alongLevel = parseLevel(saved.alongLevel);
+    const alongMode = parseAlongMode(saved.alongMode);
+    const soloLevel = parseSoloLevel(saved.soloLevel);
+    const soloCall = saved.soloCall === true;
     const melodyVolume = typeof saved.melodyVolume === 'number' ? Math.min(1, Math.max(0, saved.melodyVolume)) : defaults.melodyVolume;
     const sound = parseSound(saved.sound);
-    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, melodyVolume, sound };
+    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, alongMode, soloLevel, soloCall, melodyVolume, sound };
   } catch {
     return defaults;
   }
 }
 
 function savePrefs(): void {
-  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, melodyVolume, sound } = get();
+  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, alongMode, soloLevel, soloCall, melodyVolume, sound } = get();
   // With a song open the style belongs to the song; keep the Jam one.
   const style = get().song ? readPrefs().style : get().style;
-  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, melodyVolume, sound };
+  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, alongMode, soloLevel, soloCall, melodyVolume, sound };
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch {
@@ -438,6 +460,11 @@ export const useSession = create<SessionState>(() => ({
   liveLearning: { analysing: null, offered: [], error: null },
   liveFollow: null,
   alongLevel: prefs.alongLevel,
+  alongMode: prefs.alongMode,
+  soloLevel: prefs.soloLevel,
+  soloCall: prefs.soloCall,
+  soloFeel: 0,
+  soloKey: null,
   liveDevices: [],
   liveOffsets: prefs.liveOffsets,
   missSound: prefs.missSound,
@@ -509,6 +536,7 @@ export async function startAudio(): Promise<void> {
     engine.send({ type: 'setBandDrums', mode: bandDrums });
     engine.send({ type: 'setInstrument', instrument });
     engine.send({ type: 'setSound', program: sound });
+    sendSolo();
     for (const cmd of kitCommands(kitMap(kit))) engine.send(cmd);
     for (const cmd of triggerCommands(kitTriggers)) engine.send(cmd);
     engine.send({ type: 'setKitSound', on: kitSound });
@@ -615,6 +643,9 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
       break;
     case 'liveForgot':
       forgetLiveSong();
+      break;
+    case 'soloFeel':
+      setTimeout(() => set({ soloFeel: event.energy }), delay);
       break;
     case 'songPosition': {
       live.songClock.ms = heardMs;
@@ -820,6 +851,38 @@ export function setAlongLevel(alongLevel: AlongLevel): void {
   savePrefs();
 }
 
+/** Play the chords heard, or solo over them. */
+export function setAlongMode(alongMode: AlongMode): void {
+  set({ alongMode });
+  savePrefs();
+  sendSolo();
+}
+
+export function setSoloLevel(soloLevel: SoloLevel): void {
+  set({ soloLevel });
+  savePrefs();
+  sendSolo();
+}
+
+export function setSoloCall(soloCall: boolean): void {
+  set({ soloCall });
+  savePrefs();
+  sendSolo();
+}
+
+/** Whether the player's keys drive a solo now. */
+function soloing(): boolean {
+  const { alongMode, instrument } = get();
+  return alongMode === 'solo' && instrument === 'keys';
+}
+
+/** The engine solos only over live audio, so this can stay on elsewhere. */
+function sendSolo(): void {
+  const { soloLevel, soloCall, outputLatencyMs } = get();
+  send({ type: 'setSolo', level: soloing() ? soloLevel : 0, call: soloCall, leadMs: outputLatencyMs });
+  if (!soloing()) set({ soloFeel: 0 });
+}
+
 export function setIdleMode(mode: IdleMode): void {
   set({ idleMode: mode });
   savePrefs();
@@ -877,6 +940,7 @@ export function setInstrument(instrument: Instrument): void {
   send({ type: 'setInstrument', instrument });
   resetLive();
   syncJamHarmony();
+  sendSolo();
 }
 
 /** Which pieces count the band in. */
@@ -1308,8 +1372,39 @@ function setAlongHints(hints: Map<number, number>): void {
   live.version++;
 }
 
+/** The live song's key, kept steady for the solo. */
+const liveKey = new KeyFollower();
+/** The harmony last sent to the solo. */
+let soloHarmonySent = '';
+
+/** The chords heard over this long tell the key. */
+const KEY_WINDOW_MS = 30_000;
+/** The solo moves to the next chord this much before it is heard, as the lit keys do. */
+const SOLO_SWITCH_MS = 150;
+
+/** Tells the solo the song's key and the chord heard now; returns the key. */
+function sendSoloHarmony(spans: readonly HeardChord[], ms: number): SongKey | null {
+  const weighted: WeightedChord[] = spans.flatMap((s) => (s.chord && !s.predicted ? [{ chord: s.chord, weight: Math.min(s.toMs, ms) - s.fromMs }] : [])).filter((c) => c.weight > 0);
+  const key = get().liveFollow && liveKey.key ? liveKey.key : liveKey.update(weighted, ms);
+  const now = spans.find((s) => s.fromMs <= ms + SOLO_SWITCH_MS && ms + SOLO_SWITCH_MS < s.toMs)?.chord ?? null;
+  if (key) {
+    const harmony = { type: 'soloHarmony', tonic: key.tonic, scale: pentatonic(key), chord: chordBits(now) } as const;
+    const sent = `${harmony.tonic}/${harmony.scale}/${harmony.chord}`;
+    if (sent !== soloHarmonySent) {
+      soloHarmonySent = sent;
+      send(harmony);
+    }
+  }
+  const shown = get().soloKey;
+  if (key?.tonic !== shown?.tonic || key?.minor !== shown?.minor) set({ soloKey: key });
+  return key;
+}
+
 /** The source went quiet or the player started over: what was heard of the song goes. */
 function forgetLiveSong(): void {
+  liveKey.reset();
+  soloHarmonySent = '';
+  set({ soloKey: null });
   liveChords.clear();
   set({ liveChord: { current: null, before: [], next: null } });
   setAlongHints(new Map());
@@ -1345,6 +1440,17 @@ async function sendLiveLibrary(): Promise<void> {
 function onLiveFollow(follow: LiveFollow | null): void {
   const song = follow ? recognisable.get(liveIds.songOf(follow.id) ?? '') : undefined;
   set({ liveFollow: song ? { songId: song.id, title: song.title, bpm: song.bpm, chords: chordsUsed(song.bars) } : null });
+  // A song kept knows its key from its whole chart.
+  const key = song ? keyOf(chartChords(song.bars)) : null;
+  if (key) liveKey.set(key);
+}
+
+/** A chart's chords, each weighted by its beats. */
+function chartChords(bars: Bar[]): WeightedChord[] {
+  return resolvedBeats(bars).flatMap((name) => {
+    const spec = name ? parseChord(name) : null;
+    return spec ? [{ chord: { root: spec.root, quality: spec.quality }, weight: 1 }] : [];
+  });
 }
 
 /** "Not this song": stops following the song recognised until the music stops or starts over. */
@@ -1454,12 +1560,15 @@ function followLiveChords(on: boolean): void {
   if (!on) return;
   liveChordTimer = setInterval(() => {
     const ms = performance.now();
-    const { instrument, alongLevel, bpm, liveTracker } = get();
+    const { instrument, alongLevel, bpm, liveTracker, soloLevel } = get();
     // The next chord's keys show from a beat before it.
     const leadMs = liveTracker.locked && bpm > 0 ? 60_000 / bpm : 600;
-    const spans = liveChords.window(ms - leadMs, ms + leadMs + 1, ms);
+    const spans = liveChords.window(ms - KEY_WINDOW_MS, ms + leadMs + 1, ms);
     // On the beats the player sees, like the falling chords.
-    setAlongHints(instrument === 'keys' ? keyHints(liveTracker.locked && bpm > 0 ? snapToBeats(spans, live.beatClock.ms, 60_000 / bpm) : spans, ms, alongLevel, leadMs) : new Map());
+    const snapped = liveTracker.locked && bpm > 0 ? snapToBeats(spans, live.beatClock.ms, 60_000 / bpm) : spans;
+    const key = sendSoloHarmony(snapped, ms);
+    if (soloing()) setAlongHints(soloHints(soloLevel, key));
+    else setAlongHints(instrument === 'keys' ? keyHints(snapped, ms, alongLevel, leadMs) : new Map());
     const now = liveChords.at(ms);
     const shown = get().liveChord;
     // The countdown to the next chord changes every tenth of a second, not on every tick.
@@ -1660,12 +1769,22 @@ function isTyping(target: EventTarget | null): boolean {
 /** The computer keys are drum pads for drummers. */
 const drumKeys = () => get().instrument === 'drums';
 
+/** The key the space bar plays: the home note while soloing on level 1 over live audio. */
+function spaceTap(): number | null {
+  const { screen, soloLevel, soloKey } = get();
+  return screen === 'along' && soloing() && soloLevel === 1 && soloKey ? homeKey(soloKey) : null;
+}
+
 export function attachQwerty(): () => void {
   const down = (e: KeyboardEvent) => {
     if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.code === 'Space') {
       e.preventDefault();
-      if (!e.repeat) togglePlay();
+      // Soloing on one key, the space bar is that key.
+      const tap = spaceTap();
+      if (tap !== null) {
+        if (!e.repeat) playerNoteOn(tap);
+      } else if (!e.repeat) togglePlay();
       return;
     }
     if (drumKeys()) {
@@ -1678,6 +1797,8 @@ export function attachQwerty(): () => void {
     if (note !== undefined && !e.repeat) playerNoteOn(note);
   };
   const up = (e: KeyboardEvent) => {
+    const tap = e.code === 'Space' ? spaceTap() : null;
+    if (tap !== null) playerNoteOff(tap);
     if (drumKeys()) return;
     const note = qwertyToNote(e.key);
     if (note !== undefined) playerNoteOff(note);
