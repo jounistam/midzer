@@ -504,14 +504,16 @@ impl BeatTracker {
                 }
             },
         };
+        // A stored song's beats are kept to whatever the programme hears.
+        let known = self.fresh_guide().is_some_and(|g| g.known);
         if (self.period.unwrap_or(0.0) - next).abs() > 1e-3 {
-            if self.period.is_some_and(|p| (next / p - 1.0).abs() > TEMPO_JUMP) {
+            if !known && self.period.is_some_and(|p| (next / p - 1.0).abs() > TEMPO_JUMP) {
                 // A new tempo: the loop starts over from the programme's beats.
                 self.unlock();
             }
             self.set_period(next);
         }
-        if self.locked && (self.confidence < UNLOCK_CONFIDENCE) {
+        if !known && self.locked && (self.confidence < UNLOCK_CONFIDENCE) {
             self.unlock();
         }
     }

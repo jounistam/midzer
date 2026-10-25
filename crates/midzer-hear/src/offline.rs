@@ -7,7 +7,9 @@
 //!   overlap the earlier one is kept (`split_predict_aggregate(…, 1500, 6,
 //!   "keep_first")`). The peaks are its minimal postprocessor's, refined to a
 //!   fraction of a frame; each downbeat moves to the nearest beat. No grid is
-//!   fitted, so a song that drifts in tempo keeps its drift.
+//!   fitted, so a song that drifts in tempo keeps its drift, but the beats
+//!   keep to one level: the network sometimes hears a stretch at double or
+//!   half the song's tempo, and those stretches are thinned out or filled in.
 //! - BTC runs over the constant-Q spectrum in windows of 108 frames that
 //!   overlap by half; each frame takes the label from the window it is most
 //!   central in. Flickers of one frame are smoothed away.
@@ -27,6 +29,13 @@ const CHUNK: usize = 1500;
 const BORDER: usize = 6;
 /// BTC's windows start this many frames apart.
 const CHORD_STEP: usize = CHORD_FRAMES / 2;
+
+/// Beats closer than this (of the beat's length) to the last one kept are
+/// dropped; gaps of up to `MAX_FILL` beats are filled in. The beat's length
+/// follows the beats kept, a little each beat.
+const LEVEL_SKIP: f64 = 0.75;
+const MAX_FILL: f64 = 8.0;
+const LEVEL_FOLLOW: f64 = 0.1;
 
 /// A chord from one time to another (seconds); `None` is no chord.
 pub type TimedChord = (f64, f64, Option<Chord>);
@@ -55,7 +64,7 @@ pub fn hear_beats(signal: &[f32], progress: &mut dyn FnMut(f32)) -> Result<(Vec<
     let mels = Mel::new(model.mel_filters.clone()).whole(signal);
     let (beat, downbeat) = beat_logits(&mut model, &mels, progress);
     let at = |j: f64| j / FPS as f64;
-    let beats: Vec<f64> = peaks(&beat).into_iter().map(|p| at(refine(&beat, p.0))).collect();
+    let beats = one_level(&peaks(&beat).into_iter().map(|p| at(refine(&beat, p.0))).collect::<Vec<_>>());
     let mut downbeats: Vec<f64> = Vec::new();
     for (j, _) in peaks(&downbeat) {
         let t = at(j);
@@ -65,6 +74,39 @@ pub fn hear_beats(signal: &[f32], progress: &mut dyn FnMut(f32)) -> Result<(Vec<
         }
     }
     Ok((beats, downbeats))
+}
+
+/// `beats` at the song's own tempo throughout (the most common beat length,
+/// drifting with the song): beats in a stretch heard twice as fast are
+/// thinned out, and in one heard half as fast filled in, on the grid of
+/// the beats before.
+fn one_level(beats: &[f64]) -> Vec<f64> {
+    if beats.len() < 4 {
+        return beats.to_vec();
+    }
+    let mut intervals: Vec<f64> = beats.windows(2).map(|w| w[1] - w[0]).collect();
+    intervals.sort_by(f64::total_cmp);
+    let mut period = intervals[intervals.len() / 2];
+    let mut out = vec![beats[0]];
+    for &b in &beats[1..] {
+        let last = out[out.len() - 1];
+        let gap = b - last;
+        if gap < LEVEL_SKIP * period {
+            continue;
+        }
+        let n = (gap / period).round().max(1.0);
+        if n <= MAX_FILL {
+            for k in 1..n as usize {
+                out.push(last + k as f64 * gap / n);
+            }
+            let step = gap / n;
+            if (step / period - 1.0).abs() < 0.25 {
+                period += LEVEL_FOLLOW * (step - period);
+            }
+        }
+        out.push(b);
+    }
+    out
 }
 
 /// Beat and downbeat logits for every mel frame, chunk by chunk.
@@ -197,6 +239,29 @@ mod tests {
                 (tones + drum + hat) as f32
             })
             .collect()
+    }
+
+    #[test]
+    fn beats_keep_to_one_level_through_doubled_and_halved_stretches() {
+        // 0.5 s beats; 20–30 s heard twice as fast, 40–50 s half as fast, and the tempo drifts 10 % by the end.
+        let mut beats = Vec::new();
+        let mut t = 0.0f64;
+        while t < 70.0 {
+            let p = 0.5 * (1.0 - 0.1 * t / 70.0);
+            if (20.0..30.0).contains(&t) {
+                beats.push(t + 0.5 * p);
+            }
+            if !(40.0..50.0).contains(&t) || ((t - 40.0) / 0.5).round() as i64 % 2 == 0 {
+                beats.push(t);
+            }
+            t += p;
+        }
+        beats.sort_by(f64::total_cmp);
+        let level = one_level(&beats);
+        let gaps: Vec<f64> = level.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps.iter().all(|&g| (0.4..0.55).contains(&g)), "{gaps:?}");
+        // The beats kept are the song's own, not the ones in between.
+        assert!(level.iter().filter(|t| (20.0..30.0).contains(*t)).all(|t| beats.contains(t)));
     }
 
     #[test]

@@ -25,6 +25,7 @@
 //!   within 200 ms); and the same in hindsight.
 //!
 //! Settings: WINDOW, EVERY (beat runs), CHORD_EVERY, EDGE, FIT (seconds), CHANGE_W.
+//! TRACE=1 prints each grid's tempo and each change of song followed as it comes.
 //!
 //! KNOWN=1 first analyses each song whole, as an import is (beat map, chords
 //! and fingerprint), and gives the listener that as its library, so it can
@@ -173,10 +174,18 @@ fn evaluate(path: &str, dir: &str, slow: f64) -> Score {
             let ready = now + took;
             free_at = ready;
             match heard {
-                Heard::Grid(g) => grids.push((ready, g)),
+                Heard::Grid(g) => {
+                    if env("TRACE").is_some() {
+                        eprintln!("{ready:7.2} grid {:6.2} bpm known {} conf {:.2}", g.bpm(SR as f64), g.known, g.confidence);
+                    }
+                    grids.push((ready, g))
+                }
                 Heard::Chords(c) => chords.push((ready, c)),
                 Heard::Bars(b) => bar_lines.push((ready, b)),
                 Heard::Follow(f) => {
+                    if env("TRACE").is_some() {
+                        eprintln!("{ready:7.2} follow {:?}", f.map(|f| f.seconds));
+                    }
                     if f.is_some() && score.follow_s.is_none() {
                         score.follow_s = Some(ready - start_s);
                     }
