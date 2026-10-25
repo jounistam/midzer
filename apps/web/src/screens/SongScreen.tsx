@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { BpmInput } from '../components/BpmInput';
 import { ChartView, type Selection } from '../components/ChartView';
+import { ChordSheet } from '../components/ChordSheet';
 import { BandMutes, EnergyControl, PlayButton, TakeButton, TempoControl } from '../components/ControlPanel';
 import { Keyboard } from '../components/Keyboard';
 import { KitView } from '../components/KitView';
@@ -28,6 +30,7 @@ import { STEP_LABELS } from '../songs/audio';
 import { isBuiltin } from '../songs/library';
 import {
   barStarts,
+  chordsUsed,
   emptyBar,
   formatChart,
   MAX_BARS,
@@ -71,6 +74,7 @@ export function SongScreen() {
         <div className="song-stage">
           <NowPlaying song={song} />
           {(drums || recording) && <PlayTiming recording={recording} />}
+          {!drums && !editing && <SongChords song={song} />}
           {notes.length > 0 && (
             <p className="notice" role="status">
               {notes.join(' ')}
@@ -109,6 +113,11 @@ export function SongScreen() {
       {drums ? <KitView height={kitHeight} /> : <Keyboard split={split} />}
     </div>
   );
+}
+
+function SongChords({ song }: { song: Song }) {
+  const chords = useMemo(() => chordsUsed(song.bars), [song.bars]);
+  return <ChordSheet chords={chords} />;
 }
 
 /** Ctrl-Z / Ctrl-Shift-Z (or Ctrl-Y) undo and redo edits of the song while editing, outside text fields. */
@@ -352,16 +361,7 @@ function SongHeader({ song, editing, onEditing }: { song: Song; editing: boolean
           </label>
           <label>
             <span className="label">Tempo</span>
-            <input
-              type="number"
-              min={40}
-              max={240}
-              value={song.bpm}
-              onChange={(e) => {
-                const bpm = Math.round(Number(e.target.value));
-                if (bpm >= 40 && bpm <= 240) update({ bpm });
-              }}
-            />
+            <BpmInput value={song.bpm} onChange={(bpm) => update({ bpm })} label="Tempo" />
           </label>
         </div>
       ) : (

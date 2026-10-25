@@ -5,7 +5,8 @@
 //! f64s at [`mzh_result_ptr`]:
 //!
 //! - a grid (step returns 1): the beat's engine frame, the period in frames,
-//!   which beat of the bar it is (−1 unknown) and the confidence;
+//!   which beat of the bar it is (−1 unknown), the confidence, and 1 if it
+//!   is a stored song's known grid (else 0);
 //! - chords (step returns 2): per span from, to (engine frames), the chord
 //!   as root · 16 + the engine's quality index (−1 for none), and 1 if it is
 //!   predicted from the song's loop rather than heard (else 0);
@@ -75,7 +76,7 @@ pub unsafe extern "C" fn mzh_step(l: *mut Listener) -> u32 {
     match l.hearing.step() {
         None => 0,
         Some(Heard::Grid(g)) => {
-            l.result.extend([g.beat, g.period, g.one.map_or(-1.0, |o| o as f64), g.confidence as f64]);
+            l.result.extend([g.beat, g.period, g.one.map_or(-1.0, |o| o as f64), g.confidence as f64, g.known as u8 as f64]);
             1
         }
         Some(Heard::Follow(f)) => {

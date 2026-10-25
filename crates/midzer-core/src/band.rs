@@ -6,6 +6,7 @@ use crate::conductor::{Conductor, IdleMode, Request, Section};
 use crate::drummer::{FillDetector, keeps_time, time_weight};
 use crate::drums::Piece;
 use crate::event::{BandState, DRUM_CHANNEL, EngineEvent, EventBuffer};
+use crate::melody::{MELODY_CHANNEL, MELODY_PROGRAM, Melody, MelodyNote};
 use crate::song::{Slot, SongPlayer};
 use crate::style::{
     BEATS_PER_BAR, CRASH, HAT, Hit, OPEN_HAT, PPQ, Part, PartKind, Pattern, RIDE, SHAKER, SIDE_STICK, SNARE, Step, Style, TAMBOURINE,
@@ -127,6 +128,8 @@ pub struct Band {
     published: Option<BandState>,
     /// A chord chart that replaces the player's chords while active.
     song: SongPlayer,
+    /// The song's tune, played under the band while a song plays.
+    melody: Melody,
     /// A song tick where the band stops and waits for the player.
     wait: Option<u32>,
     /// While waiting: the band tick it stopped at and the song tick.
@@ -198,6 +201,7 @@ impl Band {
             click: false,
             published: None,
             song: SongPlayer::default(),
+            melody: Melody::default(),
             wait: None,
             hold: None,
             song_beat: None,
@@ -483,6 +487,22 @@ impl Band {
         self.song.set_bar_beats(bar, beats);
     }
 
+    pub fn clear_melody(&mut self) {
+        self.melody.clear();
+    }
+
+    pub fn add_melody_note(&mut self, note: MelodyNote) {
+        self.melody.add(note);
+    }
+
+    /// How loud the song's tune plays under the band, 0 (not at all) to 1.
+    pub fn set_melody_volume(&mut self, volume: f32, out: &mut EventBuffer) {
+        self.melody.set_volume(volume);
+        if volume <= 0.0 {
+            self.release_all(|ch| ch == MELODY_CHANNEL, 0, out);
+        }
+    }
+
     pub fn set_song_loop(&mut self, start: u32, end: u32) {
         self.song.set_loop(start, end);
     }
@@ -656,7 +676,7 @@ impl Band {
         let song_tick = self.wait.unwrap_or(0);
         let frame = clock.frame(tick);
         let style = self.style;
-        let rhythm = |ch: u8| style.parts.iter().any(|p| p.channel == ch && matches!(p.kind, PartKind::Drums | PartKind::Bass));
+        let rhythm = |ch: u8| ch == MELODY_CHANNEL || style.parts.iter().any(|p| p.channel == ch && matches!(p.kind, PartKind::Drums | PartKind::Bass));
         self.release_all(rhythm, frame, out);
         out.push(frame, EngineEvent::Hold { holding: true, tick: song_tick });
         self.hold = Some((tick, song_tick));
@@ -812,6 +832,19 @@ impl Band {
                 }
             }
         }
+        self.schedule_melody(from, to, clock, out);
+    }
+
+    /// The song's tune in band ticks `from..to`, inside the song beat playing.
+    fn schedule_melody(&mut self, from: f64, to: f64, clock: &BlockClock, out: &mut EventBuffer) {
+        let Some((beat_tick, beat)) = self.song_beat.filter(|_| self.song.active()) else { return };
+        let shift = (beat * PPQ) as f64 - beat_tick;
+        let velocity = self.melody.velocity();
+        for i in self.melody.starting(from + shift, to + shift) {
+            let n = self.melody.note(i);
+            let tick = n.tick as f64 - shift;
+            self.note_on(MELODY_CHANNEL, n.key, velocity, tick, tick + n.len.max(1) as f64, clock.frame(tick), out);
+        }
     }
 
     /// The pattern `part` plays in the current section, if any.
@@ -935,6 +968,7 @@ impl Band {
         for part in &self.style.parts {
             out.push(frame, EngineEvent::ProgramChange { channel: part.channel, program: part.program });
         }
+        out.push(frame, EngineEvent::ProgramChange { channel: MELODY_CHANNEL, program: MELODY_PROGRAM });
     }
 
     fn state(&self) -> BandState {
@@ -1310,6 +1344,32 @@ mod tests {
         let chord = events.iter().find(|(_, e)| matches!(e, EngineEvent::ChordChanged(_))).unwrap();
         assert_eq!((chord.0, chord.1), (resume, EngineEvent::ChordChanged(Some(Chord::new(7, Quality::Major)))));
         assert!(note_ons(&events, 9).iter().any(|(f, _)| *f == resume), "the band comes back in on the beat");
+    }
+
+    #[test]
+    fn the_tune_plays_with_the_song_and_waits_with_it() {
+        let (mut band, mut frame) = song_band();
+        for (tick, key) in [(PPQ / 2, 72), (PPQ, 74), (5 * PPQ, 76)] {
+            band.add_melody_note(MelodyNote { tick, len: PPQ / 2, key });
+        }
+        band.set_song_wait(Some(4 * PPQ));
+        let events = run(&mut band, 4.0, &mut frame);
+        assert!(note_ons(&events, MELODY_CHANNEL).is_empty(), "silent with no volume");
+
+        let (mut band, mut frame) = song_band();
+        for (tick, key) in [(PPQ / 2, 72), (PPQ, 74), (5 * PPQ, 76)] {
+            band.add_melody_note(MelodyNote { tick, len: 4 * PPQ, key });
+        }
+        band.set_melody_volume(0.5, &mut EventBuffer::default());
+        band.set_song_wait(Some(4 * PPQ));
+        let events = run(&mut band, 4.0, &mut frame);
+        assert_eq!(note_ons(&events, MELODY_CHANNEL), [(12_000, 72), (24_000, 74)]);
+        assert!(events.iter().any(|(f, e)| *f == 96_000 && matches!(e, EngineEvent::NoteOff { channel: MELODY_CHANNEL, key: 74 })), "it stops with the band");
+        band.set_song_wait(None);
+        let resume = frame;
+        let events = run(&mut band, 3.0, &mut frame);
+        assert_eq!(note_ons(&events, MELODY_CHANNEL), [(resume + 24_000, 76)]);
+        assert!(events.iter().any(|(f, e)| *f == resume + 120_000 && matches!(e, EngineEvent::NoteOff { channel: MELODY_CHANNEL, key: 76 })));
     }
 
     #[test]

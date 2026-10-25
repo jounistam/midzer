@@ -83,6 +83,10 @@ describe('encodeCommand', () => {
     expect(new Float32Array(new Uint32Array([guide[2]!]).buffer)[0]).toBe(24_000);
     expect(guide[3]).toBe(4 | (255 << 8));
     expect(encodeCommand({ type: 'liveGuide', frame: 10, period: 1, one: null, confidence: 0 })[3]).toBe(0);
+    expect(encodeCommand({ type: 'liveGuide', frame: 10, period: 1, one: null, confidence: 0, known: true })[3]).toBe(1 << 16);
+    expect(encodeCommand({ type: 'melodyClear' })).toEqual([49, 0, 0, 0]);
+    expect(encodeCommand({ type: 'melodyNote', tick: 960.2, len: 240, key: 72 })).toEqual([50, 960, 240, 72]);
+    expect(new Float32Array(new Uint32Array([encodeCommand({ type: 'setMelody', volume: 2 })[1]!]).buffer)[0]).toBe(1);
   });
 
   it('knows each piece by its General MIDI key', () => {

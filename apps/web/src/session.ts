@@ -65,7 +65,8 @@ import { loadFingerprint, saveFingerprint } from './songs/fingerprints';
 import { songFromAnalysis, transcriptionMidi } from './songs/audio';
 import { Recorder } from './songs/recorder';
 import { loadRecording } from './songs/recordings';
-import { barAt, barStarts, chartCommands, newSongId, trackCommands, type Bar, type Song } from './songs/song';
+import { melodyCommands } from './songs/melody';
+import { barAt, barStarts, chartCommands, chordsUsed, newSongId, trackCommands, type Bar, type Song } from './songs/song';
 import { keepFixes, timelineOf, withTimeline } from './songs/timeline';
 import { recordingEnvelope } from './songs/envelope';
 
@@ -111,6 +112,8 @@ export interface LiveFollowed {
   songId: string;
   title: string;
   bpm: number;
+  /** Every chord the song uses, in the order they first come. */
+  chords: string[];
 }
 
 /** Songs learned from the live source: the one being analysed, those offered (newest first), and why the last one failed. */
@@ -240,6 +243,8 @@ interface SessionState {
   liveSyncError: string | null;
   /** A tick for hits clearly off (or wrong chords) while playing along. */
   missSound: MissSound;
+  /** How loud the song's tune plays under the band in Learn, 0 (not at all) to 1. */
+  melodyVolume: number;
 }
 
 export const BAND_DRUMS_OPTIONS: { mode: BandDrums; label: string }[] = [
@@ -291,6 +296,7 @@ interface Prefs {
   liveOffsets: Record<string, number>;
   missSound: MissSound;
   alongLevel: AlongLevel;
+  melodyVolume: number;
 }
 
 function readPrefs(): Prefs {
@@ -313,6 +319,7 @@ function readPrefs(): Prefs {
     liveOffsets: {},
     missSound: 'soft',
     alongLevel: parseLevel(undefined),
+    melodyVolume: 0.4,
   };
   try {
     const saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Partial<Prefs>;
@@ -336,17 +343,18 @@ function readPrefs(): Prefs {
     );
     const missSound = MISS_SOUND_OPTIONS.some((o) => o.value === saved.missSound) ? saved.missSound! : defaults.missSound;
     const alongLevel = parseLevel(saved.alongLevel);
-    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel };
+    const melodyVolume = typeof saved.melodyVolume === 'number' ? Math.min(1, Math.max(0, saved.melodyVolume)) : defaults.melodyVolume;
+    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, melodyVolume };
   } catch {
     return defaults;
   }
 }
 
 function savePrefs(): void {
-  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel } = get();
+  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, melodyVolume } = get();
   // With a song open the style belongs to the song; keep the Jam one.
   const style = get().song ? readPrefs().style : get().style;
-  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel };
+  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, melodyVolume };
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch {
@@ -426,6 +434,7 @@ export const useSession = create<SessionState>(() => ({
   liveDevices: [],
   liveOffsets: prefs.liveOffsets,
   missSound: prefs.missSound,
+  melodyVolume: prefs.melodyVolume,
   liveSyncTaps: null,
   liveSyncError: null,
 }));
@@ -504,6 +513,7 @@ export async function startAudio(): Promise<void> {
     engine.send({ type: 'setSplit', note: split });
     recorder = new Recorder(engine.sampleRate);
     syncSong();
+    syncMelody();
     void loadSongRecording();
     syncJamHarmony();
     if (get().screen === 'along') enterPlayAlong();
@@ -784,6 +794,18 @@ export function setMissSound(missSound: MissSound): void {
   playMiss('early', missSound);
 }
 
+/** How loud the song's tune plays under the band in Learn. */
+export function setMelodyVolume(melodyVolume: number): void {
+  set({ melodyVolume: Math.min(1, Math.max(0, melodyVolume)) });
+  savePrefs();
+  sendMelodyVolume();
+}
+
+/** The tune is heard in Learn only. */
+function sendMelodyVolume(): void {
+  send({ type: 'setMelody', volume: get().screen === 'lesson' ? get().melodyVolume : 0 });
+}
+
 export function setAlongLevel(alongLevel: AlongLevel): void {
   set({ alongLevel });
   savePrefs();
@@ -1003,7 +1025,14 @@ export function openSong(song: Song, notes: string[] = [], { screen = 'song' as 
   send({ type: 'setStyle', index: song.style });
   setTempo(song.bpm * speed);
   syncSong();
+  syncMelody();
   void loadSongRecording();
+}
+
+/** Loads the open song's tune into the engine, at the volume for the screen. */
+function syncMelody(): void {
+  for (const cmd of melodyCommands(get().song?.melody)) send(cmd);
+  sendMelodyVolume();
 }
 
 /** Leaves the song: back to following the player, with the Jam style and tempo. */
@@ -1015,6 +1044,7 @@ export function closeSong(screen: Screen = 'songs'): void {
   clearHistory();
   const { style } = readPrefs();
   set({ song: null, songDirty: false, songBar: null, loop: null, screen, style });
+  sendMelodyVolume();
   send({ type: 'setStyle', index: style });
   setTempo(STYLES[style]!.bpm);
   syncJamHarmony();
@@ -1061,6 +1091,7 @@ function showSong(song: Song, before: Song | null): void {
     songStartBar: Math.min(get().songStartBar, Math.max(0, bars - 1)),
   });
   syncSong();
+  if (song.melody !== before?.melody) syncMelody();
   if (song.bpm !== before?.bpm) setTempo(song.bpm);
   if (song.backing && song.backing.beatTimes !== before?.backing?.beatTimes && get().recording.status === 'ready') {
     for (const cmd of trackCommands(song.backing)) send(cmd);
@@ -1297,7 +1328,7 @@ async function sendLiveLibrary(): Promise<void> {
 
 function onLiveFollow(follow: LiveFollow | null): void {
   const song = follow ? recognisable.get(liveIds.songOf(follow.id) ?? '') : undefined;
-  set({ liveFollow: song ? { songId: song.id, title: song.title, bpm: song.bpm } : null });
+  set({ liveFollow: song ? { songId: song.id, title: song.title, bpm: song.bpm, chords: chordsUsed(song.bars) } : null });
 }
 
 /** "Not this song": stops following the song recognised until the music stops or starts over. */
@@ -1363,15 +1394,21 @@ async function learnNext(): Promise<void> {
 }
 
 /**
- * Keeps a learned song in My songs, with its fingerprint; more of a song
- * kept in part replaces that song's chart and beat map, keeping its title,
- * artist and style. Resolves false if it could not be stored.
+ * Keeps a learned song in My songs, with its fingerprint, under the name
+ * given (blank keeps the one it was offered with); more of a song kept in
+ * part replaces that song's chart and beat map, keeping its title, artist
+ * and style. Resolves false if it could not be stored.
  */
-export async function keepLearnedSong(id: string): Promise<boolean> {
+export async function keepLearnedSong(id: string, title?: string): Promise<boolean> {
   const learned = learning().offered.find((l) => l.song.id === id);
   if (!learned) return false;
   const kept = learned.extends ? (await loadUserSongs()).find((s) => s.id === learned.extends!.id) : undefined;
-  const song: Song = kept ? { ...learned.song, id: kept.id, title: kept.title, style: kept.style, ...(kept.artist ? { artist: kept.artist } : {}) } : learned.song;
+  const named = title?.trim();
+  const song: Song = kept
+    ? { ...learned.song, id: kept.id, title: kept.title, style: kept.style, ...(kept.artist ? { artist: kept.artist } : {}) }
+    : named
+      ? { ...learned.song, title: named }
+      : learned.song;
   if (!(await saveUserSong(song))) return false;
   await saveFingerprint(song.id, learned.fingerprint);
   dismissLearnedSong(id);

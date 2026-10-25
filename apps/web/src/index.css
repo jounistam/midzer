@@ -150,6 +150,16 @@ kbd {
   color: var(--color-text-primary);
 }
 
+.btn-danger {
+  background: transparent;
+  color: var(--color-status-danger);
+  border-color: color-mix(in srgb, var(--color-status-danger) 60%, transparent);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-status-danger) 14%, transparent);
+}
+
 .btn-xl {
   min-height: var(--size-control-lg);
   padding: 0 var(--space-8);
@@ -460,6 +470,34 @@ kbd {
   text-align: center;
 }
 
+.tempo-value {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+}
+
+/* Looks like the number it is until it is edited. */
+.tempo-value input[type='number'] {
+  width: 3.2ch;
+  min-height: 0;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  font: inherit;
+  text-align: center;
+  -moz-appearance: textfield;
+}
+
+.tempo-value input[type='number']::-webkit-inner-spin-button,
+.tempo-value input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.tempo-value input[type='number']:hover {
+  border-color: var(--color-border-default);
+}
+
 .tempo-value small {
   margin-left: 4px;
   font-family: var(--font-family-body);
@@ -486,6 +524,12 @@ kbd {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.setting-value {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
 .pad-grid {
@@ -2083,7 +2127,7 @@ code {
 
 /* ---- Play along with live audio --------------------------------------------- */
 
-.along-learned {
+.jam-stage .along-learned {
   flex: none;
   display: flex;
   flex-direction: column;
@@ -2091,7 +2135,7 @@ code {
   padding: var(--space-4) var(--space-6);
 }
 
-.along-followed {
+.jam-stage .along-followed {
   flex: none;
   display: flex;
   align-items: center;
@@ -2116,8 +2160,25 @@ code {
 
 .learned-song {
   display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.learned-actions {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-3);
+}
+
+.learned-actions .setting-note {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
+.learned-name {
+  flex: 1 1 200px;
+  min-width: 0;
 }
 
 .learned-info {
@@ -2302,6 +2363,123 @@ code {
   flex: none;
   max-height: 40vh;
   overflow-y: auto;
+}
+
+/* ---- The chords a song uses, and how to play each ------------------------------ */
+
+.jam-stage .chord-sheet,
+.song-stage .chord-sheet {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-6);
+}
+
+.chord-sheet-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.chord-sheet-head p {
+  margin: 0;
+}
+
+.chord-sheet-hint {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.chord-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.chord-chip {
+  min-width: 52px;
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-control);
+  background: var(--color-surface-raised);
+  color: var(--color-text-primary);
+  font-family: var(--font-family-display);
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chord-chip:hover {
+  background: var(--color-surface-hover);
+}
+
+.chord-chip.on {
+  border-color: var(--color-accent-default);
+  box-shadow: 0 0 0 1px var(--color-accent-default);
+}
+
+.chord-shape {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.mini-keys {
+  flex: 1 1 320px;
+  max-width: 520px;
+  height: auto;
+}
+
+.mini-keys .white {
+  fill: #f2f2f5;
+  stroke: var(--color-border-default);
+}
+
+.mini-keys .black {
+  fill: #16161c;
+}
+
+.mini-keys .left {
+  fill: var(--color-note-melody);
+}
+
+.mini-keys .right {
+  fill: var(--color-note-chord);
+}
+
+.mini-keys .middle-c {
+  fill: var(--color-text-muted);
+}
+
+.chord-shape-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  font-size: 14px;
+  color: var(--color-text-secondary);
+}
+
+.chord-shape-notes .hand::before {
+  content: '';
+  display: inline-block;
+  width: 14px;
+  height: 6px;
+  margin-right: var(--space-2);
+  border-radius: 3px;
+  vertical-align: middle;
+}
+
+.chord-shape-notes .hand.left::before {
+  background: var(--color-note-melody);
+}
+
+.chord-shape-notes .hand.right::before {
+  background: var(--color-note-chord);
 }
 
 /* ---- Hit feedback (playing along) ------------------------------------------- */

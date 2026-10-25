@@ -20,7 +20,7 @@ import {
   usePractice,
 } from '../learn/practice';
 import { PART_LABELS, partsOf, type Target } from '../learn/targets';
-import { useSession } from '../session';
+import { setMelodyVolume, useSession } from '../session';
 import { parseChord } from '../songs/chords';
 import { LoadingStatus } from './LoadingStatus';
 
@@ -62,6 +62,7 @@ export function Lesson() {
         <aside className="panel control-panel">
           <PlayButton className="full" />
           <PracticeOptions />
+          {song.melody && song.melody.length > 0 && <MelodyVolume />}
           <LoopPicker bars={song.bars.length} />
           <BandMutes />
         </aside>
@@ -204,6 +205,24 @@ function PracticeOptions() {
         </div>
       )}
     </>
+  );
+}
+
+/** How loud the tune plays under the band, as a guide to play along with. */
+function MelodyVolume() {
+  const volume = useSession((s) => s.melodyVolume);
+  const percent = Math.round(volume * 100);
+  return (
+    <div className="control-group">
+      <div className="control-head">
+        <p className="label" id="melody-volume-label">
+          Hear the melody
+        </p>
+        <span className="setting-value">{percent === 0 ? 'Off' : `${percent}%`}</span>
+      </div>
+      <input type="range" min={0} max={1} step={0.05} value={volume} aria-labelledby="melody-volume-label" onChange={(e) => setMelodyVolume(Number(e.target.value))} />
+      <p className="setting-note">The tune plays softly under the band as a guide; all the way down turns it off.</p>
+    </div>
   );
 }
 

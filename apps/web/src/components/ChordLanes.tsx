@@ -41,8 +41,9 @@ export function ChordLanes({ low = 36, high = 96 }: ChordLanesProps) {
   const bpm = useSession((s) => s.bpm);
   const locked = useSession((s) => s.liveSource.status === 'on' && s.liveTracker.locked);
   const listening = useSession((s) => s.liveSource.status === 'on');
-  const state = useRef({ level, bpm, locked, listening });
-  state.current = { level, bpm, locked, listening };
+  const following = useSession((s) => s.liveSource.status === 'on' && s.liveFollow !== null);
+  const state = useRef({ level, bpm, locked, listening, following });
+  state.current = { level, bpm, locked, listening, following };
 
   useEffect(() => {
     const host = hostRef.current!;
@@ -96,7 +97,7 @@ export function ChordLanes({ low = 36, high = 96 }: ChordLanesProps) {
     };
 
     const draw = () => {
-      const { level, bpm, locked, listening } = state.current;
+      const { level, bpm, locked, listening, following } = state.current;
       const now = performance.now();
       const beatMs = locked && bpm > 0 ? 60_000 / bpm : FALLBACK_BEAT_MS;
       const pxAhead = (hitY - 8) / (AHEAD_BEATS * beatMs);
@@ -171,7 +172,7 @@ export function ChordLanes({ low = 36, high = 96 }: ChordLanesProps) {
       for (let i = usedNames; i < names.children.length; i++) names.children[i]!.visible = false;
       for (let i = usedLetters; i < letters.children.length; i++) letters.children[i]!.visible = false;
 
-      const hint = !listening ? 'Chords fall here as they are heard' : blocks.length === 0 ? 'Listening for chords…' : ahead ? '' : 'Chords coming fall here once the song repeats';
+      const hint = !listening ? 'Chords fall here as they are heard' : blocks.length === 0 ? 'Listening for chords…' : ahead || following ? '' : 'Chords coming fall here once the song repeats';
       setText(message, hint);
       message.visible = hint !== '';
       message.position.set((width - message.width) / 2, Math.max(8, (hitY - message.height) / 3));

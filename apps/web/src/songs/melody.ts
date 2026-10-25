@@ -7,6 +7,7 @@
 // (`:2`, `:0.5`, `:1/2`; one beat if left out). `r` is a rest. Bar lines are
 // only checked: a bar that doesn't add up to four beats is reported.
 
+import { PPQ, type EngineCommand } from '@midzer/audio-web';
 import { BEATS_PER_BAR } from './song';
 
 export interface MelodyNote {
@@ -88,4 +89,15 @@ export function melodyRange(notes: readonly MelodyNote[]): { low: number; high: 
     high = Math.max(high, n.key);
   }
   return { low, high };
+}
+
+/** Mirrors `MAX_MELODY_NOTES` in melody.rs. */
+export const MAX_MELODY_NOTES = 2048;
+
+/** Loads a tune into the engine, to play under the band in song ticks. */
+export function melodyCommands(notes: readonly MelodyNote[] = []): EngineCommand[] {
+  return [
+    { type: 'melodyClear' },
+    ...notes.slice(0, MAX_MELODY_NOTES).map((n): EngineCommand => ({ type: 'melodyNote', tick: Math.round(n.at * PPQ), len: Math.max(1, Math.round(n.len * PPQ)), key: n.key })),
+  ];
 }

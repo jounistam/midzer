@@ -246,8 +246,9 @@ impl Live {
 
     /// A grid from a listener that heard the last seconds (see
     /// [`crate::Command::LiveGuide`]); `frame` is the low 32 bits of a beat's
-    /// engine frame, which lies within a day of `now`.
-    pub fn guide(&mut self, frame: u32, period: f32, one: Option<u8>, confidence: u8, now: u64) {
+    /// engine frame, which lies within a day of `now`. A `known` grid (a
+    /// stored song followed) is kept to as it is.
+    pub fn guide(&mut self, frame: u32, period: f32, one: Option<u8>, confidence: u8, known: bool, now: u64) {
         if !self.active {
             return;
         }
@@ -256,7 +257,7 @@ impl Live {
             // Heard before starting over (it was on its way).
             return;
         }
-        self.tracker.guide(at, period as f64 * self.guide_scale, confidence as f32 / 255.0);
+        self.tracker.guide(at, period as f64 * self.guide_scale, confidence as f32 / 255.0, known && self.guide_scale == 1.0);
         // At another tempo than the guide's, its 1 may fall between the beats.
         if let Some(one) = one.filter(|_| self.guide_scale == 1.0) {
             self.guide_one = Some((at, one % BEATS as u8));
@@ -787,7 +788,7 @@ mod tests {
         // At 3 s a listener says the beat at 2.25 s (a thump) is the 3rd of its bar.
         let (head, tail) = signal.split_at(frame(3.0) as usize);
         let mut events = run(&mut live, head, 0, &[]);
-        live.guide(frame(2.25) as u32, 0.5 * SR, Some(2), 230, frame(3.0));
+        live.guide(frame(2.25) as u32, 0.5 * SR, Some(2), 230, false, frame(3.0));
         events.extend(run(&mut live, tail, frame(3.0), &[]));
         let beats: Vec<_> = events.iter().filter_map(|(f, e)| if let EngineEvent::Beat { beat, .. } = e { Some((*f, *beat)) } else { None }).collect();
         let first = beats.first().map_or(f64::INFINITY, |b| b.0 as f64 / SR as f64);
@@ -808,7 +809,7 @@ mod tests {
         let signal = source(11.0);
         let (head, tail) = signal.split_at(frame(3.0) as usize);
         let mut events = run(&mut live, head, 0, &[]);
-        live.guide(frame(2.25) as u32, 0.5 * SR, Some(2), 230, frame(3.0));
+        live.guide(frame(2.25) as u32, 0.5 * SR, Some(2), 230, false, frame(3.0));
         // Bars of 2, 4 and 3 beats from 4.25 s; then fours again.
         for (at, beats) in [(4.25, 2), (5.25, 4), (7.25, 3)] {
             live.bar_ahead(frame(at) as u32, beats, frame(3.0));
@@ -841,7 +842,7 @@ mod tests {
             let now = frame(i as f64);
             if i >= 3 {
                 // A guide every second, at 120 BPM.
-                live.guide(frame(0.25 + 0.5 * (2 * i - 2) as f64) as u32, 0.5 * SR, Some(0), 230, now);
+                live.guide(frame(0.25 + 0.5 * (2 * i - 2) as f64) as u32, 0.5 * SR, Some(0), 230, false, now);
             }
             if i == 5 {
                 live.scale_tempo(false);
@@ -863,7 +864,7 @@ mod tests {
             if i >= 3 {
                 // A guide every second, its tempo 2 % off either way.
                 let period = 0.5 * SR * if i % 2 == 0 { 1.02 } else { 0.98 };
-                live.guide(frame(0.25 + 0.5 * (2 * i - 2) as f64) as u32, period, Some(0), 230, now);
+                live.guide(frame(0.25 + 0.5 * (2 * i - 2) as f64) as u32, period, Some(0), 230, false, now);
             }
             events.extend(run(&mut live, block, now, &[]));
         }
@@ -919,7 +920,7 @@ mod tests {
         assert!(out.as_slice().iter().any(|t| t.event == EngineEvent::Transport { playing: false }));
         assert!(!live.is_running() && !live.downbeat_told && !live.tracker.locked());
         // A guide heard before starting over is the old song's.
-        live.guide(frame(9.75) as u32, 0.5 * SR, Some(0), 255, frame(10.0));
+        live.guide(frame(9.75) as u32, 0.5 * SR, Some(0), 255, false, frame(10.0));
         assert!(live.tracker.last_beat().is_none() && live.guide_one.is_none());
         // It listens on: the song's beat comes back.
         run(&mut live, &signal[frame(2.0) as usize..frame(12.0) as usize], frame(10.0), &[]);

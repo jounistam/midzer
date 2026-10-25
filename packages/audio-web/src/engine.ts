@@ -293,7 +293,7 @@ export async function startEngine(wasmUrl: string, hearUrl?: string): Promise<En
     hearing.onmessage = (e: MessageEvent<HearReply>) => {
       const msg = e.data;
       if (msg.type === 'grid') {
-        send({ type: 'liveGuide', frame: msg.frame, period: msg.period, one: msg.one, confidence: msg.confidence });
+        send({ type: 'liveGuide', frame: msg.frame, period: msg.period, one: msg.one, confidence: msg.confidence, known: msg.known });
       } else if (msg.type === 'chords') {
         const offset = tap.frameOffset;
         const spans = decodeChordSpans(msg.spans, (frame) => timeOfFrame(frame + offset));

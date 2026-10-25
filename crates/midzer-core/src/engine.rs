@@ -8,6 +8,7 @@ use crate::drums::{Instrument, Kit, KitAction, Piece, Triggers};
 use crate::event::{EngineEvent, EventBuffer, MIC_CHANNEL, PLAYER_DRUM_CHANNEL, Timed};
 use crate::listen::{Heard, HeardList, ListenMode, Listener};
 use crate::live::Live;
+use crate::melody::MelodyNote;
 
 /// MIDI channel for the player's own notes.
 pub const PLAYER_CHANNEL: u8 = 0;
@@ -154,6 +155,9 @@ impl Engine {
                 self.backing.seek(bar as u32);
             }
             Command::SongWait { tick } => self.band.set_song_wait(tick),
+            Command::MelodyClear => self.band.clear_melody(),
+            Command::MelodyNote { tick, len, key } => self.band.add_melody_note(MelodyNote { tick, len, key }),
+            Command::SetMelody { volume } => self.band.set_melody_volume(volume, &mut self.events),
             Command::SetListen { mode, gate_db } => {
                 let mut heard = HeardList::default();
                 self.listener.set_gate(gate_db);
@@ -222,7 +226,7 @@ impl Engine {
             Command::LiveTempo { double } => self.live.scale_tempo(double),
             Command::LiveReset => self.live.reset(self.now, &mut self.events),
             Command::LiveBar { frame, beats } => self.live.bar_ahead(frame, beats, self.now),
-            Command::LiveGuide { frame, period, one, confidence } => self.live.guide(frame, period, one, confidence, self.now),
+            Command::LiveGuide { frame, period, one, confidence, known } => self.live.guide(frame, period, one, confidence, known, self.now),
             Command::TrackClear { beats } => self.backing.clear_beats(beats as u32),
             Command::TrackBeat { index, seconds } => self.backing.set_beat(index as u32, seconds),
             Command::SetTrackDrums { on } => self.backing.set_drums(on),

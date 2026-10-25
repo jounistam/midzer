@@ -54,7 +54,7 @@ export type HearRequest =
   | { type: 'ignore'; id: number };
 
 export type HearReply =
-  | { type: 'grid'; frame: number; period: number; one: number | null; confidence: number }
+  | { type: 'grid'; frame: number; period: number; one: number | null; confidence: number; known: boolean }
   /** Chord spans, four numbers each: see `decodeChordSpans`. */
   | { type: 'chords'; spans: Float64Array<ArrayBuffer> }
   /** A song captured: mono at 22.05 kHz; flags bit 0 heard from its start, bit 1 to its end. */
@@ -108,7 +108,7 @@ function tick(): void {
   if (kind !== 0) {
     const r = new Float64Array(x.memory.buffer, x.mzh_result_ptr(listener), x.mzh_result_len(listener));
     if (kind === 1) {
-      post({ type: 'grid', frame: r[0]!, period: r[1]!, one: r[2]! < 0 ? null : r[2]!, confidence: r[3]! });
+      post({ type: 'grid', frame: r[0]!, period: r[1]!, one: r[2]! < 0 ? null : r[2]!, confidence: r[3]!, known: r[4] === 1 });
     } else if (kind === 3) {
       post({ type: 'follow', id: r[0]!, frame: r[1]!, seconds: r[2]! });
     } else if (kind === 4) {

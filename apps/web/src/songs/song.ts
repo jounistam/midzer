@@ -11,7 +11,7 @@
 // beats long from there on.
 
 import type { EngineCommand, SongMark } from '@midzer/audio-web';
-import { isNoChord, parseChord } from './chords';
+import { formatChord, isNoChord, parseChord } from './chords';
 import type { AnalysedTrack } from './audio';
 import type { MelodyNote } from './melody';
 
@@ -279,6 +279,16 @@ export function resolvedBeats(bars: Bar[]): (string | null)[] {
     }
   }
   return out;
+}
+
+/** Each chord the chart uses, once, in the order they first come; names as the engine writes them. */
+export function chordsUsed(bars: Bar[]): string[] {
+  const seen = new Set<string>();
+  for (const name of resolvedBeats(bars)) {
+    const spec = name ? parseChord(name) : null;
+    if (spec) seen.add(formatChord(spec));
+  }
+  return [...seen];
 }
 
 /** The section in force at each bar. */

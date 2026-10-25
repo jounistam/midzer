@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BUILTIN_SONGS } from './builtin';
-import { barAt, barStarts, chartCommands, formatBar, formatChart, marksByBar, parseChart, resolvedBeats, totalBeats } from './song';
+import { barAt, barStarts, chartCommands, chordsUsed, formatBar, formatChart, marksByBar, parseChart, resolvedBeats, totalBeats } from './song';
 
 describe('chart notation', () => {
   it('spreads one, two or four chords over a bar', () => {
@@ -73,6 +73,11 @@ describe('chart notation', () => {
   it('resolves held beats', () => {
     const { bars } = parseChart('C | . F | N.C.');
     expect(resolvedBeats(bars)).toEqual(['C', 'C', 'C', 'C', 'C', 'C', 'F', 'F', null, null, null, null]);
+  });
+
+  it('lists each chord used once, in the order they come', () => {
+    const { bars } = parseChart('Am | F C | N.C. | Amin G | % | C');
+    expect(chordsUsed(bars)).toEqual(['Am', 'F', 'C', 'G']);
   });
 });
 

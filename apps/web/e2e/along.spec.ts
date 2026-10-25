@@ -225,11 +225,15 @@ test('play along: a song heard is learned and kept, without its audio, and recog
   const learned = page.getByTestId('along-learned');
   await expect(learned).toContainText('Learning the song heard');
   // The input was loud from the first moment: only part of a song.
-  await expect(learned.getByRole('button', { name: 'Keep' })).toBeVisible({ timeout: 60_000 });
+  await expect(learned.getByRole('button', { name: 'Save', exact: true })).toBeVisible({ timeout: 60_000 });
   await expect(learned).toContainText(/12\d BPM/);
   await expect(learned).toContainText('partial');
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/17-play-along-learned.png` });
-  await learned.getByRole('button', { name: 'Keep' }).click();
+  // Dismissing asks first.
+  await learned.getByRole('button', { name: 'Dismiss' }).click();
+  await learned.getByRole('button', { name: 'Cancel' }).click();
+  await expect(learned.getByRole('textbox', { name: 'Song name' })).toHaveValue(/^Heard /);
+  await learned.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(learned).toContainText('in My songs');
 
   // Kept, it is recognised as it goes on, and followed from what was stored.

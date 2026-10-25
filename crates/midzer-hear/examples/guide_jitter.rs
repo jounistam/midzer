@@ -48,7 +48,7 @@ fn main() {
         hearing.push(block, now as u64);
         if let Some(Heard::Grid(g)) = hearing.step() {
             println!("{:6.2}s guide beat {:.4}s period {:.2} one {:?} conf {:.2}", now as f64 / SR as f64, g.beat / SR as f64, g.period, g.one, g.confidence);
-            engine.handle(Command::LiveGuide { frame: g.beat.round() as u32, period: g.period as f32, one: g.one, confidence: (g.confidence * 255.0) as u8 });
+            engine.handle(Command::LiveGuide { frame: g.beat.round() as u32, period: g.period as f32, one: g.one, confidence: (g.confidence * 255.0) as u8, known: g.known });
         }
         engine.listen_live(block);
         for t in engine.process(block.len() as u32) {

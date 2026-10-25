@@ -180,6 +180,13 @@
     - Not tried by ear or with a real song yet; tap along untested beyond the unit test (the e2e covers The 1 is here, save, keep/replace).
     - Adding, deleting or retyping bars as text doesn't move the fixes with them.
     - No touch pinch zoom (mobile is later); ctrl-wheel and the +/− buttons.
+- **Fine-tuning, round 3** (2026-10-24): the user's findings after trying stored songs.
+  - The "Following" card on Play along stays one line (`.jam-stage .panel` made it grow, as it did "Songs heard").
+  - A song followed keeps its stored tempo: its grids go to the engine as `LiveGuide { known }`, and the tracker puts beats right on them (no snapping to onsets, no drift in the period). The tempo shown is the song's.
+  - "Chords in this song" (`components/ChordSheet.tsx`): each chord the chart uses, as a button; picking one draws its keys (root and fifth left, every tone right) on a small keyboard. On Play along while a song is followed and on song screens, for keys players.
+  - Tempo is typed: the BPM in the tempo control and the song editor's Tempo field are inputs (`components/BpmInput.tsx`); a tempo in range applies as typed, leaving the field clamps.
+  - Learn plays the song's tune under the band (`melody.rs`: `MelodyClear`/`MelodyNote`/`SetMelody`, channel 4, GM flute), in song ticks, so it waits and loops with the band. "Hear the melody" sets how loud (0 is off, default 40 %), kept in prefs; only on the Learn screen.
+  - Open: the melody's sound and default level not tried by ear; a follow lost and found again moves the tempo shown back to the tracker's for a moment.
 - **Next: fine-tuning the existing features** (decided 2026-10-22), starting with a hands-on pass of M7–M8 (a real e-kit, real songs from a tab and the system's output, the desktop app). M9 mobile waits until then. The "Open from …" lists below are the backlog.
 - Open from M8b:
   - Tuned on 25 real songs in the fine-tuning round (see above), not with an e-kit. Octave errors are expected on some songs; the half/twice buttons are the fix.

@@ -89,6 +89,8 @@ struct Guide {
     at: f64,
     period: f64,
     confidence: f32,
+    /// A stored song's beats: kept to, not snapped to onsets.
+    known: bool,
     since: u64,
 }
 
@@ -516,7 +518,7 @@ impl BeatTracker {
 
     /// A grid from outside: a beat at engine frame `at`, `period` frames
     /// apart, `confidence` 0..=1. While it is fresh, the beats come from it.
-    pub fn guide(&mut self, at: f64, period: f64, confidence: f32) {
+    pub fn guide(&mut self, at: f64, period: f64, confidence: f32, known: bool) {
         if confidence < GUIDE_SURE || period <= 0.0 {
             return;
         }
@@ -531,7 +533,7 @@ impl BeatTracker {
         if self.period.is_none_or(|p| (onset_period / p - 1.0).abs() > TEMPO_JUMP) {
             self.set_period(onset_period);
         }
-        self.guide = Some(Guide { at, period, confidence, since: self.clock });
+        self.guide = Some(Guide { at, period, confidence, known, since: self.clock });
         // Sure enough to show beats now; the loop moves to the guide's grid with its next beat.
         if self.beat.is_some() {
             self.locked = true;
@@ -705,7 +707,7 @@ impl BeatTracker {
         // The onsets around it, for the downbeat guess: the frame nearest `t`.
         let back = ((self.clock as f64 - t) / self.hop as f64).round().max(0.0) as u64;
         let f = self.frames.saturating_sub(1 + back);
-        let t = self.snap(t, f);
+        let t = if g.known { t } else { self.snap(t, f) };
         let peak = |ring: &[f32]| {
             let lo = f.saturating_sub(2).max(self.frames.saturating_sub(RING as u64 - 1));
             (lo..=(f + 2).min(self.frames.saturating_sub(1))).map(|k| ring[(k as usize) % RING]).fold(0.0f32, f32::max)
@@ -715,6 +717,16 @@ impl BeatTracker {
             None => {
                 self.beat_period = g.period;
                 (t, 0)
+            }
+            // The song's own beats: on them, at its tempo.
+            Some((last, index)) if g.known => {
+                let steps = ((t - last) / self.beat_period).round().clamp(1.0, 4.0);
+                for k in 1..steps as u32 {
+                    let at = last + k as f64 * (t - last) / steps;
+                    out.push(TrackedBeat { at, index: index + k, period: g.period, low: 0.0, high: 0.0 });
+                }
+                self.beat_period = g.period;
+                (t, index + steps as u32)
             }
             Some((last, index)) => {
                 let steps = ((t - last) / self.beat_period).round().clamp(1.0, 4.0);
@@ -841,12 +853,16 @@ mod tests {
 
     /// Tracks `signal`, given `guide` (at seconds, beat frame, period frames, confidence) once.
     fn track_guided(signal: &[f32], guides: &[(f32, f64, f64, f32)]) -> Vec<(TrackedBeat, bool)> {
+        track_guides(signal, guides, false)
+    }
+
+    fn track_guides(signal: &[f32], guides: &[(f32, f64, f64, f32)], known: bool) -> Vec<(TrackedBeat, bool)> {
         let mut tracker = BeatTracker::new(SR);
         let mut beats = Vec::new();
         for (i, block) in signal.chunks(128).enumerate() {
             for &(at, frame, period, confidence) in guides {
                 if i == (at * SR) as usize / 128 {
-                    tracker.guide(frame, period, confidence);
+                    tracker.guide(frame, period, confidence, known);
                 }
             }
             let mut out = BeatList::default();
@@ -874,6 +890,24 @@ mod tests {
         assert!((found - 174.0).abs() < 1.0, "found {found}");
         // Every beat of the guide, none skipped.
         assert!(after.windows(2).all(|w| w[1].0.index == w[0].0.index + 1));
+    }
+
+    #[test]
+    fn a_known_guide_is_kept_to_through_loose_playing() {
+        // Played loosely around 120 BPM; a stored song's grid at 120 says where the beats are.
+        let (signal, truth) = clicks(12.0, 0.0, |i| 0.3 + i as f32 * 0.5 + [0.0, 0.02, -0.015, 0.01][i as usize % 4]);
+        let period = 0.5 * SR as f64;
+        let grid = 0.3 * SR as f64;
+        let guides: Vec<_> = (0..10).map(|s| (1.0 + s as f32, grid + 2.0 * s as f64 * period, period, 1.0)).collect();
+        let beats = track_guides(&signal, &guides, true);
+        assert!(!truth.is_empty());
+        let after: Vec<_> = beats.iter().filter(|(b, _)| b.at > 2.0 * SR as f64).collect();
+        assert!(after.len() > 10);
+        for (b, _) in after {
+            let off = ((b.at - grid) / period - ((b.at - grid) / period).round()).abs() * 500.0;
+            assert!(off < 0.5, "{off} ms off the grid");
+            assert_eq!(b.period, period);
+        }
     }
 
     #[test]

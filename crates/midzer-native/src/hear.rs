@@ -161,7 +161,7 @@ pub(crate) fn listen(shared: Arc<Shared>, out: mpsc::Sender<Listened>) {
         }
         match h.step() {
             Some(Heard::Grid(g)) => {
-                let cmd = Command::LiveGuide { frame: g.beat.round() as u64 as u32, period: g.period as f32, one: g.one, confidence: (g.confidence * 255.0) as u8 };
+                let cmd = Command::LiveGuide { frame: g.beat.round() as u64 as u32, period: g.period as f32, one: g.one, confidence: (g.confidence * 255.0) as u8, known: g.known };
                 let _ = shared.commands.push(cmd.encode());
             }
             Some(Heard::Chords(spans)) => {

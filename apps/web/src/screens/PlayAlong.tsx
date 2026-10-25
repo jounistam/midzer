@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { LiveDevice } from '@midzer/audio-web';
 import { ChordLanes } from '../components/ChordLanes';
+import { ChordSheet } from '../components/ChordSheet';
 import { PlayButton } from '../components/ControlPanel';
 import { HitFeedback } from '../components/HitFeedback';
 import { Keyboard } from '../components/Keyboard';
@@ -35,6 +36,7 @@ import {
   stopLiveSource,
   useSession,
 } from '../session';
+import type { LearnedSong } from '../session';
 import { LoadingStatus } from './LoadingStatus';
 
 /**
@@ -54,6 +56,7 @@ export function PlayAlong() {
         <div className="jam-stage along-main">
           <AlongStage />
           <FollowedSong />
+          {!drums && <FollowedChords />}
           {!drums && <AlongChords split={split} />}
           <AlongTiming />
           <LearnedSongs />
@@ -79,10 +82,21 @@ function AlongStage() {
   const source = useSession((s) => s.liveSource);
   const tracker = useSession((s) => s.liveTracker);
   const chord = useSession((s) => s.liveChord);
-  const bpm = useSession((s) => s.bpm);
+  const heard = useSession((s) => s.bpm);
   const beat = useSession((s) => s.beat);
   const listening = source.status === 'on';
-  const status = !listening ? 'Pick something to play along with' : tracker.locked ? 'Found the beat' : tracker.level < 0.25 ? 'Waiting for sound…' : 'Listening for the beat…';
+  // A song kept keeps its own tempo.
+  const followed = useSession((s) => (listening ? s.liveFollow : null));
+  const bpm = followed?.bpm ?? heard;
+  const status = !listening
+    ? 'Pick something to play along with'
+    : followed && tracker.locked
+      ? 'The tempo kept for this song'
+      : tracker.locked
+        ? 'Found the beat'
+        : tracker.level < 0.25
+          ? 'Waiting for sound…'
+          : 'Listening for the beat…';
   const locked = listening && tracker.locked;
   return (
     <section className="panel along-strip" aria-live="polite">
@@ -336,6 +350,12 @@ function FollowedSong() {
   );
 }
 
+/** The chords of the song followed, each one to look up. */
+function FollowedChords() {
+  const chords = useSession((s) => (s.liveSource.status === 'on' ? s.liveFollow?.chords : undefined));
+  return chords ? <ChordSheet chords={chords} /> : null;
+}
+
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.round(seconds % 60)).padStart(2, '0')}`;
 
 /**
@@ -349,8 +369,8 @@ function LearnedSongs() {
   const [kept, setKept] = useState<string | null>(null);
   if (!analysing && offered.length === 0 && !error && !kept) return null;
   const keep = async (id: string, title: string, update: boolean) => {
-    const ok = await keepLearnedSong(id);
-    setKept(!ok ? 'It could not be kept on this device.' : update ? `Updated “${title}” in My songs.` : `Kept “${title}” in My songs.`);
+    const ok = await keepLearnedSong(id, update ? undefined : title);
+    setKept(!ok ? 'It could not be saved on this device.' : update ? `Updated “${title}” in My songs.` : `Saved “${title}” in My songs.`);
   };
   return (
     <section className="panel along-learned" aria-live="polite" data-testid="along-learned">
@@ -363,30 +383,8 @@ function LearnedSongs() {
           </span>
         </div>
       )}
-      {offered.map(({ song, extends: more }) => (
-        <div key={song.id} className="learned-song">
-          <div className="learned-info">
-            <span className="learned-title">{more ? `More of “${more.title}”` : song.title}</span>
-            <span className="learned-meta">
-              {clock(song.heard?.seconds ?? 0)} · {song.bpm} BPM · {song.bars.length} bars
-              {song.heard && !song.heard.complete && (
-                <span className="badge" title="Heard from the middle, or saved before it ended">
-                  partial
-                </span>
-              )}
-            </span>
-          </div>
-          <button
-            className="btn btn-secondary"
-            onClick={() => void keep(song.id, more?.title ?? song.title, more !== undefined)}
-            title={more ? 'Replace the part kept with what was heard now: its chords and beats' : undefined}
-          >
-            {more ? 'Update' : 'Keep'}
-          </button>
-          <button className="btn btn-ghost" onClick={() => dismissLearnedSong(song.id)}>
-            Dismiss
-          </button>
-        </div>
+      {offered.map((learned) => (
+        <LearnedOffer key={learned.song.id} learned={learned} onKeep={keep} />
       ))}
       {kept && offered.length === 0 && !analysing && (
         <p className="status-line" role="status">
@@ -405,6 +403,69 @@ function LearnedSongs() {
         </p>
       )}
     </section>
+  );
+}
+
+/**
+ * One song heard, offered: name it and save it, the thing to do; dismissing
+ * forgets it for good, so it asks first.
+ */
+function LearnedOffer({ learned: { song, extends: more }, onKeep }: { learned: LearnedSong; onKeep: (id: string, title: string, update: boolean) => Promise<void> }) {
+  const [name, setName] = useState(song.title);
+  const [saving, setSaving] = useState(false);
+  const [dismissing, setDismissing] = useState(false);
+  const title = more ? more.title : name.trim() || song.title;
+  const save = async () => {
+    setSaving(true);
+    await onKeep(song.id, title, more !== undefined);
+    setSaving(false);
+  };
+  return (
+    <div className="learned-song">
+      <div className="learned-info">
+        <span className="learned-title">{more ? `More of “${more.title}”` : 'A new song'}</span>
+        <span className="learned-meta">
+          {clock(song.heard?.seconds ?? 0)} · {song.bpm} BPM · {song.bars.length} bars
+          {song.heard && !song.heard.complete && (
+            <span className="badge" title="Heard from the middle, or saved before it ended">
+              partial
+            </span>
+          )}
+        </span>
+      </div>
+      {dismissing ? (
+        <div className="learned-actions">
+          <p className="setting-note">Dismiss it? What was learned is forgotten and can't be saved later.</p>
+          <button className="btn btn-danger" onClick={() => dismissLearnedSong(song.id)}>
+            Dismiss it
+          </button>
+          <button className="btn btn-ghost" autoFocus onClick={() => setDismissing(false)}>
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <form
+          className="learned-actions"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void save();
+          }}
+        >
+          {!more && <input type="text" className="learned-name" value={name} onChange={(e) => setName(e.target.value)} onFocus={(e) => e.target.select()} aria-label="Song name" placeholder={song.title} maxLength={120} />}
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={saving}
+            title={more ? 'Replace the part kept with what was heard now: its chords and beats' : 'Save it in My songs'}
+          >
+            {more ? 'Update' : 'Save'}
+          </button>
+          <button type="button" className="btn btn-ghost" disabled={saving} onClick={() => setDismissing(true)}>
+            Dismiss
+          </button>
+        </form>
+      )}
+    </div>
   );
 }
 

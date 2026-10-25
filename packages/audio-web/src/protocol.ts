@@ -54,6 +54,9 @@ const Cmd = {
   LiveReset: 46,
   SongBar: 47,
   LiveBar: 48,
+  MelodyClear: 49,
+  MelodyNote: 50,
+  SetMelody: 51,
 } as const;
 
 /** Ticks per beat in song positions; mirrors `PPQ` in style.rs. */
@@ -229,13 +232,20 @@ export type EngineCommand =
   /**
    * Where the live beats fall, as the listener heard them (crates/midzer-hear):
    * a beat at engine `frame`, `period` frames apart, which beat of the bar it
-   * is (0 is the 1; null unknown) and how sure it is, 0..1.
+   * is (0 is the 1; null unknown), how sure it is, 0..1, and whether it is a
+   * stored song's known grid, kept to rather than tracked.
    */
-  | { type: 'liveGuide'; frame: number; period: number; one: number | null; confidence: number }
+  | { type: 'liveGuide'; frame: number; period: number; one: number | null; confidence: number; known?: boolean }
   /** Forget everything heard live and listen afresh, as after silence. */
   | { type: 'liveReset' }
   /** A bar of `beats` beats starts at the live beat at engine `frame`, as a stored song followed says; sent ahead. */
-  | { type: 'liveBar'; frame: number; beats: number };
+  | { type: 'liveBar'; frame: number; beats: number }
+  /** Empties the song's tune. */
+  | { type: 'melodyClear' }
+  /** A note of the song's tune: from song tick `tick` (PPQ per beat), `len` ticks long. */
+  | { type: 'melodyNote'; tick: number; len: number; key: number }
+  /** How loud the tune plays under the band, 0 (not at all) to 1. */
+  | { type: 'setMelody'; volume: number };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -352,12 +362,18 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.LiveTempo, cmd.double ? 1 : 0, 0, 0];
     case 'liveReset':
       return [Cmd.LiveReset, 0, 0, 0];
+    case 'melodyClear':
+      return [Cmd.MelodyClear, 0, 0, 0];
+    case 'melodyNote':
+      return [Cmd.MelodyNote, Math.max(0, Math.round(cmd.tick)) >>> 0, Math.max(1, Math.round(cmd.len)) >>> 0, cmd.key & 127];
+    case 'setMelody':
+      return [Cmd.SetMelody, floatBits(Math.min(Math.max(cmd.volume, 0), 1)), 0, 0];
     case 'liveBar':
       return [Cmd.LiveBar, Math.round(cmd.frame) >>> 0, cmd.beats, 0];
     case 'liveGuide': {
       const one = cmd.one === null ? 0 : (cmd.one & 3) + 1;
       const confidence = Math.round(Math.min(Math.max(cmd.confidence, 0), 1) * 255);
-      return [Cmd.LiveGuide, Math.round(cmd.frame) >>> 0, floatBits(cmd.period), one | (confidence << 8)];
+      return [Cmd.LiveGuide, Math.round(cmd.frame) >>> 0, floatBits(cmd.period), one | (confidence << 8) | (cmd.known ? 1 << 16 : 0)];
     }
   }
 }

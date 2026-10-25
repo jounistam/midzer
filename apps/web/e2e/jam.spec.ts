@@ -43,7 +43,7 @@ test('first run: onboarding to a band that follows a chord', async ({ page }) =>
   await page.getByRole('button', { name: 'Bass', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Bass (muted)' })).toBeVisible();
   await page.getByRole('button', { name: 'Faster' }).click();
-  await expect(page.locator('.tempo-value')).toContainText('101');
+  await expect(page.locator('.tempo-value input')).toHaveValue('101');
   for (const key of ['s', 'f', 'h']) await page.keyboard.down(key); // D F A
   await expect(page.locator('.chord-name')).toHaveText('Dm', { timeout: 5_000 });
 

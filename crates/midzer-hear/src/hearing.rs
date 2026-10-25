@@ -144,6 +144,8 @@ pub struct Grid {
     pub one: Option<u8>,
     /// How well the beats fit the grid, 0..=1.
     pub confidence: f32,
+    /// From a stored song followed: its known beats, to keep to.
+    pub known: bool,
 }
 
 impl Grid {
@@ -761,7 +763,7 @@ impl Hearing {
         let shift = f.one.unwrap_or(0) as usize;
         let in_bar = |j: usize| j.checked_sub(shift).map_or((j + 4 - shift) % 4, |j| j - song.bar_at(j).0);
         let one = (in_bar(beat_at(anchor)) % 4) as u8;
-        let grid = Grid { beat: self.frame_of(anchor), period: period * self.input_rate / RATE, one: Some(one), confidence: 1.0 };
+        let grid = Grid { beat: self.frame_of(anchor), period: period * self.input_rate / RATE, one: Some(one), confidence: 1.0, known: true };
         let mut bars = Vec::new();
         let mut j = k.saturating_sub(in_bar(k));
         while j <= k + FOLLOW_AHEAD && j < beats.len() - 1 {
@@ -831,7 +833,7 @@ impl Hearing {
         let fitted: Vec<f64> = beats.iter().map(|b| b.0).filter(|&t| t >= fit_from).collect();
         let (anchor, period, confidence) = fit(&fitted)?;
         let state = self.merge(anchor, period, confidence, &downbeats)?;
-        Some(Grid { beat: self.frame_of(state.anchor), period: state.period * self.input_rate / RATE, one: state.one, confidence: state.confidence })
+        Some(Grid { beat: self.frame_of(state.anchor), period: state.period * self.input_rate / RATE, one: state.one, confidence: state.confidence, known: false })
     }
 
     /// Brings a run's grid together with what earlier runs heard.
@@ -1355,7 +1357,7 @@ mod tests {
             if i == 0 {
                 assert_eq!(g.one, Some((k as i64 % 4) as u8));
             }
-            assert!((g.period - 0.5 * RATE).abs() < 1.0 && g.confidence == 1.0);
+            assert!((g.period - 0.5 * RATE).abs() < 1.0 && g.confidence == 1.0 && g.known);
         }
         assert!(heard.iter().any(|h| matches!(h, Heard::Chords(c) if !c.is_empty() && c.iter().all(|c| !c.predicted && c.chord.is_some_and(|c| c.root == 0)))));
 

@@ -170,7 +170,7 @@ fn evaluate(path: &str) -> Score {
                 let took = (start.elapsed().as_secs_f64() * slow * SR as f64) as u64;
                 busy_until = now + took;
                 if let midzer_hear::Heard::Grid(g) = heard {
-                    let command = Command::LiveGuide { frame: g.beat.round() as u64 as u32, period: g.period as f32, one: g.one, confidence: (g.confidence * 255.0) as u8 };
+                    let command = Command::LiveGuide { frame: g.beat.round() as u64 as u32, period: g.period as f32, one: g.one, confidence: (g.confidence * 255.0) as u8, known: g.known };
                     guides.push_back((busy_until, command));
                 }
             }

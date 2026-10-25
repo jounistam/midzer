@@ -102,13 +102,20 @@ pub enum Command {
     /// Where the live beats fall, as a listener that heard the last seconds
     /// says (`midzer-hear`): a beat at engine `frame` (its low 32 bits), the
     /// beat's length in frames, which beat of the bar it is if known (0 is
-    /// the 1), and how sure it is (0–255).
-    LiveGuide { frame: u32, period: f32, one: Option<u8>, confidence: u8 },
+    /// the 1), how sure it is (0–255), and whether it is a stored song's
+    /// known grid, to keep to rather than track.
+    LiveGuide { frame: u32, period: f32, one: Option<u8>, confidence: u8, known: bool },
     /// Forgets everything heard live and starts listening afresh, as after silence.
     LiveReset,
     /// A bar of `beats` beats (1–7) starts at the live beat at engine `frame`
     /// (its low 32 bits), as a stored song followed live says; sent ahead.
     LiveBar { frame: u32, beats: u8 },
+    /// Empties the song's tune.
+    MelodyClear,
+    /// A note of the song's tune: from song tick `tick`, `len` ticks long.
+    MelodyNote { tick: u32, len: u32, key: u8 },
+    /// How loud the tune plays under the band, 0 (not at all) to 1.
+    SetMelody { volume: f32 },
 }
 
 mod op {
@@ -160,6 +167,9 @@ mod op {
     pub const LIVE_RESET: u32 = 46;
     pub const SONG_BAR: u32 = 47;
     pub const LIVE_BAR: u32 = 48;
+    pub const MELODY_CLEAR: u32 = 49;
+    pub const MELODY_NOTE: u32 = 50;
+    pub const SET_MELODY: u32 = 51;
 }
 
 /// MIDI channel 10, where e-kits and drum pads send.
@@ -293,7 +303,10 @@ impl Command {
             Command::LiveTempo { double } => [op::LIVE_TEMPO, double as u32, 0, 0],
             Command::LiveReset => [op::LIVE_RESET, 0, 0, 0],
             Command::LiveBar { frame, beats } => [op::LIVE_BAR, frame, beats as u32, 0],
-            Command::LiveGuide { frame, period, one, confidence } => [op::LIVE_GUIDE, frame, period.to_bits(), one.map_or(0, |o| o as u32 + 1) | (confidence as u32) << 8],
+            Command::MelodyClear => [op::MELODY_CLEAR, 0, 0, 0],
+            Command::MelodyNote { tick, len, key } => [op::MELODY_NOTE, tick, len, key as u32],
+            Command::SetMelody { volume } => [op::SET_MELODY, volume.to_bits(), 0, 0],
+            Command::LiveGuide { frame, period, one, confidence, known } => [op::LIVE_GUIDE, frame, period.to_bits(), one.map_or(0, |o| o as u32 + 1) | (confidence as u32) << 8 | (known as u32) << 16],
         }
     }
 
@@ -385,6 +398,9 @@ impl Command {
             op::LIVE_TEMPO => Some(Command::LiveTempo { double: a != 0 }),
             op::LIVE_RESET => Some(Command::LiveReset),
             op::LIVE_BAR => Some(Command::LiveBar { frame: a, beats: bar_beats(b)? }),
+            op::MELODY_CLEAR => Some(Command::MelodyClear),
+            op::MELODY_NOTE => Some(Command::MelodyNote { tick: a, len: b, key: midi(c)? }),
+            op::SET_MELODY => Some(Command::SetMelody { volume: float(a).filter(|v| (0.0..=1.0).contains(v))? }),
             op::LIVE_GUIDE => Some(Command::LiveGuide {
                 frame: a,
                 period: float(b).filter(|p| *p > 0.0)?,
@@ -394,6 +410,7 @@ impl Command {
                     _ => return None,
                 },
                 confidence: (c >> 8) as u8,
+                known: c >> 16 & 1 != 0,
             }),
             _ => None,
         }
@@ -471,8 +488,11 @@ mod tests {
             Command::SongBar { bar: 511, beats: 7 },
             Command::SongBar { bar: 0, beats: 1 },
             Command::LiveBar { frame: 4_000_000_000, beats: 3 },
-            Command::LiveGuide { frame: 4_000_000_000, period: 22_050.5, one: Some(3), confidence: 200 },
-            Command::LiveGuide { frame: 7, period: 24_000.0, one: None, confidence: 0 },
+            Command::LiveGuide { frame: 4_000_000_000, period: 22_050.5, one: Some(3), confidence: 200, known: true },
+            Command::LiveGuide { frame: 7, period: 24_000.0, one: None, confidence: 0, known: false },
+            Command::MelodyClear,
+            Command::MelodyNote { tick: 1_000_000, len: 240, key: 72 },
+            Command::SetMelody { volume: 0.4 },
         ] {
             assert_eq!(Command::decode(cmd.encode()), Some(cmd));
         }

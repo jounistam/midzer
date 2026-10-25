@@ -1,6 +1,7 @@
 import type { BandPart, SectionRequest } from '@midzer/audio-web';
 import type { CSSProperties } from 'react';
 import { padState } from './bandStatus';
+import { BpmInput } from './BpmInput';
 import { pickProgression, progressionsFor } from '../drums/progressions';
 import {
   BAND_DRUMS_OPTIONS,
@@ -44,10 +45,10 @@ export function TempoControl() {
         <button className="btn btn-secondary btn-square" onClick={() => setTempo(bpm - 1)} aria-label="Slower">
           −
         </button>
-        <span className="tempo-value">
-          {bpm}
+        <label className="tempo-value">
+          <BpmInput value={bpm} onChange={setTempo} />
           <small>BPM</small>
-        </span>
+        </label>
         <button className="btn btn-secondary btn-square" onClick={() => setTempo(bpm + 1)} aria-label="Faster">
           +
         </button>

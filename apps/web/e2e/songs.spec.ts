@@ -106,7 +106,7 @@ test('songs: play a chart, jump, loop, edit, save, import and export', async ({ 
   await expect(page.getByRole('heading', { name: 'two chords' })).toBeVisible();
   await expect(page.getByText(/Chords were read from the notes/)).toBeVisible();
   await expect(page.getByRole('button', { name: /^Bar 2: F/ })).toBeVisible();
-  await expect(page.locator('.tempo-value')).toContainText('88');
+  await expect(page.locator('.tempo-value input')).toHaveValue('88');
 
   // Leaving Songs hands the harmony back to the player.
   await page.getByRole('button', { name: 'midzer' }).click();
