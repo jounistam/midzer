@@ -384,3 +384,74 @@ At level 1 the space bar also plays the lit key, and the lit key shows its QWERT
 - Replay and `SoloNote` are `PLAYER_CHANNEL` only. To replay a drum solo, `SoloNote` and `ReplayNote` need a channel (or a drum flag), and `SoloRoll` needs a kit view (rows per piece).
 - Judging: at drum level 4 the existing judging gives the feedback. At levels 1–3 the hits should not reach `live.queue`, as keys levels ≤ 3 don't.
 - Call and response on the kit: calls are short rhythms. The scoring in `Solo::score` is rhythm-only below level 3 already.
+
+### Slice 5: done (built 2026-10-25, to be committed by the user)
+**Engine (`solo.rs`): a kit mode on the same `Solo`**
+- `Solo::set_kit(kit, out)` is called from `engine.rs` on `SetInstrument`. A change silences the solo. On the kit the level is capped at `MAX_KIT_LEVEL` = 4, in `set_kit` and in `set_level` (`max_level()`).
+- The taps, energy, grid stepping, Feel, call state machine and recording are shared with keys. What differs on the kit:
+  - `press` → `drum_press(key, …)`, where `key` is the piece's General MIDI note (`Piece::note`). `Part::of(key)` sorts it into Kick, Snare (with rim and side stick), HiHat, Tom or Cymbal.
+    - Levels 1–2: level 1 drives on any snare part, level 2 on kick, snare or a tom. Other pads return `Drove` and are silent. The kick sets `steer = -1` (kick-led), the snare `steer = 0` (backbeat), and a tom sets `fill_asked`. A tap after more than a beat of silence hits that pad at once (pickup, `own: false`).
+    - Levels 3–4: every hit is `Played(key)`. The engine sounds it, and the solo only counts it as a tap and records it (`own: true`). `held` is never set on the kit, so there is no hold → long note and no vibrato.
+  - `process` calls `drum_sixteenth` instead of `sixteenth` (still only below `JUDGED_FROM` = 4, and not while `call` is on):
+    - On each beat (pos 0) it checks `driven()`. Not driven: if `grooving`, a last kick and crash, then silence. Starting: `crash` if the energy is ≥ 0.5.
+    - `new_drum_beat`: on a 1, `bars += 1` and the fill is decided. Energy ≥ `BIG_FILL_ENERGY` (0.85) on even bars gives a 2-beat fill (`fill_from = 2`). Energy ≥ `FILL_ENERGY` (0.55) every 4th bar gives a 1-beat fill (`fill_from = 3`). A tom tap asked for starts one at the next beat ≥ 2.
+    - In a fill: eighths (sixteenths from energy 0.7) going Snare → Tom1 → Tom2 → Tom3 → Tom4 across the fill, a kick on each beat (levels 1–2), and `crash` set on the last sixteenth.
+    - Otherwise: a crash (and a kick) on the first beat once `crash` is set. Hi-hat on the beats; on the "and"s from energy 0.3; on every sixteenth from 0.75; open on slot 14 from 0.6. Levels 1–2 only: the kick on slots 0 and 8, plus 10 from 0.45, plus 7 at random from 0.7. Kick-led: slots 0, 6, 8 and 10, plus 3 from 0.5 and 14 from 0.6. The snare on 4 and 12. All levels: ghost snares on odd sixteenths from energy 0.55 (velocity 28 + 12·e).
+    - Level 3 plays only the hats, ghosts, fills and crashes, never the kick or the backbeat snare.
+  - `hit(key, velocity, t, now, own, out)` sends NoteOn on `PLAYER_DRUM_CHANNEL`, keeps the release in `hits: [Option<(key, off)>; MAX_HITS = 16]` (`HIT_S` = 0.1 s, like the engine's gate) and records it. `release_due` and `silence` end these hits.
+  - Calls: `make_call` takes the pieces from `call_piece(slot)`: kick on slot 0, snare on 4 and 12, else snare 40 %, kick, Tom1 or Tom3 20 % each. Call notes play as hits. Levels 1–2 answers hit the call's next piece at once. `score` from level 3 compares `same_note`: the same `Part` on the kit, the same pitch class on keys.
+  - `recorded` sends `SoloNote { …, drum: self.kit }` and nothing for drum offs (velocity 0).
+- **Engine routing (`drum_hit`):** with `Instrument::Drums` and live active, it first calls `solo.press(piece.note(), …)`:
+  - `Free` (solo off) carries on as before;
+  - `Drove` → `live.play` with a grid, and no sound;
+  - `Played` sounds it with the gate, and `live.hit` (judging) only if `solo.judged()` (level 4). Below that, `live.play` starts the run.
+  - The keys gate `solo = !drums && …` in `handle` is unchanged.
+- **Protocol:**
+  - `SoloNote` gains `drum: bool` (a bit 17).
+  - `ReplayNote` gains `drum: bool` (c bit 16). Velocity is now decoded as `c >> 8 & 0xff`.
+  - `ReplayNote.drum` plays on `PLAYER_DRUM_CHANNEL` in `replay.rs`.
+  - The TS mirror has `drum` on `soloNote`, and `drum?` on the `replayNote` command.
+- **Tests:**
+  - `solo.rs`: the harness `run_kit(solo, beats, &[(frame, key)]) -> KitRun { hits, played, records }`, which also asserts the channel, the releases and that no drum record has an off. Helpers `kit(level)`, `pads(key, every, until)` and `slot(frame)`.
+  - `solo.rs` tests: the snare drives a groove (and the kick doesn't at level 1); faster taps are busier, with fills only when burning and a crash on the next 1; level 2 kick-led vs backbeat, and a tom asks for a fill; level 3 has no kick or backbeat snare from midzer and records the player's hits; level 4 plays nothing and the kit caps at level 4; calls on the kit.
+  - `engine.rs`: `solo_over_clicks_on(instrument, …)` (the old helpers wrap it) and `a_drum_solo_plays_the_kit_and_judges_only_from_level_four`.
+  - `replay.rs`: `drum_hits_replay_on_the_players_kit`. Round trips in `command.rs` and `event.rs`.
+
+**UI**
+- `playalong/solo.ts`:
+  - `DrumSoloLevel` (1–4), `DRUM_SOLO_LEVELS` and `parseDrumSoloLevel`;
+  - `drumSoloHints(level, callKey)` → `Map<DrumPiece, hint>`: level 1 the snare (`TAP_HINT`), level 2 the kick, snare and the 4 toms, level 3 the kick and snare (`SCALE_HINT`), and the call's next piece as `TAP_HINT` from level 3.
+- `live.ts`: `live.drumHint` (in engine piece order). `KitView` rings the hinted pads: `TAP_HINT` gets a thick ring and a tint, others a thin ring.
+- `playalong/replay.ts`: `TakeNote.drum`. The recorder gives drum hits `HIT_TICKS` (a sixteenth) and keeps them out of the open notes. `replayCommands` passes `drum`. New `isDrumTake`.
+- `SoloRoll` draws a drum take in 5 lanes (cymbals, hats, toms, snare, kick; `laneOf`).
+- `session.ts`:
+  - new pref `drumSoloLevel` and `setDrumSoloLevel`;
+  - `soloing()` is now only `alongMode === 'solo'`, for both instruments, and `soloLevelNow()` picks the level sent;
+  - `countFit` and `spaceTap` are keys only. New `spaceDrum()`: the space bar hits the snare on drum levels 1–2;
+  - `setDrumHints` sits next to `setAlongHints`, from `followLiveChords`, and is cleared in `forgetLiveSong`;
+  - fit count fix: `fitFresh` starts a new count on the first note after a run ends, instead of resetting on the transport start. The start came after the first note and wiped it, which made the keys solo e2e fail at the level 3 readout, already at b3c2072.
+- `PlayAlong.tsx`:
+  - `ModePicker` shows for drums too, labelled "Along | Solo";
+  - `SoloLevelPicker` lists `DRUM_SOLO_LEVELS` on drums;
+  - `SoloPlay` splits into `KeysSoloPlay` and `DrumSoloPlay` ("Drum solo", `drumSoloPrompt` and `drumCallPrompt`, no keyboard, as the kit is below the stage). Both use the shared `SoloFeel`;
+  - `AlongTiming` hides at drum levels ≤ 3;
+  - the replay card says "hits" for a drum take.
+- `index.css`: on wide screens `.along-screen .jam-stage` now scrolls (`overflow-y: auto`). Before, the "Your solo" card sat under the kit, which took the clicks.
+- e2e: new `along.spec.ts` "play along: a drum solo driven by tapping the snare" covers space-bar taps, the Feel, the replay card ("hits") and playback, call and response, level 4, and the prefs.
+
+**Checks run:**
+- `cargo test -p midzer-core --lib` (178), `midzer-synth` tests, and clippy clean;
+- `pnpm typecheck`, and the web (179) and audio-web (35) unit tests;
+- e2e after `pnpm build:wasm` and the web build: both solo tests pass. `along.spec.ts:97` fails on the ±15 ms drum spread, a known failure.
+
+**Open after slice 5:**
+- Not tried by ear; all the groove weights are guesses.
+- A real e-kit pass is still to do.
+- A drum solo's taps at levels 1–2 aren't sounded themselves (only the pickup and the groove are). By ear, the player may want the snare tap heard.
+- Calls are 1 bar.
+- The drum hint colours reuse the melody colour.
+- There is no "fit" readout on drums; level 4 relies on the existing timing feedback.
+
+### Notes for slice 6 (docs)
+- Update the Status section of `docs/PLAN.md` with improvise slices 1–5, and the architecture memory.
+- Candidates for the "Open from …" backlog: an ear pass on keys levels 1–3 and drums level 1; 2-bar calls; the blue note; and the open items above.

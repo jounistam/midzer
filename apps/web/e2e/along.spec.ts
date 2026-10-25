@@ -286,6 +286,76 @@ test('play along: a solo driven by tapping one key', async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
+test('play along: a drum solo driven by tapping the snare', async ({ page }) => {
+  test.setTimeout(120_000);
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  await page.addInitScript(() => localStorage.setItem('midzer.onboarded', '1'));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Play along/ }).click();
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeEnabled({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Drums', exact: true }).click();
+  await page.getByRole('button', { name: 'Solo', exact: true }).click();
+  await expect(page.getByTestId('solo-level')).toContainText('One pad');
+
+  await page.getByRole('button', { name: 'Listen' }).click();
+  await expect(page.getByTestId('solo-prompt')).toContainText('Tap the lit snare', { timeout: 30_000 });
+  await expect(page.getByTestId('solo-feel')).toHaveText('Resting');
+
+  // The space bar taps the snare: four taps a beat for a few seconds.
+  const tap = (count: number, everyMs: number) =>
+    page.evaluate(
+      ([count, everyMs]) =>
+        new Promise<void>((resolve) => {
+          let taps = 0;
+          const timer = setInterval(() => {
+            window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space' }));
+            setTimeout(() => window.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space' })), 40);
+            if (++taps >= count!) {
+              clearInterval(timer);
+              resolve();
+            }
+          }, everyMs);
+        }),
+      [count, everyMs],
+    );
+  await tap(24, 125);
+  await expect(page.getByTestId('solo-feel')).toHaveText(/Burning|On fire/);
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/20-play-along-drum-solo.png` });
+  await expect(page.getByTestId('solo-feel')).toHaveText('Resting', { timeout: 10_000 });
+  await expect(page.getByTestId('timing-report')).toHaveCount(0);
+
+  // Stopped, the groove shows on the kit's lanes and can be played back.
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
+  const replay = page.getByTestId('solo-replay');
+  await expect(replay.getByTestId('solo-replay-share')).toContainText(/You played 0% of \d+ hits/);
+  await replay.getByRole('button', { name: 'Play it back' }).click();
+  await expect(replay.getByTestId('solo-replay-status')).toHaveText('Playing back', { timeout: 10_000 });
+  await replay.getByRole('button', { name: 'Stop', exact: true }).click();
+
+  // Call and response on the kit: a tap asks for a call, taps answer it.
+  await page.getByRole('group', { name: 'Call and response' }).getByRole('button', { name: 'On', exact: true }).click();
+  await expect(page.getByTestId('solo-call')).toContainText('Tap to start');
+  await page.keyboard.press('Space');
+  await expect(page.getByTestId('solo-call')).toContainText('Listen', { timeout: 10_000 });
+  await expect(page.getByTestId('solo-call')).toContainText('Your turn', { timeout: 10_000 });
+  for (let i = 0; i < 3; i++) await page.keyboard.press('Space');
+  await expect(page.getByTestId('solo-call-last')).toContainText(/Last answer: \d of \d/, { timeout: 10_000 });
+
+  // Level 4: the player plays the kit and is timed again.
+  await page.getByRole('group', { name: 'Call and response' }).getByRole('button', { name: 'Off', exact: true }).click();
+  await page.getByRole('group', { name: 'Solo level' }).getByRole('button', { name: '4', exact: true }).click();
+  await expect(page.getByTestId('solo-level')).toContainText('On your own');
+  await expect(page.getByTestId('solo-prompt')).toContainText('Play the whole kit');
+
+  const prefs = await page.evaluate(() => JSON.parse(localStorage.getItem('midzer.prefs') ?? '{}'));
+  expect(prefs.alongMode).toBe('solo');
+  expect(prefs.drumSoloLevel).toBe(4);
+  expect(errors).toEqual([]);
+});
+
 test('play along: a song heard is learned and kept, without its audio, and recognised again', async ({ page }) => {
   // Half a minute of listening at least, then the analysis, then recognising it.
   test.setTimeout(210_000);

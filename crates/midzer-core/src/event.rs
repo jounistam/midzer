@@ -69,8 +69,9 @@ pub enum EngineEvent {
     /// hears it: `tick` ([`crate::style::PPQ`] per beat) into bar `bar` of the
     /// live beats (four beats a bar, on the 1s; bars wrap, so only
     /// differences between them mean anything), the player's `own` note
-    /// or midzer's. For recording the solo to replay it.
-    SoloNote { key: u8, velocity: u8, bar: u16, tick: u16, own: bool },
+    /// or midzer's, and a `drum` hit on [`PLAYER_DRUM_CHANNEL`] (hits have
+    /// no offs). For recording the solo to replay it.
+    SoloNote { key: u8, velocity: u8, bar: u16, tick: u16, own: bool, drum: bool },
     /// A replay of the player's solo reached its start, or ended or was stopped.
     Replaying { playing: bool },
 }
@@ -184,8 +185,8 @@ impl EngineEvent {
                 let phase = CallPhase::ALL.iter().position(|p| *p == phase).unwrap_or(0) as u32;
                 [op::SOLO_CALL, phase | (hit as u32) << 8 | (of as u32) << 16, key.map_or(NO_KEY, u32::from), frame]
             }
-            EngineEvent::SoloNote { key, velocity, bar, tick, own } => {
-                [op::SOLO_NOTE, key as u32 | (velocity as u32) << 8 | (own as u32) << 16, bar as u32 | (tick as u32) << 16, frame]
+            EngineEvent::SoloNote { key, velocity, bar, tick, own, drum } => {
+                [op::SOLO_NOTE, key as u32 | (velocity as u32) << 8 | (own as u32) << 16 | (drum as u32) << 17, bar as u32 | (tick as u32) << 16, frame]
             }
             EngineEvent::Replaying { playing } => [op::REPLAYING, playing as u32, 0, frame],
             EngineEvent::KeysJudged { ms, sixteenth, bar, chord } => {
@@ -258,6 +259,7 @@ impl EngineEvent {
                 bar: b as u16,
                 tick: (b >> 16) as u16,
                 own: a >> 16 & 1 != 0,
+                drum: a >> 17 & 1 != 0,
             },
             op::REPLAYING => EngineEvent::Replaying { playing: a != 0 },
             op::KEYS_JUDGED => EngineEvent::KeysJudged {
@@ -464,8 +466,9 @@ mod tests {
             EngineEvent::Control { channel: 0, controller: 1, value: 64 },
             EngineEvent::SoloCall { phase: CallPhase::Answer, hit: 3, of: 5, key: Some(67) },
             EngineEvent::SoloCall { phase: CallPhase::Idle, hit: 0, of: 0, key: None },
-            EngineEvent::SoloNote { key: 72, velocity: 99, bar: 65_535, tick: 1919, own: true },
-            EngineEvent::SoloNote { key: 0, velocity: 0, bar: 0, tick: 0, own: false },
+            EngineEvent::SoloNote { key: 72, velocity: 99, bar: 65_535, tick: 1919, own: true, drum: false },
+            EngineEvent::SoloNote { key: 0, velocity: 0, bar: 0, tick: 0, own: false, drum: false },
+            EngineEvent::SoloNote { key: 38, velocity: 100, bar: 7, tick: 480, own: false, drum: true },
             EngineEvent::Replaying { playing: true },
         ] {
             assert_eq!(EngineEvent::decode(event.encode(42)), Some((event, 42)));

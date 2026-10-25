@@ -264,7 +264,7 @@ export type EngineCommand =
   /** Empties the solo replay, stopping it. */
   | { type: 'replayClear' }
   /** A note of the solo to replay: from `tick` (PPQ per beat) after the run's first bar's 1, `len` ticks long. */
-  | { type: 'replayNote'; tick: number; len: number; key: number; velocity: number }
+  | { type: 'replayNote'; tick: number; len: number; key: number; velocity: number; drum?: boolean }
   /** Replays the solo from the start, or stops it. Without a live beat it plays at `bpm`, the run's tempo. */
   | { type: 'replayPlay'; on: boolean; bpm: number };
 
@@ -398,7 +398,7 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
     case 'replayClear':
       return [Cmd.ReplayClear, 0, 0, 0];
     case 'replayNote':
-      return [Cmd.ReplayNote, Math.max(0, Math.round(cmd.tick)) >>> 0, Math.max(1, Math.round(cmd.len)) >>> 0, (cmd.key & 127) | (Math.min(Math.max(Math.round(cmd.velocity), 1), 127) << 8)];
+      return [Cmd.ReplayNote, Math.max(0, Math.round(cmd.tick)) >>> 0, Math.max(1, Math.round(cmd.len)) >>> 0, (cmd.key & 127) | (Math.min(Math.max(Math.round(cmd.velocity), 1), 127) << 8) | (cmd.drum ? 1 << 16 : 0)];
     case 'replayPlay':
       return [Cmd.ReplayPlay, cmd.on ? 1 : 0, floatBits(Math.max(cmd.bpm, 1)), 0];
     case 'liveBar':
@@ -503,9 +503,9 @@ export type EngineEvent =
   /**
    * A note of the solo started (`velocity` > 0) or ended where the player hears it: `tick` (PPQ per beat) into bar
    * `bar` of the live beats (four beats a bar; bars wrap at 65536, so only differences count), the player's `own`
-   * note or midzer's. For recording the solo to replay it.
+   * note or midzer's, a `drum` hit (with no off). For recording the solo to replay it.
    */
-  | { type: 'soloNote'; key: number; velocity: number; bar: number; tick: number; own: boolean }
+  | { type: 'soloNote'; key: number; velocity: number; bar: number; tick: number; own: boolean; drum: boolean }
   /** A replay of the player's solo reached its start, or ended or was stopped. */
   | { type: 'replaying'; playing: boolean };
 
@@ -596,7 +596,7 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
       return phase ? { type: 'soloCall', phase, hit: (a >> 8) & 0xff, of: (a >> 16) & 0xff, key: b === NO_KEY ? null : b & 0xff, frame } : null;
     }
     case 21:
-      return { type: 'soloNote', key: a & 0xff, velocity: (a >> 8) & 0xff, bar: b & 0xffff, tick: b >>> 16, own: ((a >> 16) & 1) !== 0, frame };
+      return { type: 'soloNote', key: a & 0xff, velocity: (a >> 8) & 0xff, bar: b & 0xffff, tick: b >>> 16, own: ((a >> 16) & 1) !== 0, drum: ((a >> 17) & 1) !== 0, frame };
     case 22:
       return { type: 'replaying', playing: a !== 0, frame };
     default:

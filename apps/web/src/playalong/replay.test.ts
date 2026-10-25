@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_REPLAY_NOTES, ownShare, replayCommands, TakeRecorder, TICKS_PER_BAR } from './replay';
+import { HIT_TICKS, isDrumTake, MAX_REPLAY_NOTES, ownShare, replayCommands, TakeRecorder, TICKS_PER_BAR } from './replay';
 
 describe('recording a solo', () => {
   it('places the notes from the first bar, as played', () => {
@@ -11,8 +11,8 @@ describe('recording a solo', () => {
     r.note({ key: 64, velocity: 0, bar: 8, tick: 960, own: true });
     expect(r.take()).toEqual({
       notes: [
-        { tick: 480, len: 240, key: 60, velocity: 90, own: false },
-        { tick: TICKS_PER_BAR, len: 960, key: 64, velocity: 100, own: true },
+        { tick: 480, len: 240, key: 60, velocity: 90, own: false, drum: false },
+        { tick: TICKS_PER_BAR, len: 960, key: 64, velocity: 100, own: true, drum: false },
       ],
       bars: 2,
     });
@@ -49,6 +49,21 @@ describe('recording a solo', () => {
     expect(before.take()!.notes.map((n) => n.tick)).toEqual([1800, TICKS_PER_BAR]);
   });
 
+  it('gives drum hits a sixteenth, with no offs', () => {
+    const r = new TakeRecorder();
+    r.note({ key: 38, velocity: 90, bar: 4, tick: 0, own: true, drum: true });
+    r.note({ key: 38, velocity: 70, bar: 4, tick: 60, own: false, drum: true });
+    r.note({ key: 42, velocity: 70, bar: 4, tick: 60, own: false, drum: true });
+    const take = r.take()!;
+    expect(take.notes.map((n) => [n.tick, n.len, n.key, n.drum])).toEqual([
+      [0, HIT_TICKS, 38, true],
+      [60, HIT_TICKS, 38, true],
+      [60, HIT_TICKS, 42, true],
+    ]);
+    expect(isDrumTake(take)).toBe(true);
+    expect(replayCommands(take)[1]).toEqual({ type: 'replayNote', tick: 0, len: HIT_TICKS, key: 38, velocity: 90, drum: true });
+  });
+
   it('loads into the engine, up to its size', () => {
     const r = new TakeRecorder();
     for (let i = 0; i < MAX_REPLAY_NOTES + 5; i++) r.note({ key: 60 + (i % 5), velocity: 80, bar: 0, tick: i * 60, own: i % 4 === 0 });
@@ -56,7 +71,7 @@ describe('recording a solo', () => {
     const commands = replayCommands(take);
     expect(commands[0]).toEqual({ type: 'replayClear' });
     expect(commands).toHaveLength(MAX_REPLAY_NOTES + 1);
-    expect(commands[1]).toEqual({ type: 'replayNote', tick: 0, len: 300, key: 60, velocity: 80 });
+    expect(commands[1]).toEqual({ type: 'replayNote', tick: 0, len: 300, key: 60, velocity: 80, drum: false });
     expect(ownShare(take)).toBeCloseTo(0.25, 2);
   });
 });

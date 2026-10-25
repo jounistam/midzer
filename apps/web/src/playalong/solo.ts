@@ -2,7 +2,7 @@
 // midzer solos up to playing every note yourself, and the keys each lights.
 // The solo itself is played by the engine (crates/midzer-core/src/solo.rs).
 
-import type { CallPhase, TimedEvent } from '@midzer/audio-web';
+import { DRUM_PIECES, type CallPhase, type DrumPiece, type TimedEvent } from '@midzer/audio-web';
 import { pentatonic, type SongKey } from './scale';
 
 /** Play the chords heard, or solo over them. */
@@ -22,6 +22,20 @@ export const DEFAULT_SOLO_LEVEL: SoloLevel = 1;
 
 export function parseSoloLevel(value: unknown): SoloLevel {
   return SOLO_LEVELS.some((l) => l.level === value) ? (value as SoloLevel) : DEFAULT_SOLO_LEVEL;
+}
+
+export type DrumSoloLevel = 1 | 2 | 3 | 4;
+
+/** Soloing on drums: from tapping the snare while midzer plays the kit up to playing all of it. */
+export const DRUM_SOLO_LEVELS: { level: DrumSoloLevel; name: string; detail: string }[] = [
+  { level: 1, name: 'One pad', detail: 'Tap the lit snare and midzer plays the kit. Tap faster for a busier groove, with tom fills and a crash; harder for louder.' },
+  { level: 2, name: 'Pick the groove', detail: 'Tap the kick for a kick-led groove, the snare for the backbeat, a tom for a fill to the end of the bar.' },
+  { level: 3, name: 'Kick and snare', detail: 'Play the kick and snare yourself; midzer keeps the hi-hat, ghost notes and fills when it burns.' },
+  { level: 4, name: 'On your own', detail: 'Play the whole kit yourself; your timing is judged.' },
+];
+
+export function parseDrumSoloLevel(value: unknown): DrumSoloLevel {
+  return DRUM_SOLO_LEVELS.some((l) => l.level === value) ? (value as DrumSoloLevel) : 1;
 }
 
 export function parseAlongMode(value: unknown): AlongMode {
@@ -60,6 +74,23 @@ export function soloHints(level: SoloLevel, key: SongKey | null, chord = 0, call
   }
   // Playing a call back, its next note is the key to play.
   if (callKey !== null && level >= 3) hints.set(callKey, TAP_HINT);
+  return hints;
+}
+
+const PIECE_OF_NOTE = new Map<number, DrumPiece>(DRUM_PIECES.map((p) => [p.note, p.id]));
+const TOMS: DrumPiece[] = ['tom1', 'tom2', 'tom3', 'tom4'];
+
+/**
+ * The kit's pads lit at drum solo `level`: the pads to tap (`TAP_HINT`) on levels 1–2, the player's part
+ * (`SCALE_HINT`) on level 3. `callKey` is call and response's next hit to play, as its General MIDI key.
+ */
+export function drumSoloHints(level: DrumSoloLevel, callKey: number | null = null): Map<DrumPiece, number> {
+  const hints = new Map<DrumPiece, number>();
+  if (level === 1) hints.set('snare', TAP_HINT);
+  if (level === 2) for (const p of ['kick', 'snare', ...TOMS] as const) hints.set(p, TAP_HINT);
+  if (level === 3) for (const p of ['kick', 'snare'] as const) hints.set(p, SCALE_HINT);
+  const next = callKey === null ? undefined : PIECE_OF_NOTE.get(callKey);
+  if (next && level >= 3) hints.set(next, TAP_HINT);
   return hints;
 }
 

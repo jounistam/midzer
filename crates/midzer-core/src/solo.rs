@@ -21,16 +21,27 @@
 //! the player's and midzer's, so the UI can record the solo and replay it
 //! (see [`crate::replay`]).
 //!
+//! On drums the solo is a groove on the kit instead, on the player's drum
+//! channel: on level 1 the player taps the snare and midzer plays the
+//! groove, busier the faster the taps, with tom fills and a crash on the 1
+//! after them; on level 2 the kick asks for a kick-led groove, the snare for
+//! the backbeat and a tom for a fill; on level 3 the player plays the kick
+//! and snare and midzer the hi-hat, ghost notes and fills; on level 4 the
+//! player plays everything. Calls are short rhythms on the kit.
+//!
 //! Notes come from the song's scale (a pentatonic the UI sends with the chord
 //! heard, see [`crate::Command::SoloHarmony`]), chord tones on the strong
 //! beats. Everything is fixed state: nothing allocates.
 
+use crate::drums::Piece;
 use crate::engine::PLAYER_CHANNEL;
-use crate::event::{CallPhase, EngineEvent, EventBuffer};
+use crate::event::{CallPhase, EngineEvent, EventBuffer, PLAYER_DRUM_CHANNEL};
 use crate::style::{PPQ, TICKS_PER_BAR};
 
 /// The highest level the UI may ask for.
 pub const MAX_SOLO_LEVEL: u8 = 5;
+/// The highest level on drums.
+pub const MAX_KIT_LEVEL: u8 = 4;
 /// The most a lead may be, in ms (see [`Solo::set_level`]).
 pub const MAX_LEAD_MS: f32 = 500.0;
 
@@ -85,6 +96,40 @@ const MAX_ANSWER: usize = 32;
 const UNANSWERED_REST: u8 = 2;
 /// Sixteenths in a bar.
 const BAR: i64 = 16;
+/// A drum hit sounds this long before its release, in seconds, as the player's do.
+const HIT_S: f64 = 0.1;
+/// Drum hits waiting for their release at most.
+const MAX_HITS: usize = 16;
+/// The kit's groove: from this energy every fourth bar ends with a fill, from
+/// the next every second bar with a two-beat one.
+const FILL_ENERGY: f32 = 0.55;
+const BIG_FILL_ENERGY: f32 = 0.85;
+/// No fill this bar, in `fill_from`.
+const NO_FILL: u8 = 4;
+
+/// What a drum hit is, for the kit's solo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Kick,
+    Snare,
+    HiHat,
+    Tom,
+    Cymbal,
+}
+
+impl Part {
+    /// The part a General MIDI drum key plays, as [`Piece::note`] sounds it.
+    fn of(key: u8) -> Option<Part> {
+        let piece = Piece::ALL.into_iter().find(|p| p.note() == key)?;
+        Some(match piece {
+            Piece::Kick => Part::Kick,
+            Piece::Snare | Piece::SnareRim | Piece::SideStick => Part::Snare,
+            Piece::HiHatClosed | Piece::HiHatOpen | Piece::HiHatPedal => Part::HiHat,
+            p if p.is_tom() => Part::Tom,
+            _ => Part::Cymbal,
+        })
+    }
+}
 
 /// What a key press did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +246,18 @@ pub struct Solo {
     answer_len: u8,
     /// Answers in a row with no notes.
     unanswered: u8,
+    /// Playing drums: the solo is a groove on the kit, levels 1–4.
+    kit: bool,
+    /// Drum hits sounding: key and the engine frame they are released.
+    hits: [Option<(u8, f64)>; MAX_HITS],
+    /// The kit's groove is playing, and how many bars it has started.
+    grooving: bool,
+    bars: u32,
+    /// The beat of this bar a fill starts on ([`NO_FILL`] for none), a fill
+    /// asked for (level 2's tom) and a crash due on the next beat.
+    fill_from: u8,
+    fill_asked: bool,
+    crash: bool,
 }
 
 impl Solo {
@@ -253,6 +310,13 @@ impl Solo {
             answers: [(0.0, 0); MAX_ANSWER],
             answer_len: 0,
             unanswered: 0,
+            kit: false,
+            hits: [None; MAX_HITS],
+            grooving: false,
+            bars: 0,
+            fill_from: NO_FILL,
+            fill_asked: false,
+            crash: false,
         }
     }
 
@@ -266,10 +330,23 @@ impl Solo {
     pub fn set_level(&mut self, level: u8, call: bool, lead_ms: f32, out: &mut EventBuffer) {
         if level != self.level || call != self.call {
             self.silence(0, out);
-            self.level = level.min(MAX_SOLO_LEVEL);
+            self.level = level.min(self.max_level());
             self.call = call;
         }
         self.lead = lead_ms.clamp(0.0, MAX_LEAD_MS) as f64 / 1000.0 * self.sample_rate as f64;
+    }
+
+    /// Drums or keys: on drums the solo is a groove on the kit, up to [`MAX_KIT_LEVEL`].
+    pub fn set_kit(&mut self, kit: bool, out: &mut EventBuffer) {
+        if kit != self.kit {
+            self.silence(0, out);
+            self.kit = kit;
+            self.level = self.level.min(self.max_level());
+        }
+    }
+
+    fn max_level(&self) -> u8 {
+        if self.kit { MAX_KIT_LEVEL } else { MAX_SOLO_LEVEL }
     }
 
     /// The song's home note (0 is C), its scale and the chord heard now, as pitch-class bit sets.
@@ -305,6 +382,9 @@ impl Solo {
             return Pressed::Free;
         }
         (self.grid, self.now) = (grid, now);
+        if self.kit {
+            return self.drum_press(key, velocity, now, grid, out);
+        }
         if self.level >= OWN_NOTES_FROM {
             let pressed = self.own_note(key, velocity, now, grid, out);
             if let (true, Pressed::Played(sound), Some(grid)) = (self.call, pressed, grid) {
@@ -343,6 +423,52 @@ impl Solo {
             self.rest_left = 0;
             let key = self.pick(true);
             self.note_on(key, 0, now as f64, now, grid.period * 0.5, out);
+        }
+        Pressed::Drove
+    }
+
+    /// A pad hit on the kit (as its General MIDI key): the player's own from
+    /// level 3, which the engine sounds; below, a tap on a driving pad or nothing.
+    fn drum_press(&mut self, key: u8, velocity: u8, now: u64, grid: Option<Grid>, out: &mut EventBuffer) -> Pressed {
+        if self.level >= OWN_NOTES_FROM {
+            if let Some(grid) = grid {
+                self.tap(velocity, now, grid);
+                if self.call {
+                    self.answered(key, now, grid, out);
+                }
+            }
+            self.recorded(0, key, velocity, now as f64, true, out);
+            return Pressed::Played(key);
+        }
+        let part = Part::of(key);
+        let drives = match self.level {
+            1 => part == Some(Part::Snare),
+            _ => matches!(part, Some(Part::Kick | Part::Snare | Part::Tom)),
+        };
+        let Some(grid) = grid.filter(|_| drives) else { return Pressed::Drove };
+        self.tap(velocity, now, grid);
+        if self.call {
+            if let Some(i) = self.answered(key, now, grid, out)
+                && i < self.call_len as usize
+            {
+                // The call's next hit.
+                self.hit(self.call_notes[i].1, velocity, now as f64, now, true, out);
+                self.last_note = now as f64;
+            }
+            return Pressed::Drove;
+        }
+        match part {
+            // Level 2: the kick leads the groove, the snare plays the backbeat, a tom asks for a fill.
+            Some(Part::Kick) => self.steer = -1,
+            Some(Part::Tom) => self.fill_asked = true,
+            _ => self.steer = 0,
+        }
+        if (now as f64 - self.last_note) / grid.period > PICKUP_AFTER_BEATS {
+            // Straight away, so the tap is heard to start it.
+            self.energy = self.energy.max(energy_of(self.rate));
+            let velocity = self.velocity(0);
+            self.hit(key, velocity, now as f64, now, false, out);
+            self.last_note = now as f64;
         }
         Pressed::Drove
     }
@@ -476,6 +602,14 @@ impl Solo {
         self.rest_left = 0;
         self.mask = 0;
         self.ending = false;
+        for (key, _) in self.hits.iter_mut().filter_map(Option::take) {
+            out.push(at, EngineEvent::NoteOff { channel: PLAYER_DRUM_CHANNEL, key });
+        }
+        self.grooving = false;
+        self.bars = 0;
+        self.fill_from = NO_FILL;
+        self.fill_asked = false;
+        self.crash = false;
         self.rest_calls(at, out);
         self.call_size = FIRST_CALL;
     }
@@ -513,7 +647,11 @@ impl Solo {
                     if self.call {
                         self.call_sixteenth(q, t, now, &g, out);
                     } else if self.level < JUDGED_FROM {
-                        self.sixteenth(q, t, now, &g, out);
+                        if self.kit {
+                            self.drum_sixteenth(q, t, now, &g, out);
+                        } else {
+                            self.sixteenth(q, t, now, &g, out);
+                        }
                     }
                 }
                 q += 1;
@@ -643,7 +781,13 @@ impl Solo {
         let key = self.call_notes[i].1;
         // Up to the next note, a beat at most.
         let gap = self.call_notes.get(i + 1).filter(|_| i + 1 < len).map_or(4, |n| (n.0 as i64 - into).min(4));
-        self.note_on(key, (into % 4) as u8, t, now, gap as f64 * 0.9 * g.period / 4.0, out);
+        if self.kit {
+            let velocity = self.velocity((into % 4) as u8);
+            self.hit(key, velocity, t, now, false, out);
+            self.last_note = t;
+        } else {
+            self.note_on(key, (into % 4) as u8, t, now, gap as f64 * 0.9 * g.period / 4.0, out);
+        }
         out.push(at, EngineEvent::SoloCall { phase: CallPhase::Listen, hit: i as u8 + 1, of: self.call_len, key: Some(key) });
     }
 
@@ -714,7 +858,7 @@ impl Solo {
         let mut len = 0;
         for (slot, _) in slots.iter().enumerate().filter(|(_, on)| **on) {
             let last = len + 1 == slots.iter().filter(|on| **on).count();
-            let key = self.pick(slot % 8 == 0 || last);
+            let key = if self.kit { self.call_piece(slot).note() } else { self.pick(slot % 8 == 0 || last) };
             self.call_notes[len] = (slot as u8, key);
             len += 1;
         }
@@ -759,7 +903,7 @@ impl Solo {
         for &(slot, key) in &self.call_notes[..self.call_len as usize] {
             let best = (0..answers.len())
                 .filter(|&j| !used[j] && (answers[j].0 - slot as f32).abs() as f64 <= ANSWER_SLACK)
-                .filter(|&j| self.level < OWN_NOTES_FROM || answers[j].1 % 12 == key % 12)
+                .filter(|&j| self.level < OWN_NOTES_FROM || self.same_note(answers[j].1, key))
                 .min_by(|&a, &b| (answers[a].0 - slot as f32).abs().total_cmp(&(answers[b].0 - slot as f32).abs()));
             if let Some(j) = best {
                 used[j] = true;
@@ -767,6 +911,138 @@ impl Solo {
             }
         }
         hit.saturating_sub(self.answer_len.saturating_sub(self.call_len))
+    }
+
+    /// Whether an answer's `key` is the call's: the same pitch class, or on
+    /// the kit the same part (any snare, any tom).
+    fn same_note(&self, key: u8, call: u8) -> bool {
+        if self.kit { Part::of(key) == Part::of(call) } else { key % 12 == call % 12 }
+    }
+
+    /// A call's hit on the kit at `slot` of its bar: the kick on the 1, the
+    /// snare on 2 and 4, else mostly the snare, sometimes the kick or a tom.
+    fn call_piece(&mut self, slot: usize) -> Piece {
+        if slot == 0 {
+            return Piece::Kick;
+        }
+        if slot % 8 == 4 {
+            return Piece::Snare;
+        }
+        match self.below(5) {
+            0 | 1 => Piece::Snare,
+            2 => Piece::Kick,
+            3 => Piece::Tom1,
+            _ => Piece::Tom3,
+        }
+    }
+
+    /// Sixteenth `q` on the kit, heard at engine frame `t`: the groove while
+    /// the taps drive it, with fills, and a last kick and crash once they stop.
+    fn drum_sixteenth(&mut self, q: i64, t: f64, now: u64, g: &Grid, out: &mut EventBuffer) {
+        let pos = q.rem_euclid(4) as u8;
+        let beat = g.beat_in_bar(q) as u8;
+        let slot = beat * 4 + pos;
+        if pos == 0 {
+            let driven = self.driven(now, g.period) && self.energy >= SILENT;
+            if !driven {
+                if std::mem::take(&mut self.grooving) {
+                    let velocity = self.velocity(0);
+                    self.hit(Piece::Kick.note(), velocity, t, now, false, out);
+                    self.hit(Piece::Crash.note(), velocity, t, now, false, out);
+                    self.fill_from = NO_FILL;
+                }
+                return;
+            }
+            if !self.grooving {
+                self.grooving = true;
+                self.crash = self.energy >= 0.5;
+            }
+            self.new_drum_beat(beat);
+        }
+        if !self.grooving || t - self.last_note < g.period / 8.0 {
+            // Not playing, or a tap's hit just took this sixteenth.
+            return;
+        }
+        let e = self.energy;
+        let base = self.velocity(pos);
+        let mut play = |solo: &mut Solo, piece: Piece, velocity: f32| solo.hit(piece.note(), velocity.clamp(20.0, 127.0) as u8, t, now, false, out);
+        let backing = self.level < OWN_NOTES_FROM;
+        if beat >= self.fill_from {
+            // Down the toms to the bar's end, sixteenths when it burns.
+            if pos.is_multiple_of(2) || e >= 0.7 {
+                let span = (BAR as u8 - self.fill_from * 4) as usize;
+                let into = (slot - self.fill_from * 4) as usize;
+                let piece = [Piece::Snare, Piece::Tom1, Piece::Tom2, Piece::Tom3, Piece::Tom4][into * 5 / span];
+                play(self, piece, base as f32 + 4.0);
+            }
+            if backing && pos == 0 {
+                play(self, Piece::Kick, base as f32);
+            }
+            if slot == BAR as u8 - 1 {
+                self.crash = true;
+            }
+        } else {
+            let crash = pos == 0 && std::mem::take(&mut self.crash);
+            if crash {
+                play(self, Piece::Crash, base as f32 + 10.0);
+            } else if pos == 0 || (pos == 2 && e >= 0.3) || e >= 0.75 {
+                let open = slot == 14 && e >= 0.6;
+                let piece = if open { Piece::HiHatOpen } else { Piece::HiHatClosed };
+                play(self, piece, base as f32 - if pos == 0 { 6.0 } else { 16.0 });
+            }
+            if backing {
+                let kick = match self.steer {
+                    // Kick-led: on the "and" of 2 and of 3, pushing on as it burns.
+                    -1 => matches!(slot, 0 | 6 | 8 | 10) || (slot == 3 && e >= 0.5) || (slot == 14 && e >= 0.6),
+                    _ => matches!(slot, 0 | 8) || (slot == 10 && e >= 0.45) || (slot == 7 && e >= 0.7 && self.chance(0.5)),
+                };
+                if kick || crash {
+                    play(self, Piece::Kick, base as f32);
+                }
+                if slot == 4 || slot == 12 {
+                    play(self, Piece::Snare, base as f32 + 6.0);
+                }
+            }
+            if pos % 2 == 1 && e >= 0.55 && self.chance((e - 0.55) * 1.5) {
+                // A ghost note.
+                play(self, Piece::Snare, 28.0 + 12.0 * e);
+            }
+        }
+        self.last_note = t;
+    }
+
+    /// A beat of the kit's groove starts: on a 1 the bar's fill is decided,
+    /// later a tom asked for one to the bar's end.
+    fn new_drum_beat(&mut self, beat: u8) {
+        if beat == 0 {
+            self.bars += 1;
+            let e = self.energy;
+            self.fill_from = if e >= BIG_FILL_ENERGY && self.bars.is_multiple_of(2) {
+                2
+            } else if e >= FILL_ENERGY && self.bars.is_multiple_of(4) {
+                3
+            } else {
+                NO_FILL
+            };
+        } else if beat >= 2 && std::mem::take(&mut self.fill_asked) {
+            self.fill_from = self.fill_from.min(beat);
+        }
+    }
+
+    /// Hits `key` on the kit at engine frame `t`, released a moment later.
+    /// midzer's hits are heard `lead` later; the player's own at `t`.
+    fn hit(&mut self, key: u8, velocity: u8, t: f64, now: u64, own: bool, out: &mut EventBuffer) {
+        let at = (t - now as f64).max(0.0) as u32;
+        let same = self.hits.iter().position(|h| h.is_some_and(|(k, _)| k == key));
+        let free = self.hits.iter().position(Option::is_none);
+        let first = || (0..MAX_HITS).min_by(|&a, &b| self.hits[a].map_or(0.0, |h| h.1).total_cmp(&self.hits[b].map_or(0.0, |h| h.1)));
+        let Some(i) = same.or(free).or_else(first) else { return };
+        if let Some((key, _)) = self.hits[i] {
+            out.push(at, EngineEvent::NoteOff { channel: PLAYER_DRUM_CHANNEL, key });
+        }
+        out.push(at, EngineEvent::NoteOn { channel: PLAYER_DRUM_CHANNEL, key, velocity });
+        self.hits[i] = Some((key, t + HIT_S * self.sample_rate as f64));
+        self.recorded(at, key, velocity, if own { t } else { t + self.lead }, own, out);
     }
 
     /// Decides what this beat plays: part of a phrase, a rest between
@@ -932,6 +1208,14 @@ impl Solo {
 
     /// Ends the notes whose time is up before `end`.
     fn release_due(&mut self, now: u64, end: f64, out: &mut EventBuffer) {
+        for slot in &mut self.hits {
+            if let Some((key, off)) = *slot
+                && off < end
+            {
+                *slot = None;
+                out.push((off - now as f64).max(0.0) as u32, EngineEvent::NoteOff { channel: PLAYER_DRUM_CHANNEL, key });
+            }
+        }
         for grace in [true, false] {
             let slot = if grace { &mut self.grace } else { &mut self.sounding };
             if let Some((key, off)) = *slot
@@ -956,14 +1240,15 @@ impl Solo {
         self.recorded(at, key, 0, heard, own, out);
     }
 
-    /// A note started or ended, placed on the beats heard; nothing without a beat.
+    /// A note started or ended, placed on the beats heard; nothing without a
+    /// beat. Drum hits have no ends.
     fn recorded(&self, at: u32, key: u8, velocity: u8, heard: f64, own: bool, out: &mut EventBuffer) {
-        let Some(g) = self.grid else { return };
+        let Some(g) = self.grid.filter(|_| !self.kit || velocity > 0) else { return };
         // Counted in bars of the beats found, on the 1s' phase: `one` itself moves on each bar.
         let ticks = ((g.sixteenth_at(heard) / 4.0 - g.one.rem_euclid(4) as f64) * PPQ as f64).round() as i64;
         let bar = TICKS_PER_BAR as i64;
         // Bars wrap: only differences between them count.
-        out.push(at, EngineEvent::SoloNote { key, velocity, bar: ticks.div_euclid(bar) as u16, tick: ticks.rem_euclid(bar) as u16, own });
+        out.push(at, EngineEvent::SoloNote { key, velocity, bar: ticks.div_euclid(bar) as u16, tick: ticks.rem_euclid(bar) as u16, own, drum: self.kit });
     }
 
     fn next_random(&mut self) -> u32 {
@@ -1541,7 +1826,7 @@ mod tests {
                 match t.event {
                     EngineEvent::NoteOn { key, velocity, .. } => sounds.push((now + t.frame as u64, key, velocity)),
                     EngineEvent::NoteOff { key, .. } => sounds.push((now + t.frame as u64, key, 0)),
-                    EngineEvent::SoloNote { key, velocity, bar, tick, own } => {
+                    EngineEvent::SoloNote { key, velocity, bar, tick, own, .. } => {
                         let i = sounds.iter().position(|s| s.1 == key && s.2 == velocity).expect("a note went out for each record");
                         let (at, key, velocity) = sounds.remove(i);
                         assert_eq!(at, now + t.frame as u64, "on the note's frame");
@@ -1585,5 +1870,202 @@ mod tests {
         assert_eq!(rotate(DEFAULT_SCALE, 0), DEFAULT_SCALE);
         // G major pentatonic: G A B D E.
         assert_eq!(rotate(DEFAULT_SCALE, 7), 1 << 7 | 1 << 9 | 1 << 11 | 1 << 2 | 1 << 4);
+    }
+
+    fn kit(level: u8) -> Solo {
+        let mut s = solo();
+        s.set_kit(true, &mut EventBuffer::default());
+        s.set_level(level, false, 0.0, &mut EventBuffer::default());
+        s
+    }
+
+    const KICK: u8 = 36;
+    const SNARE: u8 = 38;
+    const HAT: u8 = 42;
+    const CRASH: u8 = 49;
+
+    /// What the kit's solo did: midzer's hits (frame, key, velocity), the
+    /// player's own hits as the solo let them through, and the records
+    /// (frame, key, ticks from bar 0, own).
+    #[derive(Default)]
+    struct KitRun {
+        hits: Vec<(u64, u8, u8)>,
+        played: Vec<(u64, u8)>,
+        records: Vec<(u64, u8, i64, bool)>,
+    }
+
+    /// Runs the kit for `beats` with hits on pads (frame, key).
+    fn run_kit(solo: &mut Solo, beats: f64, pads: &[(u64, u8)]) -> KitRun {
+        let mut got = KitRun::default();
+        let mut sounding: Vec<(u8, u64)> = Vec::new();
+        let mut next = 0;
+        let mut now = 0u64;
+        while now < (beats * PERIOD) as u64 {
+            let mut out = EventBuffer::default();
+            while next < pads.len() && pads[next].0 < now + BLOCK as u64 {
+                if let Pressed::Played(key) = solo.press(pads[next].1, 100, now, Some(GRID), &mut out) {
+                    got.played.push((now, key));
+                }
+                next += 1;
+            }
+            solo.process(BLOCK, now, Some(GRID), &mut out);
+            out.sort();
+            for t in out.as_slice() {
+                let at = now + t.frame as u64;
+                match t.event {
+                    EngineEvent::NoteOn { channel, key, velocity } => {
+                        assert_eq!(channel, PLAYER_DRUM_CHANNEL);
+                        assert!(!sounding.iter().any(|s| s.0 == key), "{key} hit again before its release");
+                        sounding.push((key, at));
+                        got.hits.push((at, key, velocity));
+                    }
+                    EngineEvent::NoteOff { channel, key } => {
+                        assert_eq!(channel, PLAYER_DRUM_CHANNEL);
+                        let i = sounding.iter().position(|s| s.0 == key).expect("an off for a hit");
+                        let (_, from) = sounding.remove(i);
+                        assert!(at - from <= (HIT_S * SR as f64) as u64 + 1, "released soon");
+                    }
+                    EngineEvent::SoloNote { key, velocity, bar, tick, own, drum } => {
+                        assert!(drum && velocity > 0, "drum hits are recorded without offs");
+                        got.records.push((at, key, bar as i64 * TICKS_PER_BAR as i64 + tick as i64, own));
+                    }
+                    _ => {}
+                }
+            }
+            now += BLOCK as u64;
+        }
+        got
+    }
+
+    /// Hits on `key` every `every` beats from beat 1 to beat `until`.
+    fn pads(key: u8, every: f64, until: f64) -> Vec<(u64, u8)> {
+        taps(every, until).into_iter().map(|t| (t, key)).collect()
+    }
+
+    /// The sixteenth of its bar a hit falls on.
+    fn slot(frame: u64) -> i64 {
+        (frame as f64 / (PERIOD / 4.0)).round() as i64 % 16
+    }
+
+    #[test]
+    fn a_snare_tap_drives_a_groove_on_the_kit() {
+        assert!(run_kit(&mut kit(1), 12.0, &pads(KICK, 0.5, 9.0)).hits.is_empty(), "only the snare drives it on level 1");
+        let taps = pads(SNARE, 0.5, 9.0);
+        let run = run_kit(&mut kit(1), 14.0, &taps);
+        let keys: Vec<u8> = run.hits.iter().map(|h| h.1).collect();
+        for key in [KICK, SNARE, HAT] {
+            assert!(keys.contains(&key), "{key} in the groove: {keys:?}");
+        }
+        assert!(run.played.is_empty(), "taps are not the player's own hits");
+        // The first sounds with the first tap; the rest on the sixteenths.
+        assert!(run.hits[0].0 <= PERIOD as u64 && run.hits[0].0 + BLOCK as u64 > PERIOD as u64);
+        for h in &run.hits[1..] {
+            let q = h.0 as f64 / (PERIOD / 4.0);
+            assert!((q - q.round()).abs() * PERIOD / 4.0 < 1.5, "hit at {} off the grid", h.0);
+        }
+        // The backbeat: snares on 2 and 4 of the bars in the middle.
+        let backbeat = run.hits.iter().filter(|h| h.1 == SNARE && h.0 > (2.0 * PERIOD) as u64 && h.0 < (8.0 * PERIOD) as u64);
+        assert!(backbeat.clone().count() >= 2 && backbeat.clone().all(|h| [4, 12].contains(&slot(h.0)) || h.2 < 60), "{:?}", backbeat.collect::<Vec<_>>());
+        let last_tap = taps.last().unwrap().0;
+        let last = run.hits.last().unwrap();
+        assert!(last.0 <= last_tap + (2.5 * PERIOD) as u64, "winds down {} beats after", (last.0 - last_tap) as f64 / PERIOD);
+        assert!(run.hits.iter().any(|h| h.1 == CRASH && h.0 > last_tap), "ends on a crash");
+    }
+
+    #[test]
+    fn faster_taps_play_a_busier_kit_with_fills() {
+        let mut counts = Vec::new();
+        let mut toms = Vec::new();
+        for every in [1.0, 0.5, 0.25] {
+            let run = run_kit(&mut kit(1), 20.0, &pads(SNARE, every, 19.0));
+            let middle: Vec<_> = run.hits.iter().filter(|h| h.0 >= (4.0 * PERIOD) as u64 && h.0 < (19.0 * PERIOD) as u64).collect();
+            counts.push(middle.len());
+            toms.push(middle.iter().filter(|h| Part::of(h.1) == Some(Part::Tom)).count());
+            if every == 0.25 {
+                // A fill ends the bar, and a crash marks the next 1.
+                let first_tom = middle.iter().find(|h| Part::of(h.1) == Some(Part::Tom)).unwrap().0;
+                let next_one = (first_tom as f64 / (4.0 * PERIOD)).ceil() * 4.0 * PERIOD;
+                assert!(middle.iter().any(|h| h.1 == CRASH && h.0 == next_one as u64), "a crash after the fill");
+            }
+        }
+        assert!(counts.windows(2).all(|w| w[0] < w[1]), "hits per tap rate: {counts:?}");
+        assert_eq!(toms[0], 0, "no fills when calm: {toms:?}");
+        assert!(toms[2] > 0, "fills when burning: {toms:?}");
+    }
+
+    #[test]
+    fn level_two_pads_choose_the_groove() {
+        let kicks_on_the_and_of_two = |run: &KitRun| run.hits.iter().filter(|h| h.1 == KICK && slot(h.0) == 6).count();
+        let led = run_kit(&mut kit(2), 12.0, &pads(KICK, 0.5, 11.0));
+        let backbeat = run_kit(&mut kit(2), 12.0, &pads(SNARE, 0.5, 11.0));
+        assert!(kicks_on_the_and_of_two(&led) >= 2, "kick-led");
+        assert_eq!(kicks_on_the_and_of_two(&backbeat), 0, "the backbeat");
+        assert!(backbeat.hits.iter().all(|h| Part::of(h.1) != Some(Part::Tom)), "no fill unasked at this rate");
+        // A tom on beat 5 asks for a fill to the bar's end, and a crash on the next 1.
+        let mut taps = pads(SNARE, 0.5, 11.0);
+        taps.push(((5.25 * PERIOD) as u64, 45));
+        taps.sort();
+        let fill = run_kit(&mut kit(2), 12.0, &taps);
+        let toms: Vec<_> = fill.hits.iter().filter(|h| Part::of(h.1) == Some(Part::Tom)).map(|h| h.0 as f64 / PERIOD).collect();
+        assert!(!toms.is_empty() && toms.iter().all(|&b| (6.0..8.0).contains(&b)), "toms on beats 6 and 7: {toms:?}");
+        assert!(fill.hits.iter().any(|h| h.1 == CRASH && h.0 == (8.0 * PERIOD) as u64), "a crash on the 1");
+    }
+
+    #[test]
+    fn level_three_leaves_the_kick_and_snare_to_the_player() {
+        let mut taps = pads(KICK, 1.0, 11.0);
+        taps.extend(pads(SNARE, 1.0, 11.0).into_iter().map(|(t, k)| (t + (PERIOD / 2.0) as u64, k)));
+        taps.sort();
+        let mut s = kit(3);
+        let run = run_kit(&mut s, 12.0, &taps);
+        assert!(!s.judged());
+        assert_eq!(run.played, taps.iter().map(|&(t, k)| (t / BLOCK as u64 * BLOCK as u64, k)).collect::<Vec<_>>(), "the player's hits are their own");
+        assert!(run.hits.iter().any(|h| h.1 == HAT), "midzer keeps time on the hi-hat");
+        assert!(run.hits.iter().all(|h| h.1 != KICK), "no kick from midzer");
+        assert!(run.hits.iter().filter(|h| h.1 == SNARE).all(|h| h.2 < 50), "only ghost notes on the snare");
+        let own: Vec<_> = run.records.iter().filter(|r| r.3).map(|r| (r.0, r.1)).collect();
+        assert_eq!(own, run.played, "the player's hits are recorded where they are played");
+        assert_eq!(run.records.iter().filter(|r| !r.3).count(), run.hits.len(), "and midzer's");
+    }
+
+    #[test]
+    fn level_four_leaves_the_kit_to_the_player() {
+        let mut s = kit(4);
+        let run = run_kit(&mut s, 10.0, &pads(SNARE, 0.25, 9.0));
+        assert!(s.judged());
+        assert!(run.hits.is_empty());
+        assert_eq!(run.played.len(), pads(SNARE, 0.25, 9.0).len());
+        let mut s = kit(5);
+        assert_eq!(s.level(), MAX_KIT_LEVEL, "the kit has four levels");
+        s.set_kit(false, &mut EventBuffer::default());
+        assert_eq!(s.level(), MAX_KIT_LEVEL);
+    }
+
+    #[test]
+    fn calls_on_the_kit_are_rhythms_to_tap_back() {
+        let mut s = kit(1);
+        s.set_level(1, true, 0.0, &mut EventBuffer::default());
+        let got = call_and_response(&mut s, 34.0, SNARE, |call| echo(call, Some(SNARE)));
+        assert!(got.calls.len() >= 3, "calls: {}", got.calls.len());
+        for call in &got.calls {
+            assert!(call.iter().all(|n| [KICK, SNARE, 48, 43].contains(&n.1)), "kick, snare and toms: {call:?}");
+            assert!(slot(call[0].0) != 0 || call[0].1 == KICK, "the kick on the 1: {call:?}");
+        }
+        assert!(got.scores.iter().all(|&(hit, of)| hit == of), "the rhythm tapped back on the snare: {:?}", got.scores);
+        // Each tap sounded the call's next hit.
+        let answer = &got.calls[0];
+        for &(at, key) in answer {
+            let back = at + (4.0 * PERIOD) as u64;
+            assert!(got.notes.iter().any(|n| n.2 == key && n.0.abs_diff(back) < BLOCK as u64), "{key} played back at {back}");
+        }
+        // From level 3 the parts count: all on the snare misses the kicks and toms.
+        let mut s = kit(3);
+        s.set_level(3, true, 0.0, &mut EventBuffer::default());
+        let got = call_and_response(&mut s, 34.0, SNARE, |call| echo(call, None));
+        assert!(got.scores.iter().all(|&(hit, of)| hit == of), "the call's own parts: {:?}", got.scores);
+        let mut s = kit(3);
+        s.set_level(3, true, 0.0, &mut EventBuffer::default());
+        let got = call_and_response(&mut s, 34.0, SNARE, |call| echo(call, Some(SNARE)));
+        assert!(got.scores.iter().any(|&(hit, of)| hit < of), "all snare: {:?}", got.scores);
     }
 }

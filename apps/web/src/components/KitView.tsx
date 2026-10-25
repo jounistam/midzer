@@ -4,6 +4,7 @@ import { useEffect, useRef } from 'react';
 import { PIECE_INFO } from '../drums/kit';
 import { layoutKit, pieceAt, type Pad } from '../drums/kitLayout';
 import { live } from '../live';
+import { TAP_HINT } from '../playalong/solo';
 import { drumHit } from '../session';
 import { color, font, glow as glowTokens, hex, NOTE_ALPHA } from '../theme';
 
@@ -13,7 +14,8 @@ const PIECE_INDEX = new Map(DRUM_PIECES.map((p, i) => [p.id, i]));
 
 /**
  * GPU-drawn drum kit seen from above (PixiJS). Pieces light up with each hit,
- * brighter for harder hits, and can be played with mouse or touch.
+ * brighter for harder hits, and can be played with mouse or touch. Pads a
+ * drum solo asks for (`live.drumHint`) are ringed.
  */
 export function KitView({ height = 200 }: { height?: number }) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -63,6 +65,14 @@ export function KitView({ height = 200 }: { height?: number }) {
       hits.clear();
       glow.clear();
       lit = false;
+      for (const pad of pads) {
+        // To tap: a bright ring and a tint; the player's part: a thin ring.
+        const hint = live.drumHint[PIECE_INDEX.get(pad.piece)!]!;
+        if (hint === 0) continue;
+        const tap = hint === TAP_HINT;
+        hits.circle(pad.x, pad.y, pad.r + (tap ? 3 : 2)).stroke({ width: tap ? 3 : 1.5, color: hex(color.note.melody), alpha: tap ? 1 : 0.7 });
+        if (tap) shape(hits, pad, (g) => g.fill({ color: hex(color.note.melody), alpha: 0.12 }));
+      }
       for (const pad of pads) {
         const i = PIECE_INDEX.get(pad.piece)!;
         const age = now - live.drumTime[i]!;

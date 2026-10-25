@@ -8,7 +8,7 @@
 //! soft click. Everything is fixed state: nothing allocates.
 
 use crate::engine::PLAYER_CHANNEL;
-use crate::event::{DRUM_CHANNEL, EngineEvent, EventBuffer};
+use crate::event::{DRUM_CHANNEL, EngineEvent, EventBuffer, PLAYER_DRUM_CHANNEL};
 use crate::solo::Grid;
 use crate::style::{BEATS_PER_BAR, PPQ, WOOD_BLOCK};
 
@@ -29,6 +29,8 @@ pub struct ReplayNote {
     pub len: u32,
     pub key: u8,
     pub velocity: u8,
+    /// A drum hit, on [`PLAYER_DRUM_CHANNEL`].
+    pub drum: bool,
 }
 
 /// Where the replay's tick 0 is.
@@ -195,7 +197,8 @@ impl Replay {
             if beat < from - LATE_BEATS {
                 continue;
             }
-            self.sound(PLAYER_CHANNEL, note.key, note.velocity, frame_of(beat), beat + note.len.max(1) as f64 / PPQ as f64, out);
+            let channel = if note.drum { PLAYER_DRUM_CHANNEL } else { PLAYER_CHANNEL };
+            self.sound(channel, note.key, note.velocity, frame_of(beat), beat + note.len.max(1) as f64 / PPQ as f64, out);
         }
         if self.next == self.count && self.sounding.iter().all(Option::is_none) && to * PPQ as f64 >= self.end_tick as f64 {
             self.stop(frames - 1, out);
@@ -263,7 +266,7 @@ mod tests {
     fn lick() -> Replay {
         let mut r = Replay::new(SR);
         for (tick, len, key) in [(1200, 240, 64), (0, 240, 60), (1920, 480, 67)] {
-            r.add(ReplayNote { tick, len, key, velocity: 90 });
+            r.add(ReplayNote { tick, len, key, velocity: 90, drum: false });
         }
         r
     }
@@ -333,10 +336,21 @@ mod tests {
     }
 
     #[test]
+    fn drum_hits_replay_on_the_players_kit() {
+        let mut r = Replay::new(SR);
+        r.add(ReplayNote { tick: 0, len: 120, key: 38, velocity: 90, drum: true });
+        r.add(ReplayNote { tick: 0, len: 240, key: 60, velocity: 90, drum: false });
+        r.set_playing(true, 120.0, &mut EventBuffer::default());
+        let (notes, _) = run(&mut r, 2.0, None, 0);
+        assert!(notes.contains(&(0, (PERIOD / 4.0) as u64, PLAYER_DRUM_CHANNEL, 38)), "{notes:?}");
+        assert!(notes.contains(&(0, (PERIOD / 2.0) as u64, PLAYER_CHANNEL, 60)), "{notes:?}");
+    }
+
+    #[test]
     fn keeps_to_its_size() {
         let mut r = Replay::new(SR);
         for i in 0..MAX_REPLAY_NOTES as u32 + 10 {
-            r.add(ReplayNote { tick: i * 60, len: 60, key: 60, velocity: 80 });
+            r.add(ReplayNote { tick: i * 60, len: 60, key: 60, velocity: 80, drum: false });
         }
         assert_eq!(r.count, MAX_REPLAY_NOTES);
         r.clear(&mut EventBuffer::default());

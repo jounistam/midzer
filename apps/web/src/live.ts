@@ -17,6 +17,8 @@ export const live = {
   band: new Uint8Array(128),
   /** Keys Learn asks for next: 1 melody, 2 chord, 0 none. Playing along: 1 left hand, 2 right hand, 3 the next chord; soloing: 4 a key to tap, 5 a scale note, 6 a tone of the chord heard. */
   hint: new Uint8Array(128),
+  /** Pads lit for a drummer soloing, in engine piece order: 4 a pad to tap, 5 the player's part (see `hint`). */
+  drumHint: new Uint8Array(DRUM_PIECES.length),
   /** When each drum piece was last hit (performance.now() ms), in engine piece order. */
   drumTime: new Float64Array(DRUM_PIECES.length).fill(-Infinity),
   /** Velocity of each piece's last hit. */

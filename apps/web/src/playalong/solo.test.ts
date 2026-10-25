@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHORD_TONE_HINT, feelWord, homeKey, NO_CALL, nextCall, noteFit, parseAlongMode, parseSoloLevel, SCALE_HINT, soloHints, TAP_HINT } from './solo';
+import { CHORD_TONE_HINT, drumSoloHints, feelWord, parseDrumSoloLevel, homeKey, NO_CALL, nextCall, noteFit, parseAlongMode, parseSoloLevel, SCALE_HINT, soloHints, TAP_HINT } from './solo';
 
 describe('solo levels', () => {
   it('lights the home note from middle C up at level 1', () => {
@@ -63,5 +63,28 @@ describe('solo levels', () => {
 
   it('words the feel from calm to fire', () => {
     expect([0, 0.25, 0.5, 0.75, 1].map(feelWord)).toEqual(['Resting', 'Calm', 'Grooving', 'Burning', 'On fire']);
+  });
+});
+
+describe('drum solo levels', () => {
+  it('lights the pads to tap, then the player’s part, then nothing', () => {
+    expect([...drumSoloHints(1)]).toEqual([['snare', TAP_HINT]]);
+    expect([...drumSoloHints(2).keys()]).toEqual(['kick', 'snare', 'tom1', 'tom2', 'tom3', 'tom4']);
+    expect([...drumSoloHints(3)]).toEqual([
+      ['kick', SCALE_HINT],
+      ['snare', SCALE_HINT],
+    ]);
+    expect(drumSoloHints(4).size).toBe(0);
+  });
+
+  it('lights the call’s next hit from level 3', () => {
+    expect(drumSoloHints(3, 43).get('tom3')).toBe(TAP_HINT);
+    expect(drumSoloHints(3, 36).get('kick')).toBe(TAP_HINT);
+    expect(drumSoloHints(1, 43).has('tom3')).toBe(false);
+  });
+
+  it('parses saved levels', () => {
+    expect(parseDrumSoloLevel(3)).toBe(3);
+    expect(parseDrumSoloLevel(5)).toBe(1);
   });
 });

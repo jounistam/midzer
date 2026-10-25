@@ -12,9 +12,9 @@ import { TopBar } from '../components/TopBar';
 import type { ChordNow } from '../playalong/chords';
 import { MISS_SOUND_OPTIONS } from '../playalong/feedback';
 import { ALONG_LEVELS } from '../playalong/levels';
-import { ownShare } from '../playalong/replay';
+import { isDrumTake, ownShare } from '../playalong/replay';
 import { keyName } from '../playalong/scale';
-import { feelWord, homeKey, SOLO_LEVELS, type CallNow, type FitCount, type SoloLevel } from '../playalong/solo';
+import { DRUM_SOLO_LEVELS, feelWord, homeKey, SOLO_LEVELS, type CallNow, type DrumSoloLevel, type FitCount, type SoloLevel } from '../playalong/solo';
 import { noteToQwerty } from '../qwerty';
 import { NOTE_NAMES } from '@midzer/audio-web';
 import { SYNC_TAPS } from '../playalong/sync';
@@ -39,6 +39,7 @@ import {
   setAlongMode,
   setInstrument,
   setMissSound,
+  setDrumSoloLevel,
   setSoloCall,
   setSoloLevel,
   startLiveSource,
@@ -58,7 +59,7 @@ import { LoadingStatus } from './LoadingStatus';
  */
 export function PlayAlong() {
   const drums = useSession((s) => s.instrument === 'drums');
-  const solo = useSession((s) => s.instrument === 'keys' && s.alongMode === 'solo');
+  const solo = useSession((s) => s.alongMode === 'solo');
   const split = useSession((s) => s.split);
   const height = useStageHeight();
   return (
@@ -69,7 +70,7 @@ export function PlayAlong() {
           <AlongStage />
           <FollowedSong />
           {!drums && <FollowedChords />}
-          {!drums && (solo ? <SoloPlay split={split} /> : <AlongChords split={split} />)}
+          {solo ? <SoloPlay split={split} /> : !drums && <AlongChords split={split} />}
           {solo && <SoloReplay />}
           <AlongTiming />
           <LearnedSongs />
@@ -80,8 +81,8 @@ export function PlayAlong() {
           <PlayButton className="full" />
           <InstrumentPicker />
           <SoundPicker />
-          {!drums && <ModePicker />}
-          {!drums && (solo ? <SoloLevelPicker /> : <LevelPicker />)}
+          <ModePicker />
+          {solo ? <SoloLevelPicker /> : !drums && <LevelPicker />}
           {solo && <CallToggle />}
           <BeatFixes />
           <SyncControl />
@@ -172,7 +173,7 @@ function AlongTiming() {
   const playing = useSession((s) => s.playing);
   const drums = useSession((s) => s.instrument === 'drums');
   // Taps that drive a solo aren't timed.
-  const tapping = useSession((s) => s.instrument === 'keys' && s.alongMode === 'solo' && s.soloLevel <= 3);
+  const tapping = useSession((s) => s.alongMode === 'solo' && (s.instrument === 'drums' ? s.drumSoloLevel : s.soloLevel) <= 3);
   if (tapping) return null;
   // On keys the chords coming take the room; the timing stays in view, smaller.
   if (playing) return <HitFeedback against="the track" lagging compact={!drums} />;
@@ -217,8 +218,12 @@ function AlongChords({ split }: { split: number }) {
  * shows under it.
  */
 function SoloPlay({ split }: { split: number }) {
+  const drums = useSession((s) => s.instrument === 'drums');
+  return drums ? <DrumSoloPlay /> : <KeysSoloPlay split={split} />;
+}
+
+function KeysSoloPlay({ split }: { split: number }) {
   const key = useSession((s) => s.soloKey);
-  const feel = useSession((s) => s.soloFeel);
   const level = useSession((s) => s.soloLevel);
   const fit = useSession((s) => s.soloFit);
   const calling = useSession((s) => s.soloCall);
@@ -234,21 +239,74 @@ function SoloPlay({ split }: { split: number }) {
         </p>
       </div>
       <div className="solo-feel">
-        {calling ? (
-          <CallStatus call={call} tapping={level <= 2} />
-        ) : (
-          <p className="solo-feel-word" data-testid="solo-feel">
-            {feelWord(feel)}
-          </p>
-        )}
-        <div className="solo-feel-track" role="meter" aria-label="Feel" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(feel * 100)}>
-          <div className="solo-feel-fill" style={{ width: `${Math.round(feel * 100)}%` }} />
-        </div>
+        <SoloFeel call={calling ? call : null} tapping={level <= 2} />
         {level >= 3 && <SoloFit fit={fit} snapped={level < 5} />}
       </div>
       <Keyboard split={split} height={150} />
     </section>
   );
+}
+
+/** A drum solo: midzer plays the kit (shown below the stage), driven by the player's taps, or around their own playing. */
+function DrumSoloPlay() {
+  const level = useSession((s) => s.drumSoloLevel);
+  const calling = useSession((s) => s.soloCall);
+  const call = useSession((s) => s.soloCallNow);
+  const locked = useSession((s) => s.liveSource.status === 'on' && s.liveTracker.locked);
+  const prompt = !locked ? 'The solo starts once the beat is found.' : calling ? drumCallPrompt(level) : drumSoloPrompt(level);
+  return (
+    <section className="panel along-play solo-play">
+      <div className="along-play-head">
+        <p className="eyebrow">Drum solo</p>
+        <p className="setting-note" data-testid="solo-prompt">
+          {prompt}
+        </p>
+      </div>
+      <div className="solo-feel">
+        <SoloFeel call={calling ? call : null} tapping={level <= 2} />
+      </div>
+    </section>
+  );
+}
+
+/** How hard the solo is driven, big: a word and a meter; with call and response, where it is instead of the word. */
+function SoloFeel({ call, tapping }: { call: CallNow | null; tapping: boolean }) {
+  const feel = useSession((s) => s.soloFeel);
+  return (
+    <>
+      {call ? (
+        <CallStatus call={call} tapping={tapping} />
+      ) : (
+        <p className="solo-feel-word" data-testid="solo-feel">
+          {feelWord(feel)}
+        </p>
+      )}
+      <div className="solo-feel-track" role="meter" aria-label="Feel" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(feel * 100)}>
+        <div className="solo-feel-fill" style={{ width: `${Math.round(feel * 100)}%` }} />
+      </div>
+    </>
+  );
+}
+
+/** What to do at drum solo `level`. */
+function drumSoloPrompt(level: DrumSoloLevel): string {
+  switch (level) {
+    case 1:
+      return 'Tap the lit snare (F or the space bar). Faster for a busier groove with fills, harder for louder.';
+    case 2:
+      return 'Tap the kick (V) for a kick-led groove, the snare (F) for the backbeat, a tom for a fill.';
+    case 3:
+      return 'Play the kick and snare; midzer keeps the hi-hat and adds ghost notes and fills.';
+    case 4:
+      return 'Play the whole kit.';
+  }
+}
+
+/** What to do with call and response on at drum solo `level`. */
+function drumCallPrompt(level: DrumSoloLevel): string {
+  if (level === 1) return 'Tap the snare to hear a call, then tap its rhythm back on the snare: each tap plays its next hit.';
+  if (level === 2) return 'Tap a lit pad to hear a call, then tap its rhythm back: each tap plays its next hit.';
+  return 'Hit a pad to hear a call, then play it back on the same drums; the next one to hit is lit.';
 }
 
 /** What to do at `level`, with the home key `home`. */
@@ -312,7 +370,7 @@ function SoloReplay() {
       <div className="along-play-head">
         <p className="eyebrow">Your solo</p>
         <p className="setting-note" data-testid="solo-replay-share">
-          You played {share}% of {take.notes.length} notes over {take.bars} {take.bars === 1 ? 'bar' : 'bars'}.
+          You played {share}% of {take.notes.length} {isDrumTake(take) ? 'hits' : 'notes'} over {take.bars} {take.bars === 1 ? 'bar' : 'bars'}.
         </p>
       </div>
       <p className="along-legend solo-replay-legend">
@@ -361,6 +419,7 @@ function SoloFit({ fit, snapped }: { fit: FitCount; snapped: boolean }) {
 /** Play along with the chords, or solo over them. */
 function ModePicker() {
   const mode = useSession((s) => s.alongMode);
+  const drums = useSession((s) => s.instrument === 'drums');
   return (
     <div className="control-group">
       <p className="label" id="along-mode-label">
@@ -369,7 +428,7 @@ function ModePicker() {
       <div className="segmented" role="group" aria-labelledby="along-mode-label">
         {(['chords', 'solo'] as const).map((m) => (
           <button key={m} className={`seg ${mode === m ? 'on' : ''}`} aria-pressed={mode === m} onClick={() => setAlongMode(m)}>
-            {m === 'chords' ? 'Chords' : 'Solo'}
+            {m === 'solo' ? 'Solo' : drums ? 'Along' : 'Chords'}
           </button>
         ))}
       </div>
@@ -379,16 +438,19 @@ function ModePicker() {
 
 /** How much of the solo the player plays: one key while midzer solos, up to every note. */
 function SoloLevelPicker() {
-  const level = useSession((s) => s.soloLevel);
-  const current = SOLO_LEVELS.find((l) => l.level === level) ?? SOLO_LEVELS[0]!;
+  const drums = useSession((s) => s.instrument === 'drums');
+  const level = useSession((s) => (drums ? s.drumSoloLevel : s.soloLevel));
+  const levels: { level: number; name: string; detail: string }[] = drums ? DRUM_SOLO_LEVELS : SOLO_LEVELS;
+  const current = levels.find((l) => l.level === level) ?? levels[0]!;
+  const pick = (l: number) => (drums ? setDrumSoloLevel(l as DrumSoloLevel) : setSoloLevel(l as SoloLevel));
   return (
     <div className="control-group">
       <p className="label" id="solo-level-label">
         Solo level
       </p>
       <div className="segmented" role="group" aria-labelledby="solo-level-label">
-        {SOLO_LEVELS.map((l) => (
-          <button key={l.level} className={`seg ${level === l.level ? 'on' : ''}`} aria-pressed={level === l.level} title={l.name} onClick={() => setSoloLevel(l.level)}>
+        {levels.map((l) => (
+          <button key={l.level} className={`seg ${level === l.level ? 'on' : ''}`} aria-pressed={level === l.level} title={l.name} onClick={() => pick(l.level)}>
             {l.level}
           </button>
         ))}

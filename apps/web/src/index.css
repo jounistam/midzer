@@ -3056,8 +3056,10 @@ code {
     min-height: 0;
   }
 
+  /* What doesn't fit, such as a solo's card over the kit, scrolls. */
   .along-screen .jam-stage {
     min-height: 0;
+    overflow-y: auto;
   }
 
   .along-screen .control-panel {

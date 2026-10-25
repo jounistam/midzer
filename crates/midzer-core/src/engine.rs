@@ -207,6 +207,7 @@ impl Engine {
                 if instrument != self.instrument {
                     self.handle(Command::AllNotesOff);
                     self.instrument = instrument;
+                    self.solo.set_kit(instrument == Instrument::Drums, &mut self.events);
                     self.update_drummer();
                     // The band may have reported its own tempo; the live source's stands.
                     self.live.retell_tempo();
@@ -266,7 +267,7 @@ impl Engine {
             Command::SetSolo { level, call, lead_ms } => self.solo.set_level(level, call, lead_ms, &mut self.events),
             Command::SoloHarmony { tonic, scale, chord } => self.solo.set_harmony(tonic, scale, chord),
             Command::ReplayClear => self.replay.clear(&mut self.events),
-            Command::ReplayNote { tick, len, key, velocity } => self.replay.add(ReplayNote { tick, len, key, velocity }),
+            Command::ReplayNote { tick, len, key, velocity, drum } => self.replay.add(ReplayNote { tick, len, key, velocity, drum }),
             Command::ReplayPlay { on, bpm } => {
                 // The solo stops for its replay.
                 if on {
@@ -398,13 +399,33 @@ impl Engine {
         if velocity == 0 {
             return;
         }
+        // Soloing on the kit over live audio, only the player's own hits sound and only some are judged.
+        let mut judged = true;
+        if self.instrument == Instrument::Drums && self.live.active() {
+            let grid = self.live.grid();
+            match self.solo.press(piece.note(), velocity, self.now, grid, &mut self.events) {
+                Pressed::Free => {}
+                pressed => {
+                    judged = matches!(pressed, Pressed::Played(_)) && self.solo.judged();
+                    if !judged && grid.is_some() {
+                        // The solo's run, timed like the player's own.
+                        self.live.play(self.now, &mut self.events);
+                    }
+                    if pressed == Pressed::Drove {
+                        return;
+                    }
+                }
+            }
+        }
         self.release_drum(piece, 0);
         self.drum_gate[piece.index()] = self.gate_frames;
         self.events.push(0, EngineEvent::NoteOn { channel: PLAYER_DRUM_CHANNEL, key: piece.note(), velocity });
         self.band.note_played(velocity);
         if self.live.active() {
             // Judged against the live source a beat later.
-            self.live.hit(piece, velocity, self.now, &mut self.events);
+            if judged {
+                self.live.hit(piece, velocity, self.now, &mut self.events);
+            }
         } else if self.backing.active() {
             // Judged against the recording; nothing to lead or count in.
             self.backing.drum_hit(piece, velocity, self.band.latency_ms(), self.band.song(), &mut self.events);
@@ -1073,7 +1094,13 @@ mod tests {
 
     /// Like `solo_over_clicks`, with call and response on or off, for `seconds`.
     fn solo_over_clicks_calling(level: u8, call: bool, keys: &[u8], seconds: u64) -> (Engine, Vec<(u64, EngineEvent)>) {
+        solo_over_clicks_on(Instrument::Keys, level, call, keys, seconds)
+    }
+
+    /// Like `solo_over_clicks_calling`, on `instrument`: on drums the keys are the kit's notes.
+    fn solo_over_clicks_on(instrument: Instrument, level: u8, call: bool, keys: &[u8], seconds: u64) -> (Engine, Vec<(u64, EngineEvent)>) {
         let mut engine = Engine::new(48_000.0);
+        engine.handle(Command::SetInstrument { instrument });
         engine.handle(Command::SetLiveOffset { ms: 0.0 });
         engine.handle(Command::SetLive { on: true });
         engine.handle(Command::SetSolo { level, call, lead_ms: 20.0 });
@@ -1150,7 +1177,7 @@ mod tests {
         assert!(notes.windows(2).all(|w| w[0].0 <= w[1].0), "in order: {notes:?}");
         engine.handle(Command::ReplayClear);
         for &(tick, len, key, velocity) in &notes {
-            engine.handle(Command::ReplayNote { tick: tick as u32, len: len as u32, key, velocity });
+            engine.handle(Command::ReplayNote { tick: tick as u32, len: len as u32, key, velocity, drum: false });
         }
         engine.handle(Command::ReplayPlay { on: true, bpm: 120.0 });
         let replayed = more_clicks(&mut engine, 48_000 * 12, 8);
@@ -1215,6 +1242,24 @@ mod tests {
         assert!(player_notes(&events).len() > 12, "level 3 adds fills");
         assert!(events.iter().any(|(_, e)| *e == EngineEvent::Transport { playing: true }), "a run");
         assert!(!events.iter().any(|(_, e)| matches!(e, EngineEvent::KeysJudged { .. })), "not judged below level 4");
+    }
+
+    #[test]
+    fn a_drum_solo_plays_the_kit_and_judges_only_from_level_four() {
+        let drum_hits = |events: &[(u64, EngineEvent)]| events.iter().filter(|(_, e)| matches!(e, EngineEvent::NoteOn { channel: PLAYER_DRUM_CHANNEL, .. })).count();
+        let judged = |events: &[(u64, EngineEvent)]| events.iter().filter(|(_, e)| matches!(e, EngineEvent::Judged { .. })).count();
+        let (_, events) = solo_over_clicks_on(Instrument::Drums, 1, false, &[38], 12);
+        assert!(drum_hits(&events) > 24, "a groove from 12 snare taps: {}", drum_hits(&events));
+        assert!(events.iter().any(|(_, e)| *e == EngineEvent::Transport { playing: true }), "a run");
+        assert_eq!(judged(&events), 0, "taps aren't judged");
+        assert!(events.iter().any(|(_, e)| matches!(e, EngineEvent::SoloNote { drum: true, own: false, .. })), "recorded as drums");
+        let (_, events) = solo_over_clicks_on(Instrument::Drums, 4, false, &[38], 12);
+        assert_eq!(drum_hits(&events), 12, "the player's hits only");
+        assert_eq!(judged(&events), 12, "each judged");
+        assert!(events.iter().any(|(_, e)| matches!(e, EngineEvent::SoloNote { drum: true, own: true, key: 38, .. })), "and recorded");
+        // Solo off, the kit plays along as before.
+        let (_, events) = solo_over_clicks_on(Instrument::Drums, 0, false, &[38], 12);
+        assert_eq!((drum_hits(&events), judged(&events)), (12, 12));
     }
 
     #[test]

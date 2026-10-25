@@ -8,16 +8,19 @@ import type { EngineCommand, TimedEvent } from '@midzer/audio-web';
 export const PPQ = 480;
 /** The solo's bars are four beats, as the engine's. */
 export const TICKS_PER_BAR = 4 * PPQ;
+/** A drum hit's length on the roll and in the replay: a sixteenth. */
+export const HIT_TICKS = PPQ / 4;
 /** The engine replays this many notes at most. */
 export const MAX_REPLAY_NOTES = 1024;
 
-/** A note of the solo: ticks from the run's first bar's 1, and whether the player played it or midzer. */
+/** A note of the solo: ticks from the run's first bar's 1, whether the player played it or midzer, and a drum hit. */
 export interface TakeNote {
   tick: number;
   len: number;
   key: number;
   velocity: number;
   own: boolean;
+  drum: boolean;
 }
 
 /** A recorded solo, its notes in order, and how many bars it spans. */
@@ -26,7 +29,7 @@ export interface SoloTake {
   bars: number;
 }
 
-type SoloNoteEvent = Pick<Extract<TimedEvent, { type: 'soloNote' }>, 'key' | 'velocity' | 'bar' | 'tick' | 'own'>;
+type SoloNoteEvent = Pick<Extract<TimedEvent, { type: 'soloNote' }>, 'key' | 'velocity' | 'bar' | 'tick' | 'own'> & { drum?: boolean };
 
 /** Bars wrap at 65536 in the events; a little before the first one counts as before. */
 function barsSince(bar: number, first: number): number {
@@ -46,13 +49,18 @@ export class TakeRecorder {
     this.first ??= e.bar;
     const tick = barsSince(e.bar, this.first) * TICKS_PER_BAR + e.tick;
     this.last = Math.max(this.last, tick);
+    if (e.drum) {
+      // Hits have no offs.
+      if (e.velocity > 0) this.notes.push({ tick, len: HIT_TICKS, key: e.key, velocity: e.velocity, own: e.own, drum: true });
+      return;
+    }
     const sounding = this.open.get(e.key);
     if (sounding) {
       sounding.len = Math.max(1, tick - sounding.tick);
       this.open.delete(e.key);
     }
     if (e.velocity > 0) {
-      const note = { tick, len: 0, key: e.key, velocity: e.velocity, own: e.own };
+      const note = { tick, len: 0, key: e.key, velocity: e.velocity, own: e.own, drum: false };
       this.notes.push(note);
       this.open.set(e.key, note);
     }
@@ -79,8 +87,13 @@ export class TakeRecorder {
 export function replayCommands(take: SoloTake): EngineCommand[] {
   return [
     { type: 'replayClear' },
-    ...take.notes.slice(0, MAX_REPLAY_NOTES).map((n): EngineCommand => ({ type: 'replayNote', tick: n.tick, len: n.len, key: n.key, velocity: n.velocity })),
+    ...take.notes.slice(0, MAX_REPLAY_NOTES).map((n): EngineCommand => ({ type: 'replayNote', tick: n.tick, len: n.len, key: n.key, velocity: n.velocity, drum: n.drum })),
   ];
+}
+
+/** Whether `take` was played on drums. */
+export function isDrumTake(take: SoloTake): boolean {
+  return take.notes.some((n) => n.drum);
 }
 
 /** How much of the solo the player played, 0..1. */

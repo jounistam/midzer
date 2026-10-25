@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { live } from '../live';
-import { PPQ, TICKS_PER_BAR, type SoloTake } from '../playalong/replay';
+import { DRUM_PIECES } from '@midzer/audio-web';
+import { isDrumTake, PPQ, TICKS_PER_BAR, type SoloTake } from '../playalong/replay';
 import { color } from '../theme';
 
 /** Each row's height, and how many bars a row holds on a wide and a narrow card. */
@@ -11,6 +12,18 @@ const NARROW_BARS = 2;
 const NARROW_PX = 480;
 /** The fewest semitones shown, so a solo on three notes doesn't fill the rows. */
 const MIN_RANGE = 12;
+/** A drum solo's lanes, top to bottom: cymbals, hi-hats, toms, snare, kick. */
+const LANES = 5;
+const PIECE_OF_NOTE = new Map<number, string>(DRUM_PIECES.map((p) => [p.note, p.id]));
+
+function laneOf(key: number): number {
+  const piece = PIECE_OF_NOTE.get(key) ?? '';
+  if (piece === 'kick') return 4;
+  if (/^(snare|sideStick)/.test(piece)) return 3;
+  if (piece.startsWith('tom')) return 2;
+  if (piece.startsWith('hiHat')) return 1;
+  return 0;
+}
 
 interface SoloRollProps {
   take: SoloTake;
@@ -20,8 +33,9 @@ interface SoloRollProps {
 
 /**
  * A recorded solo, bar by bar in rows like a score: the player's own notes in
- * magenta, midzer's in cyan, and while it replays a playhead. Drawn on a
- * small canvas as wide as its container.
+ * magenta, midzer's in cyan, and while it replays a playhead. A drum solo
+ * has a lane per part of the kit instead of pitches. Drawn on a small canvas
+ * as wide as its container.
  */
 export function SoloRoll({ take, playingBpm }: SoloRollProps) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -77,8 +91,10 @@ function draw(canvas: HTMLCanvasElement, width: number, take: SoloTake, playingB
   const middle = (Math.min(...keys) + Math.max(...keys)) / 2;
   const range = Math.max(MIN_RANGE, Math.max(...keys) - Math.min(...keys) + 2);
   const low = middle - range / 2;
-  const noteHeight = Math.min(6, Math.max(2, ROW_HEIGHT / range));
-  const yOf = (key: number) => ROW_HEIGHT - ((key - low) / range) * ROW_HEIGHT - noteHeight / 2;
+  const drums = isDrumTake(take);
+  const noteHeight = drums ? 6 : Math.min(6, Math.max(2, ROW_HEIGHT / range));
+  const laneHeight = ROW_HEIGHT / LANES;
+  const yOf = drums ? (key: number) => laneOf(key) * laneHeight + (laneHeight - noteHeight) / 2 : (key: number) => ROW_HEIGHT - ((key - low) / range) * ROW_HEIGHT - noteHeight / 2;
 
   for (let row = 0; row < rows; row++) {
     const top = row * (ROW_HEIGHT + ROW_GAP);

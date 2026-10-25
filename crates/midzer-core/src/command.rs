@@ -128,8 +128,9 @@ pub enum Command {
     /// Empties the solo replay, stopping it.
     ReplayClear,
     /// A note of the solo to replay: from `tick` ([`crate::style::PPQ`] per
-    /// beat) after the run's first bar's 1, `len` ticks long.
-    ReplayNote { tick: u32, len: u32, key: u8, velocity: u8 },
+    /// beat) after the run's first bar's 1, `len` ticks long; a `drum` hit
+    /// plays on [`crate::PLAYER_DRUM_CHANNEL`].
+    ReplayNote { tick: u32, len: u32, key: u8, velocity: u8, drum: bool },
     /// Replays the solo from the start, or stops it. Without a live beat it
     /// plays at `bpm`, the run's tempo.
     ReplayPlay { on: bool, bpm: f32 },
@@ -333,7 +334,7 @@ impl Command {
             Command::SetSolo { level, call, lead_ms } => [op::SET_SOLO, level as u32 | (call as u32) << 8, lead_ms.to_bits(), 0],
             Command::SoloHarmony { tonic, scale, chord } => [op::SOLO_HARMONY, tonic as u32, scale as u32, chord as u32],
             Command::ReplayClear => [op::REPLAY_CLEAR, 0, 0, 0],
-            Command::ReplayNote { tick, len, key, velocity } => [op::REPLAY_NOTE, tick, len, key as u32 | (velocity as u32) << 8],
+            Command::ReplayNote { tick, len, key, velocity, drum } => [op::REPLAY_NOTE, tick, len, key as u32 | (velocity as u32) << 8 | (drum as u32) << 16],
             Command::ReplayPlay { on, bpm } => [op::REPLAY_PLAY, on as u32, bpm.to_bits(), 0],
             Command::LiveGuide { frame, period, one, confidence, known } => [op::LIVE_GUIDE, frame, period.to_bits(), one.map_or(0, |o| o as u32 + 1) | (confidence as u32) << 8 | (known as u32) << 16],
         }
@@ -446,7 +447,8 @@ impl Command {
                 tick: a,
                 len: b,
                 key: midi(c & 0xff)?,
-                velocity: midi(c >> 8).filter(|v| *v > 0)?,
+                velocity: midi(c >> 8 & 0xff).filter(|v| *v > 0)?,
+                drum: c >> 16 & 1 != 0,
             }),
             op::REPLAY_PLAY => Some(Command::ReplayPlay { on: a != 0, bpm: float(b).filter(|bpm| *bpm > 0.0)? }),
             op::LIVE_GUIDE => Some(Command::LiveGuide {
@@ -546,7 +548,8 @@ mod tests {
             Command::SetSolo { level: 0, call: false, lead_ms: 0.0 },
             Command::SoloHarmony { tonic: 9, scale: 0b0100_1010_1001, chord: 0b0000_1001_0001 },
             Command::ReplayClear,
-            Command::ReplayNote { tick: 4_000_000, len: 240, key: 127, velocity: 1 },
+            Command::ReplayNote { tick: 4_000_000, len: 240, key: 127, velocity: 1, drum: false },
+            Command::ReplayNote { tick: 0, len: 120, key: 38, velocity: 127, drum: true },
             Command::ReplayPlay { on: true, bpm: 97.5 },
             Command::ReplayPlay { on: false, bpm: 120.0 },
         ] {
