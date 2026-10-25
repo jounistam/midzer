@@ -60,6 +60,9 @@ const Cmd = {
   SetSound: 52,
   SetSolo: 53,
   SoloHarmony: 54,
+  ReplayClear: 55,
+  ReplayNote: 56,
+  ReplayPlay: 57,
 } as const;
 
 /** Ticks per beat in song positions; mirrors `PPQ` in style.rs. */
@@ -257,7 +260,13 @@ export type EngineCommand =
    */
   | { type: 'setSolo'; level: number; call: boolean; leadMs: number }
   /** The song's home note (0 is C), the scale to solo in and the chord heard now (0 none), as pitch-class bit sets (bit 0 is C). */
-  | { type: 'soloHarmony'; tonic: number; scale: number; chord: number };
+  | { type: 'soloHarmony'; tonic: number; scale: number; chord: number }
+  /** Empties the solo replay, stopping it. */
+  | { type: 'replayClear' }
+  /** A note of the solo to replay: from `tick` (PPQ per beat) after the run's first bar's 1, `len` ticks long. */
+  | { type: 'replayNote'; tick: number; len: number; key: number; velocity: number }
+  /** Replays the solo from the start, or stops it. Without a live beat it plays at `bpm`, the run's tempo. */
+  | { type: 'replayPlay'; on: boolean; bpm: number };
 
 const f32 = new Float32Array(1);
 const f32Bits = new Uint32Array(f32.buffer);
@@ -386,6 +395,12 @@ export function encodeCommand(cmd: EngineCommand): RecordWords {
       return [Cmd.SetSolo, (cmd.level & 0xff) | (cmd.call ? 1 << 8 : 0), floatBits(Math.min(Math.max(cmd.leadMs, 0), 500)), 0];
     case 'soloHarmony':
       return [Cmd.SoloHarmony, cmd.tonic % 12, cmd.scale & 0xfff, cmd.chord & 0xfff];
+    case 'replayClear':
+      return [Cmd.ReplayClear, 0, 0, 0];
+    case 'replayNote':
+      return [Cmd.ReplayNote, Math.max(0, Math.round(cmd.tick)) >>> 0, Math.max(1, Math.round(cmd.len)) >>> 0, (cmd.key & 127) | (Math.min(Math.max(Math.round(cmd.velocity), 1), 127) << 8)];
+    case 'replayPlay':
+      return [Cmd.ReplayPlay, cmd.on ? 1 : 0, floatBits(Math.max(cmd.bpm, 1)), 0];
     case 'liveBar':
       return [Cmd.LiveBar, Math.round(cmd.frame) >>> 0, cmd.beats, 0];
     case 'liveGuide': {
@@ -484,7 +499,15 @@ export type EngineEvent =
    * Call and response while soloing: the phase, the call's notes played or answered so far (`hit`, of `of`), and the
    * key sounding in the call or to play next in the answer. A `scored` answer's `hit` is its score.
    */
-  | { type: 'soloCall'; phase: CallPhase; hit: number; of: number; key: number | null };
+  | { type: 'soloCall'; phase: CallPhase; hit: number; of: number; key: number | null }
+  /**
+   * A note of the solo started (`velocity` > 0) or ended where the player hears it: `tick` (PPQ per beat) into bar
+   * `bar` of the live beats (four beats a bar; bars wrap at 65536, so only differences count), the player's `own`
+   * note or midzer's. For recording the solo to replay it.
+   */
+  | { type: 'soloNote'; key: number; velocity: number; bar: number; tick: number; own: boolean }
+  /** A replay of the player's solo reached its start, or ended or was stopped. */
+  | { type: 'replaying'; playing: boolean };
 
 /** Where call and response is: waiting for a tap, midzer calling, the player answering, the answer just scored. */
 export type CallPhase = 'idle' | 'listen' | 'answer' | 'scored';
@@ -572,6 +595,10 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
       const phase = CALL_PHASES[a & 0xff];
       return phase ? { type: 'soloCall', phase, hit: (a >> 8) & 0xff, of: (a >> 16) & 0xff, key: b === NO_KEY ? null : b & 0xff, frame } : null;
     }
+    case 21:
+      return { type: 'soloNote', key: a & 0xff, velocity: (a >> 8) & 0xff, bar: b & 0xffff, tick: b >>> 16, own: ((a >> 16) & 1) !== 0, frame };
+    case 22:
+      return { type: 'replaying', playing: a !== 0, frame };
     default:
       return null;
   }

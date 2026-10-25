@@ -9,6 +9,7 @@ use crate::event::{EngineEvent, EventBuffer, MIC_CHANNEL, PLAYER_DRUM_CHANNEL, T
 use crate::listen::{Heard, HeardList, ListenMode, Listener};
 use crate::live::Live;
 use crate::melody::MelodyNote;
+use crate::replay::{Replay, ReplayNote};
 use crate::solo::{Pressed, Solo};
 
 /// MIDI channel for the player's own notes.
@@ -60,6 +61,8 @@ pub struct Engine {
     live: Live,
     /// Improvising over the live audio: the player's keys drive a solo.
     solo: Solo,
+    /// The player's solo played back.
+    replay: Replay,
 }
 
 impl Engine {
@@ -87,6 +90,7 @@ impl Engine {
             backing: Backing::new(sample_rate),
             live: Live::new(sample_rate),
             solo: Solo::new(sample_rate),
+            replay: Replay::new(sample_rate),
         }
     }
 
@@ -129,6 +133,7 @@ impl Engine {
             }
             Command::AllNotesOff => {
                 self.solo.silence(0, &mut self.events);
+                self.replay.stop(0, &mut self.events);
                 for note in 0..128u8 {
                     if std::mem::take(&mut self.held[note as usize]) {
                         self.events.push(0, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key: note });
@@ -147,6 +152,7 @@ impl Engine {
             Command::Stop => {
                 self.start_in = None;
                 self.solo.silence(0, &mut self.events);
+                self.replay.stop(0, &mut self.events);
                 self.band.stop(&mut self.events);
                 if self.backing.is_playing() {
                     self.backing.stop(0, &mut self.events);
@@ -259,6 +265,15 @@ impl Engine {
             }
             Command::SetSolo { level, call, lead_ms } => self.solo.set_level(level, call, lead_ms, &mut self.events),
             Command::SoloHarmony { tonic, scale, chord } => self.solo.set_harmony(tonic, scale, chord),
+            Command::ReplayClear => self.replay.clear(&mut self.events),
+            Command::ReplayNote { tick, len, key, velocity } => self.replay.add(ReplayNote { tick, len, key, velocity }),
+            Command::ReplayPlay { on, bpm } => {
+                // The solo stops for its replay.
+                if on {
+                    self.solo.silence(0, &mut self.events);
+                }
+                self.replay.set_playing(on, bpm, &mut self.events);
+            }
             Command::LiveBar { frame, beats } => self.live.bar_ahead(frame, beats, self.now),
             Command::LiveGuide { frame, period, one, confidence, known } => self.live.guide(frame, period, one, confidence, known, self.now),
             Command::TrackClear { beats } => self.backing.clear_beats(beats as u32),
@@ -477,7 +492,9 @@ impl Engine {
             }
             None if self.live.active() => {
                 self.live.process(frames, self.now, &mut self.events);
-                self.solo.process(frames, self.now, self.live.grid(), &mut self.events);
+                let grid = self.live.grid();
+                self.solo.process(frames, self.now, grid, &mut self.events);
+                self.replay.process(frames, self.now, grid, self.solo.lead(), &mut self.events);
             }
             None if self.backing.active() => {
                 let mark = self.events.len();
@@ -1061,10 +1078,6 @@ mod tests {
         engine.handle(Command::SetLive { on: true });
         engine.handle(Command::SetSolo { level, call, lead_ms: 20.0 });
         engine.handle(Command::SoloHarmony { tonic: 0, scale: 0b0010_1001_0101, chord: 0b0000_1001_0001 });
-        let click = |f: u64| {
-            let into = (f as f64 / 48_000.0 - 0.25).rem_euclid(0.5);
-            if f >= 12_000 && into < 0.01 { ((f * 7919) % 200) as f32 / 200.0 - 0.5 } else { 0.0 }
-        };
         let first_tap = 48_000 * 8;
         let mut events = Vec::new();
         let mut input = [0.0f32; 128];
@@ -1088,6 +1101,72 @@ mod tests {
             engine.end_block();
         }
         (engine, events)
+    }
+
+    /// The clicks `solo_over_clicks` plays: 120 BPM from 0.25 s, at frame `f`.
+    fn click(f: u64) -> f32 {
+        let into = (f as f64 / 48_000.0 - 0.25).rem_euclid(0.5);
+        if f >= 12_000 && into < 0.01 { ((f * 7919) % 200) as f32 / 200.0 - 0.5 } else { 0.0 }
+    }
+
+    /// The clicks on from frame `from` for `seconds`, with no keys.
+    fn more_clicks(engine: &mut Engine, from: u64, seconds: u64) -> Vec<(u64, EngineEvent)> {
+        let mut events = Vec::new();
+        let mut input = [0.0f32; 128];
+        for at in (from..from + 48_000 * seconds).step_by(128) {
+            for (i, x) in input.iter_mut().enumerate() {
+                *x = click(at + i as u64);
+            }
+            engine.listen_live(&input);
+            events.extend(engine.process(128).iter().map(|t| (at + t.frame as u64, t.event)));
+            engine.end_block();
+        }
+        events
+    }
+
+    #[test]
+    fn a_solo_goes_out_to_be_recorded_and_replays_on_the_next_bar() {
+        let (mut engine, events) = solo_over_clicks(1, &[60]);
+        let sounded = player_notes(&events);
+        // The UI's part: the notes from the run's first bar, as ticks.
+        let mut open: Vec<(u8, i64, u8)> = Vec::new();
+        let mut notes: Vec<(i64, i64, u8, u8)> = Vec::new();
+        let mut first = None;
+        for (_, e) in &events {
+            if let EngineEvent::SoloNote { key, velocity, bar, tick, .. } = *e {
+                let first = *first.get_or_insert(bar as i64);
+                let ticks = (bar as i64 - first) * crate::style::TICKS_PER_BAR as i64 + tick as i64;
+                if velocity > 0 {
+                    open.push((key, ticks, velocity));
+                } else if let Some(i) = open.iter().position(|o| o.0 == key) {
+                    let (key, from, velocity) = open.remove(i);
+                    notes.push((from, ticks - from, key, velocity));
+                }
+            }
+        }
+        // The last may still sound: the UI ends it with the run.
+        notes.extend(open.iter().map(|&(key, from, velocity)| (from, 240, key, velocity)));
+        assert_eq!(notes.len(), sounded.len(), "each note recorded");
+        assert!(notes.windows(2).all(|w| w[0].0 <= w[1].0), "in order: {notes:?}");
+        engine.handle(Command::ReplayClear);
+        for &(tick, len, key, velocity) in &notes {
+            engine.handle(Command::ReplayNote { tick: tick as u32, len: len as u32, key, velocity });
+        }
+        engine.handle(Command::ReplayPlay { on: true, bpm: 120.0 });
+        let replayed = more_clicks(&mut engine, 48_000 * 12, 8);
+        let start = replayed.iter().find_map(|(f, e)| (*e == EngineEvent::Replaying { playing: true }).then_some(*f)).expect("the replay starts");
+        assert!(replayed.iter().any(|(_, e)| *e == EngineEvent::Replaying { playing: false }), "and ends");
+        assert!(!replayed.iter().any(|(_, e)| matches!(e, EngineEvent::NoteOn { channel: crate::event::DRUM_CHANNEL, .. })), "no click on the beat");
+        // On a 1 as the player hears it: the clicks are on the beats from 0.25 s, the lead 20 ms early.
+        let heard = (start + 960) as f64 / 24_000.0 - 0.5;
+        assert!((heard - heard.round()).abs() < 0.05, "on a beat: {heard}");
+        let again = player_notes(&replayed);
+        assert_eq!(again.len(), sounded.len(), "every note again");
+        for (a, b) in again.iter().zip(&sounded) {
+            assert_eq!(a.1, b.1);
+        }
+        let first_gap = |n: &[(u64, u8)]| n[1].0 as i64 - n[0].0 as i64;
+        assert!((first_gap(&again) - first_gap(&sounded)).abs() < 200, "in time: {} vs {}", first_gap(&again), first_gap(&sounded));
     }
 
     fn player_notes(events: &[(u64, EngineEvent)]) -> Vec<(u64, u8)> {

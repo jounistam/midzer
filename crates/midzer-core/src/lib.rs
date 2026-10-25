@@ -17,6 +17,7 @@ mod harmony;
 mod listen;
 mod live;
 mod melody;
+mod replay;
 mod solo;
 mod song;
 pub mod style;

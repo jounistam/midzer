@@ -329,3 +329,58 @@ At level 1 the space bar also plays the lit key, and the lit key shows its QWERT
 - The plan's `SoloNote { key, velocity, bar, tick, own }` event isn't built yet. Emit it from `note_on`/`end_note` (midzer's notes, `own: false`) and from `own_note`/`end_own` plus the levels 1–2 answer taps (`own: true`). The bar and tick can come from the grid, using `beat_in_bar` and `g.sixteenth_at(t)`. Event op 21 is next.
 - The next command op after `SoloHarmony` (54) is 55; check `command.rs` `op` for the highest in use first.
 - Record in `session.ts` the way `judged` is kept per run (reset on `transport` playing).
+
+### Slice 4: done (built 2026-10-25, to be committed by the user)
+**Engine**
+- `EngineEvent::SoloNote { key, velocity (0 = off), bar: u16, tick: u16, own }`, op 21: a = key | velocity<<8 | own<<16, b = bar | tick<<16.
+  - `Solo` sends one with every NoteOn/NoteOff on `PLAYER_CHANNEL`, through the helpers `key_on`/`key_off` → `recorded`. Nothing is sent without a grid.
+  - The time is where the player hears the note: midzer's notes at send frame + `lead`, the player's own notes (and the levels 1–2 answer taps, `sounding_own`) at the press frame.
+  - Ticks count PPQ 480 from the 1s' phase of the beat count: `(beats − one.rem_euclid(4)) · 480`. `Grid::one` moves on to the latest 1 each bar, so it can't be the origin. Bars are four beats and wrap at 65536; only differences count.
+  - `Solo` now keeps `grid` and `now` from the last `press`/`release`/`process`, so `silence` can place its offs. `Solo::lead()` is public, and `Grid::sixteenth_at` is `pub(crate)`.
+- `EngineEvent::Replaying { playing }`, op 22: sent at the frame where the replay reaches tick 0, and when it ends or is stopped.
+- Commands `ReplayClear` (op 55), `ReplayNote { tick, len, key, velocity ≥ 1 }` (op 56: c = key | velocity<<8), and `ReplayPlay { on, bpm > 0 }` (op 57: b = bpm f32 bits).
+- New `crates/midzer-core/src/replay.rs`, `Replay`, owned by `Engine` (not by `Solo`):
+  - a fixed `[ReplayNote; MAX_REPLAY_NOTES = 1024]`, kept sorted by `add`, plus `end_tick`;
+  - `Clock::Grid { from }`: started with a grid, it starts on the next bar's 1, `from` being that beat index, and follows the grid each block (with `lead`);
+  - `Clock::Free { at, period }`: without a grid it starts at once at `bpm`, with a wood-block click (`WOOD_BLOCK` on `DRUM_CHANNEL`, velocity 35, 50 on the 1s) on each beat before the end;
+  - losing the grid mid-replay turns it into a free clock at the last period;
+  - up to 16 notes sound at once; a retriggered key ends first; notes more than 0.25 beat late are skipped.
+- `engine.rs`: `ReplayPlay { on: true }` silences the solo first. `Stop` and `AllNotesOff` stop the replay. `replay.process` runs in the live branch right after `solo.process`, with the same grid and `solo.lead()`. So the replay only plays while live is active (the Play along screen).
+- `midzer-synth` ignores both new events.
+- Tests:
+  - `replay.rs`: next bar's 1 on a grid, free clock with clicks, losing the beat, stop and replay, size;
+  - `solo.rs`: `every_note_goes_out_for_the_replay_where_it_is_heard`, with the harness `recorded()`;
+  - `engine.rs`: `a_solo_goes_out_to_be_recorded_and_replays_on_the_next_bar`, which records from events as the UI does and replays over the clicks. New test helpers `click(f)` and `more_clicks(engine, from, seconds)`;
+  - round trips in `command.rs` and `event.rs`.
+
+**UI**
+- `protocol.ts`: the commands `replayClear`, `replayNote` and `replayPlay`, the events `soloNote` and `replaying`, with tests.
+- `playalong/replay.ts` (with `replay.test.ts`):
+  - `TakeRecorder.note(event)` turns bar and tick into ticks from the first bar (wrap-safe). A note-off or a retrigger of the same key ends the open note.
+  - `take()` ends the notes still sounding at the last tick, moves notes heard just before the first bar a bar on, sorts, and gives `SoloTake { notes: TakeNote[], bars }`.
+  - `replayCommands(take)` (clear plus the first 1024 notes) and `ownShare(take)`.
+- `session.ts`:
+  - state `soloTake` and `replay: 'off' | 'waiting' | 'playing'`;
+  - module `soloRecorder` and `soloTakeBpm`;
+  - `transport` playing → `startSoloTake()` (new recorder; it stops a replay and clears the card); not playing → `endSoloTake()` (takes the notes if soloing, loads them with `replayCommands`, and keeps the tempo from `liveFollow?.bpm ?? bpm`);
+  - `soloNote` → `soloRecorder.note`; `replaying` sets `live.replayClock.ms` (new in `live.ts`) and `replay`;
+  - exports `playReplay()` and `stopReplay()`.
+- `components/SoloRoll.tsx`: a canvas with 4 bars a row (2 under 480 px) and 64 px rows. The player's notes are magenta (`note.melody`), midzer's cyan (`note.chord`, alpha 0.7). A playhead runs from `live.replayClock` at `bpm` while playing.
+- `PlayAlong.tsx` `SoloReplay` (testid `solo-replay`): shown while soloing, with a take and not playing. It has "You played N% of M notes over B bars" (`solo-replay-share`), a You/midzer legend, the roll, "Play it back"/"Stop", and the status (`solo-replay-status`: "Starting on the next bar…", "Playing back", or a hint). CSS is under `.solo-replay*` and `.solo-roll`.
+- e2e: the solo test now presses Stop after the level 1 taps, expects the card with 0 %, plays it back until "Playing back", and stops it.
+
+**Checks run:** `cargo test -p midzer-core --lib` (170), `midzer-synth` tests, clippy clean, `pnpm typecheck`, web (175) and audio-web (35) unit tests. In e2e (after `pnpm build:wasm` and the web build) the solo test passes.
+
+**Open after slice 4:**
+- Not tried by ear.
+- The card only shows after a run ends (Stop, or silence ending the run). A solo over a song that keeps playing needs Stop first.
+- The playhead uses the tempo shown, so on a grid it is close but not exact.
+- A stale `replaying: false` from a stop can land just after a new "Play it back" and show "off" while it waits; this was not seen in e2e.
+- Replay only plays while live is active.
+
+### Notes for slice 5 (drum solo)
+- The engine gate is `solo = !drums && live && solo.level() > 0` in `Engine::handle`. Drum notes go through `drum_note` (`engine.rs`), and the player's kit plays on `PLAYER_DRUM_CHANNEL` (14). The plan wants the drum solo's notes there.
+- `DRUM_SOLO_LEVELS` (4 levels) are not in `playalong/solo.ts` yet. `ModePicker` and `SoloLevelPicker` show for keys only (`!drums` in `PlayAlong.tsx`), and `soloing()` in `session.ts` is keys-only.
+- Replay and `SoloNote` are `PLAYER_CHANNEL` only. To replay a drum solo, `SoloNote` and `ReplayNote` need a channel (or a drum flag), and `SoloRoll` needs a kit view (rows per piece).
+- Judging: at drum level 4 the existing judging gives the feedback. At levels 1–3 the hits should not reach `live.queue`, as keys levels ≤ 3 don't.
+- Call and response on the kit: calls are short rhythms. The scoring in `Solo::score` is rhythm-only below level 3 already.

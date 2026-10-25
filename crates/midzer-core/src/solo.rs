@@ -17,12 +17,17 @@
 //! plays the notes. The answer is scored on rhythm, and from level 3 on the
 //! notes too, and the calls grow longer as the answers get them right.
 //!
+//! Every note the player hears goes out as a [`EngineEvent::SoloNote`] too,
+//! the player's and midzer's, so the UI can record the solo and replay it
+//! (see [`crate::replay`]).
+//!
 //! Notes come from the song's scale (a pentatonic the UI sends with the chord
 //! heard, see [`crate::Command::SoloHarmony`]), chord tones on the strong
 //! beats. Everything is fixed state: nothing allocates.
 
 use crate::engine::PLAYER_CHANNEL;
 use crate::event::{CallPhase, EngineEvent, EventBuffer};
+use crate::style::{PPQ, TICKS_PER_BAR};
 
 /// The highest level the UI may ask for.
 pub const MAX_SOLO_LEVEL: u8 = 5;
@@ -108,7 +113,7 @@ impl Grid {
         self.at + (q as f64 / 4.0 - self.index as f64) * self.period
     }
 
-    fn sixteenth_at(&self, frame: f64) -> f64 {
+    pub(crate) fn sixteenth_at(&self, frame: f64) -> f64 {
         (self.index as f64 + (frame - self.at) / self.period) * 4.0
     }
 
@@ -166,6 +171,11 @@ pub struct Solo {
     /// The note sounding and when it ends (engine frames), and a grace note's.
     sounding: Option<(u8, f64)>,
     grace: Option<(u8, f64)>,
+    /// The note sounding is the player's: an answer's tap (levels 1–2).
+    sounding_own: bool,
+    /// The beats last heard, and the engine frame last seen, to place the notes for the replay.
+    grid: Option<Grid>,
+    now: u64,
     /// The last note played, and when.
     pitch: u8,
     rising: bool,
@@ -223,6 +233,9 @@ impl Solo {
             ending: false,
             sounding: None,
             grace: None,
+            sounding_own: false,
+            grid: None,
+            now: 0,
             pitch: 60,
             rising: true,
             last_note: f64::NEG_INFINITY,
@@ -276,6 +289,11 @@ impl Solo {
         60 + self.tonic
     }
 
+    /// How much earlier than heard the notes are sent, in frames.
+    pub fn lead(&self) -> f64 {
+        self.lead
+    }
+
     /// Whether the player's notes are judged on this level.
     pub fn judged(&self) -> bool {
         self.level >= JUDGED_FROM
@@ -286,6 +304,7 @@ impl Solo {
         if self.level == 0 {
             return Pressed::Free;
         }
+        (self.grid, self.now) = (grid, now);
         if self.level >= OWN_NOTES_FROM {
             let pressed = self.own_note(key, velocity, now, grid, out);
             if let (true, Pressed::Played(sound), Some(grid)) = (self.call, pressed, grid) {
@@ -307,8 +326,9 @@ impl Solo {
                 // The call's next note, for as long as the key is held.
                 let key = self.call_notes[i].1;
                 self.end_note(now as f64, now, out);
-                out.push(0, EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key, velocity });
+                self.key_on(0, key, velocity, now as f64, true, out);
                 self.sounding = Some((key, f64::INFINITY));
+                self.sounding_own = true;
                 self.last_note = now as f64;
                 self.pitch = key;
             }
@@ -371,7 +391,7 @@ impl Solo {
         self.last_own = now as f64;
         self.last_note = now as f64;
         self.pitch = sound;
-        out.push(0, EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key: sound, velocity });
+        self.key_on(0, sound, velocity, now as f64, true, out);
         Pressed::Played(sound)
     }
 
@@ -384,7 +404,7 @@ impl Solo {
         self.own_held = self.own_held.saturating_sub(1);
         self.own_count[sound as usize] = self.own_count[sound as usize].saturating_sub(1);
         if self.own_count[sound as usize] == 0 {
-            out.push(0, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key: sound });
+            self.key_off(0, sound, now as f64, true, out);
         }
         if self.own_held == 0 {
             // The solo carries on from the note let go.
@@ -414,6 +434,7 @@ impl Solo {
         if self.level == 0 {
             return false;
         }
+        self.now = now;
         self.end_own(key, now, out);
         if self.held.is_some_and(|(held, _)| held == key) {
             self.held = None;
@@ -435,13 +456,11 @@ impl Solo {
 
     /// Stops every note at frame `at` of this block and forgets the taps.
     pub fn silence(&mut self, at: u32, out: &mut EventBuffer) {
-        for (key, _) in [self.sounding.take(), self.grace.take()].into_iter().flatten() {
-            out.push(at, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key });
-        }
-        self.unbend(at, out);
+        let t = (self.now + at as u64) as f64;
+        self.end_note(t, self.now, out);
         for key in 0..128u8 {
             if std::mem::take(&mut self.own_count[key as usize]) > 0 {
-                out.push(at, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key });
+                self.key_off(at, key, t, true, out);
             }
         }
         self.own = [NONE; 128];
@@ -479,6 +498,7 @@ impl Solo {
         if self.level == 0 {
             return;
         }
+        (self.grid, self.now) = (grid, now);
         if let Some(g) = grid {
             self.update_energy(frames, now, g);
             let lead = self.lead;
@@ -597,7 +617,8 @@ impl Solo {
             if from != key && at >= now as f64 {
                 self.end_note(at, now, out);
                 self.grace = Some((from, t));
-                out.push((at - now as f64) as u32, EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key: from, velocity: self.velocity(1) });
+                let velocity = self.velocity(1);
+                self.key_on((at - now as f64) as u32, from, velocity, at + self.lead, false, out);
             }
         }
         self.note_on(key, pos, t, now, length, out);
@@ -890,30 +911,59 @@ impl Solo {
     fn note_on(&mut self, key: u8, pos: u8, t: f64, now: u64, length: f64, out: &mut EventBuffer) {
         self.end_note(t, now, out);
         let velocity = self.velocity(pos);
-        out.push((t - now as f64).max(0.0) as u32, EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key, velocity });
+        self.key_on((t - now as f64).max(0.0) as u32, key, velocity, t + self.lead, false, out);
         self.sounding = Some((key, t + length));
+        self.sounding_own = false;
         self.last_note = t;
         self.pitch = key;
     }
 
     fn end_note(&mut self, t: f64, now: u64, out: &mut EventBuffer) {
         let at = (t - now as f64).max(0.0) as u32;
-        for (key, _) in [self.grace.take(), self.sounding.take()].into_iter().flatten() {
-            out.push(at, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key });
+        if let Some((key, _)) = self.grace.take() {
+            self.key_off(at, key, t + self.lead, false, out);
+        }
+        if let Some((key, _)) = self.sounding.take() {
+            let own = std::mem::take(&mut self.sounding_own);
+            self.key_off(at, key, if own { t } else { t + self.lead }, own, out);
         }
         self.unbend(at, out);
     }
 
     /// Ends the notes whose time is up before `end`.
     fn release_due(&mut self, now: u64, end: f64, out: &mut EventBuffer) {
-        for slot in [&mut self.grace, &mut self.sounding] {
+        for grace in [true, false] {
+            let slot = if grace { &mut self.grace } else { &mut self.sounding };
             if let Some((key, off)) = *slot
                 && off < end
             {
-                out.push((off - now as f64).max(0.0) as u32, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key });
                 *slot = None;
+                // Only midzer's notes end on time; an answer's tap ends with its key.
+                self.key_off((off - now as f64).max(0.0) as u32, key, off + self.lead, false, out);
             }
         }
+    }
+
+    /// Starts `key` at frame `at` of this block, heard at engine frame
+    /// `heard`, and says so for the replay.
+    fn key_on(&self, at: u32, key: u8, velocity: u8, heard: f64, own: bool, out: &mut EventBuffer) {
+        out.push(at, EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key, velocity });
+        self.recorded(at, key, velocity, heard, own, out);
+    }
+
+    fn key_off(&self, at: u32, key: u8, heard: f64, own: bool, out: &mut EventBuffer) {
+        out.push(at, EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key });
+        self.recorded(at, key, 0, heard, own, out);
+    }
+
+    /// A note started or ended, placed on the beats heard; nothing without a beat.
+    fn recorded(&self, at: u32, key: u8, velocity: u8, heard: f64, own: bool, out: &mut EventBuffer) {
+        let Some(g) = self.grid else { return };
+        // Counted in bars of the beats found, on the 1s' phase: `one` itself moves on each bar.
+        let ticks = ((g.sixteenth_at(heard) / 4.0 - g.one.rem_euclid(4) as f64) * PPQ as f64).round() as i64;
+        let bar = TICKS_PER_BAR as i64;
+        // Bars wrap: only differences between them count.
+        out.push(at, EngineEvent::SoloNote { key, velocity, bar: ticks.div_euclid(bar) as u16, tick: ticks.rem_euclid(bar) as u16, own });
     }
 
     fn next_random(&mut self) -> u32 {
@@ -1237,7 +1287,7 @@ mod tests {
         s.press(63, 90, 40, Some(GRID), &mut out);
         let mut out = EventBuffer::default();
         s.silence(0, &mut out);
-        assert_eq!(out.as_slice().iter().map(|t| t.event).collect::<Vec<_>>(), [EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key: 64 }], "E flat sounded as E, the chord tone");
+        assert_eq!(out.as_slice().iter().map(|t| t.event).filter(|e| matches!(e, EngineEvent::NoteOff { .. })).collect::<Vec<_>>(), [EngineEvent::NoteOff { channel: PLAYER_CHANNEL, key: 64 }], "E flat sounded as E, the chord tone");
     }
 
     #[test]
@@ -1467,6 +1517,67 @@ mod tests {
             now += BLOCK as u64;
         }
         assert_eq!(answer_keys, [Some(s.call_notes[0].1)]);
+    }
+
+    /// Every note on and off with its `SoloNote`: (frame, key, velocity, ticks from bar 0, own).
+    fn recorded(solo: &mut Solo, beats: f64, taps: &[(u64, u64, u8)]) -> Vec<(u64, u8, u8, i64, bool)> {
+        let mut got = Vec::new();
+        let mut releases: Vec<(u64, u8)> = Vec::new();
+        let mut next = 0;
+        let mut now = 0u64;
+        while now < (beats * PERIOD) as u64 {
+            let mut out = EventBuffer::default();
+            releases.retain(|&(r, key)| r >= now + BLOCK as u64 || !solo.release(key, now, &mut out));
+            while next < taps.len() && taps[next].0 < now + BLOCK as u64 {
+                let (at, hold, key) = taps[next];
+                solo.press(key, 100, now, Some(GRID), &mut out);
+                releases.push((at + hold, key));
+                next += 1;
+            }
+            solo.process(BLOCK, now, Some(GRID), &mut out);
+            out.sort();
+            let mut sounds = Vec::new();
+            for t in out.as_slice() {
+                match t.event {
+                    EngineEvent::NoteOn { key, velocity, .. } => sounds.push((now + t.frame as u64, key, velocity)),
+                    EngineEvent::NoteOff { key, .. } => sounds.push((now + t.frame as u64, key, 0)),
+                    EngineEvent::SoloNote { key, velocity, bar, tick, own } => {
+                        let i = sounds.iter().position(|s| s.1 == key && s.2 == velocity).expect("a note went out for each record");
+                        let (at, key, velocity) = sounds.remove(i);
+                        assert_eq!(at, now + t.frame as u64, "on the note's frame");
+                        got.push((at, key, velocity, bar as i64 * TICKS_PER_BAR as i64 + tick as i64, own));
+                    }
+                    _ => {}
+                }
+            }
+            assert!(sounds.is_empty(), "every note recorded: {sounds:?}");
+            now += BLOCK as u64;
+        }
+        got
+    }
+
+    #[test]
+    fn every_note_goes_out_for_the_replay_where_it_is_heard() {
+        let lead = 960.0;
+        let mut s = solo();
+        s.set_level(1, false, lead as f32 / SR * 1000.0, &mut EventBuffer::default());
+        let notes = recorded(&mut s, 12.0, &notes_on(60, 0.3, 9.0, 0.04));
+        assert!(notes.len() > 20 && notes.iter().all(|n| !n.4), "midzer's notes: {}", notes.len());
+        for &(at, _, velocity, ticks, _) in &notes[1..] {
+            // Heard a lead after sent, on a sixteenth (a slide a thirty-second before one).
+            let heard = (at as f64 + lead) / PERIOD * PPQ as f64;
+            assert!((ticks as f64 - heard).abs() <= 0.5, "tick {ticks} for a note heard at {heard}");
+            assert!(velocity == 0 || ticks % (PPQ as i64 / 8) == 0, "on the grid: {ticks}");
+        }
+        let mut s = at_level(4);
+        let own = notes_on(61, 0.5, 5.0, 0.1);
+        let notes = recorded(&mut s, 6.0, &own);
+        assert_eq!(notes.len(), 2 * own.len());
+        for (n, o) in notes.iter().step_by(2).zip(&own) {
+            assert!(n.4 && n.1 == 60, "the player's note, as it sounds: {n:?}");
+            let played = o.0 / BLOCK as u64 * BLOCK as u64;
+            assert_eq!(n.3, (played as f64 / PERIOD * PPQ as f64).round() as i64, "when played");
+        }
     }
 
     #[test]

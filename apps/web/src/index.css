@@ -2466,6 +2466,40 @@ code {
   border: 1.5px solid var(--color-note-chord);
 }
 
+/* After a solo run: the notes bar by bar and the replay. */
+.solo-replay {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-bottom: var(--space-4);
+}
+
+.solo-replay-legend,
+.solo-replay-actions {
+  padding: 0 var(--space-6);
+}
+
+/* A margin, not padding: the canvas takes the roll's whole width. */
+.solo-roll {
+  margin: 0 var(--space-6);
+}
+
+.solo-roll canvas {
+  display: block;
+  border-radius: var(--radius-sm);
+}
+
+.solo-replay-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.solo-replay-actions p {
+  margin: 0;
+}
+
 /* Not playing, the report sits under the keys and scrolls. */
 .along-screen .jam-stage .along-play ~ .song-timing {
   flex: none;

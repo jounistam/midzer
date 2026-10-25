@@ -53,6 +53,7 @@ import {
 import { pickProgression, progressionCommands } from './drums/progressions';
 import { ChordTimeline, keyHints, snapToBeats, type ChordNow, type HeardChord } from './playalong/chords';
 import { chordBits, KeyFollower, keyOf, pentatonic, type SongKey, type WeightedChord } from './playalong/scale';
+import { replayCommands, TakeRecorder, type SoloTake } from './playalong/replay';
 import { homeKey, NO_CALL, NO_FIT, nextCall, noteFit, parseAlongMode, parseSoloLevel, soloHints, SPACE_TAPS_TO, type AlongMode, type CallNow, type FitCount, type SoloLevel } from './playalong/solo';
 import { parseLevel, type AlongLevel } from './playalong/levels';
 import { MISS_SOUND_OPTIONS, missOf, playMiss, type MissSound } from './playalong/feedback';
@@ -251,6 +252,10 @@ interface SessionState {
   soloFit: FitCount;
   /** Call and response now, while it is on. */
   soloCallNow: CallNow;
+  /** The last solo run's notes, to see and replay; null during a run. */
+  soloTake: SoloTake | null;
+  /** The solo replay: off, asked for and waiting for its first bar, or playing. */
+  replay: 'off' | 'waiting' | 'playing';
   /** Inputs to play along with; names may be missing until audio input is allowed. */
   liveDevices: LiveDevice[];
   /** How much later the player hears each source than midzer does, in ms, by `liveSourceKey`. */
@@ -471,6 +476,8 @@ export const useSession = create<SessionState>(() => ({
   soloKey: null,
   soloFit: NO_FIT,
   soloCallNow: NO_CALL,
+  soloTake: null,
+  replay: 'off',
   liveDevices: [],
   liveOffsets: prefs.liveOffsets,
   missSound: prefs.missSound,
@@ -611,6 +618,9 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
         skipJudged = false;
         judged = [];
         set({ judgedCount: 0, soloFit: NO_FIT });
+        startSoloTake();
+      } else {
+        endSoloTake();
       }
       setTimeout(
         () =>
@@ -655,6 +665,13 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
       break;
     case 'soloCall':
       setTimeout(() => set({ soloCallNow: nextCall(get().soloCallNow, event) }), delay);
+      break;
+    case 'soloNote':
+      soloRecorder.note(event);
+      break;
+    case 'replaying':
+      if (event.playing) live.replayClock.ms = heardMs;
+      setTimeout(() => set({ replay: event.playing ? 'playing' : 'off' }), delay);
       break;
     case 'songPosition': {
       live.songClock.ms = heardMs;
@@ -892,6 +909,40 @@ export function setSoloCall(soloCall: boolean): void {
 function soloing(): boolean {
   const { alongMode, instrument } = get();
   return alongMode === 'solo' && instrument === 'keys';
+}
+
+/** The solo run being recorded, and the last run's tempo for replaying it without a beat. */
+let soloRecorder = new TakeRecorder();
+let soloTakeBpm = 120;
+
+/** A run starts: a new solo to record, and the last one's replay stops. */
+function startSoloTake(): void {
+  soloRecorder = new TakeRecorder();
+  if (get().replay !== 'off') send({ type: 'replayPlay', on: false, bpm: soloTakeBpm });
+  set({ soloTake: null, replay: 'off' });
+}
+
+/** A run ends: its solo, if any, is kept to see and loaded to replay. */
+function endSoloTake(): void {
+  const take = soloRecorder.take();
+  soloRecorder = new TakeRecorder();
+  if (!take || !soloing()) return;
+  const { liveFollow, bpm } = get();
+  soloTakeBpm = liveFollow?.bpm ?? bpm;
+  for (const cmd of replayCommands(take)) send(cmd);
+  set({ soloTake: take });
+}
+
+/** Replays the last solo: on the next bar's 1 while the beat is heard, else at its own tempo. */
+export function playReplay(): void {
+  if (!get().soloTake) return;
+  send({ type: 'replayPlay', on: true, bpm: soloTakeBpm });
+  set({ replay: 'waiting' });
+}
+
+export function stopReplay(): void {
+  send({ type: 'replayPlay', on: false, bpm: soloTakeBpm });
+  set({ replay: 'off' });
 }
 
 /** The engine solos only over live audio, so this can stay on elsewhere. */

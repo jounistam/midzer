@@ -90,6 +90,9 @@ describe('encodeCommand', () => {
     expect(encodeCommand({ type: 'setSound', program: 89 })).toEqual([52, 89, 0, 0]);
     expect(encodeCommand({ type: 'setSolo', level: 3, call: true, leadMs: 42.5 })).toEqual([53, 3 | (1 << 8), new Uint32Array(new Float32Array([42.5]).buffer)[0], 0]);
     expect(encodeCommand({ type: 'soloHarmony', tonic: 9, scale: 0b0100_1010_1001, chord: 0b1001_0001 })).toEqual([54, 9, 0b0100_1010_1001, 0b1001_0001]);
+    expect(encodeCommand({ type: 'replayClear' })).toEqual([55, 0, 0, 0]);
+    expect(encodeCommand({ type: 'replayNote', tick: 4_000_000, len: 0, key: 72, velocity: 0 })).toEqual([56, 4_000_000, 1, 72 | (1 << 8)]);
+    expect(encodeCommand({ type: 'replayPlay', on: true, bpm: 97.5 })).toEqual([57, 1, new Uint32Array(new Float32Array([97.5]).buffer)[0], 0]);
   });
 
   it('knows each piece by its General MIDI key', () => {
@@ -173,6 +176,9 @@ describe('decodeEvent', () => {
     expect(decodeEvent(20, 2 | (3 << 8) | (5 << 16), 67, 4)).toEqual({ type: 'soloCall', phase: 'answer', hit: 3, of: 5, key: 67, frame: 4 });
     expect(decodeEvent(20, 0, 0xff, 4)).toEqual({ type: 'soloCall', phase: 'idle', hit: 0, of: 0, key: null, frame: 4 });
     expect(decodeEvent(20, 9, 0xff, 4)).toBeNull();
+    expect(decodeEvent(21, 72 | (99 << 8) | (1 << 16), 65_535 | (1919 << 16), 4)).toEqual({ type: 'soloNote', key: 72, velocity: 99, bar: 65_535, tick: 1919, own: true, frame: 4 });
+    expect(decodeEvent(21, 60, 3, 4)).toEqual({ type: 'soloNote', key: 60, velocity: 0, bar: 3, tick: 0, own: false, frame: 4 });
+    expect(decodeEvent(22, 1, 0, 4)).toEqual({ type: 'replaying', playing: true, frame: 4 });
   });
 
   it('decodes song positions', () => {

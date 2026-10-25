@@ -125,6 +125,14 @@ pub enum Command {
     /// The song's home note (0 is C), the scale to solo in and the chord heard
     /// now (0 when none), as pitch-class bit sets (bit 0 is C).
     SoloHarmony { tonic: u8, scale: u16, chord: u16 },
+    /// Empties the solo replay, stopping it.
+    ReplayClear,
+    /// A note of the solo to replay: from `tick` ([`crate::style::PPQ`] per
+    /// beat) after the run's first bar's 1, `len` ticks long.
+    ReplayNote { tick: u32, len: u32, key: u8, velocity: u8 },
+    /// Replays the solo from the start, or stops it. Without a live beat it
+    /// plays at `bpm`, the run's tempo.
+    ReplayPlay { on: bool, bpm: f32 },
 }
 
 mod op {
@@ -182,6 +190,9 @@ mod op {
     pub const SET_SOUND: u32 = 52;
     pub const SET_SOLO: u32 = 53;
     pub const SOLO_HARMONY: u32 = 54;
+    pub const REPLAY_CLEAR: u32 = 55;
+    pub const REPLAY_NOTE: u32 = 56;
+    pub const REPLAY_PLAY: u32 = 57;
 }
 
 /// MIDI channel 10, where e-kits and drum pads send.
@@ -321,6 +332,9 @@ impl Command {
             Command::SetSound { program } => [op::SET_SOUND, program as u32, 0, 0],
             Command::SetSolo { level, call, lead_ms } => [op::SET_SOLO, level as u32 | (call as u32) << 8, lead_ms.to_bits(), 0],
             Command::SoloHarmony { tonic, scale, chord } => [op::SOLO_HARMONY, tonic as u32, scale as u32, chord as u32],
+            Command::ReplayClear => [op::REPLAY_CLEAR, 0, 0, 0],
+            Command::ReplayNote { tick, len, key, velocity } => [op::REPLAY_NOTE, tick, len, key as u32 | (velocity as u32) << 8],
+            Command::ReplayPlay { on, bpm } => [op::REPLAY_PLAY, on as u32, bpm.to_bits(), 0],
             Command::LiveGuide { frame, period, one, confidence, known } => [op::LIVE_GUIDE, frame, period.to_bits(), one.map_or(0, |o| o as u32 + 1) | (confidence as u32) << 8 | (known as u32) << 16],
         }
     }
@@ -427,6 +441,14 @@ impl Command {
                 scale: u16::try_from(b).ok().filter(|s| *s <= 0xfff)?,
                 chord: u16::try_from(c).ok().filter(|c| *c <= 0xfff)?,
             }),
+            op::REPLAY_CLEAR => Some(Command::ReplayClear),
+            op::REPLAY_NOTE => Some(Command::ReplayNote {
+                tick: a,
+                len: b,
+                key: midi(c & 0xff)?,
+                velocity: midi(c >> 8).filter(|v| *v > 0)?,
+            }),
+            op::REPLAY_PLAY => Some(Command::ReplayPlay { on: a != 0, bpm: float(b).filter(|bpm| *bpm > 0.0)? }),
             op::LIVE_GUIDE => Some(Command::LiveGuide {
                 frame: a,
                 period: float(b).filter(|p| *p > 0.0)?,
@@ -523,6 +545,10 @@ mod tests {
             Command::SetSolo { level: 3, call: true, lead_ms: 42.5 },
             Command::SetSolo { level: 0, call: false, lead_ms: 0.0 },
             Command::SoloHarmony { tonic: 9, scale: 0b0100_1010_1001, chord: 0b0000_1001_0001 },
+            Command::ReplayClear,
+            Command::ReplayNote { tick: 4_000_000, len: 240, key: 127, velocity: 1 },
+            Command::ReplayPlay { on: true, bpm: 97.5 },
+            Command::ReplayPlay { on: false, bpm: 120.0 },
         ] {
             assert_eq!(Command::decode(cmd.encode()), Some(cmd));
         }
@@ -569,5 +595,8 @@ mod tests {
         assert_eq!(Command::decode([op::KIT_TRIGGER, 0, 128, 1]), None);
         assert_eq!(Command::decode([op::KIT_TRIGGER, 0, 60, 5]), None);
         assert_eq!(Command::decode([op::CONTROL_CHANGE, 128, 0, 0]), None);
+        assert_eq!(Command::decode([op::REPLAY_NOTE, 0, 240, 60]), None);
+        assert_eq!(Command::decode([op::REPLAY_NOTE, 0, 240, 128 | 90 << 8]), None);
+        assert_eq!(Command::decode([op::REPLAY_PLAY, 1, 0f32.to_bits(), 0]), None);
     }
 }

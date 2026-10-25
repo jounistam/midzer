@@ -33,6 +33,8 @@ export const live = {
   beatClock: { ms: -Infinity, beat: 0 },
   /** The last song beat heard (performance.now() ms) and its number from the start of the song. */
   songClock: { ms: -Infinity, beat: 0 },
+  /** When the solo replay heard reached its start (performance.now() ms). */
+  replayClock: { ms: -Infinity },
   /** Bumped on every change so renderers can skip unchanged frames. */
   version: 0,
 };

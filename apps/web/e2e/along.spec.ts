@@ -248,6 +248,18 @@ test('play along: a solo driven by tapping one key', async ({ page }) => {
   // Taps aren't timed; the space bar didn't start or stop anything else.
   await expect(page.getByTestId('timing-report')).toHaveCount(0);
 
+  // Stopped, the solo shows bar by bar and plays back over the music.
+  await expect(page.getByTestId('solo-replay')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
+  const replay = page.getByTestId('solo-replay');
+  await expect(replay.getByTestId('solo-replay-share')).toContainText(/You played 0% of \d+ notes/);
+  await replay.getByRole('button', { name: 'Play it back' }).click();
+  await expect(replay.getByTestId('solo-replay-status')).toHaveText(/Starting on the next bar|Playing back/);
+  await expect(replay.getByTestId('solo-replay-status')).toHaveText('Playing back', { timeout: 10_000 });
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/19-play-along-replay.png` });
+  await replay.getByRole('button', { name: 'Stop', exact: true }).click();
+  await expect(replay.getByRole('button', { name: 'Play it back' })).toBeVisible();
+
   // Level 3: the player's own notes, and how each fits.
   await page.getByRole('group', { name: 'Solo level' }).getByRole('button', { name: '3', exact: true }).click();
   await expect(page.getByTestId('solo-level')).toContainText('Your notes, our groove');

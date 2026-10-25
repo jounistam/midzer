@@ -6,11 +6,13 @@ import { PlayButton, SoundPicker } from '../components/ControlPanel';
 import { HitFeedback } from '../components/HitFeedback';
 import { Keyboard } from '../components/Keyboard';
 import { KitView } from '../components/KitView';
+import { SoloRoll } from '../components/SoloRoll';
 import { TimingReport } from '../components/TimingReport';
 import { TopBar } from '../components/TopBar';
 import type { ChordNow } from '../playalong/chords';
 import { MISS_SOUND_OPTIONS } from '../playalong/feedback';
 import { ALONG_LEVELS } from '../playalong/levels';
+import { ownShare } from '../playalong/replay';
 import { keyName } from '../playalong/scale';
 import { feelWord, homeKey, SOLO_LEVELS, type CallNow, type FitCount, type SoloLevel } from '../playalong/solo';
 import { noteToQwerty } from '../qwerty';
@@ -29,6 +31,7 @@ import {
   liveSourceKey,
   liveTempo,
   notThisSong,
+  playReplay,
   refreshLiveDevices,
   resetLiveSource,
   saveLiveSong,
@@ -41,6 +44,7 @@ import {
   startLiveSource,
   startLiveSync,
   stopLiveSource,
+  stopReplay,
   useSession,
 } from '../session';
 import type { LearnedSong } from '../session';
@@ -66,6 +70,7 @@ export function PlayAlong() {
           <FollowedSong />
           {!drums && <FollowedChords />}
           {!drums && (solo ? <SoloPlay split={split} /> : <AlongChords split={split} />)}
+          {solo && <SoloReplay />}
           <AlongTiming />
           <LearnedSongs />
           <LoadingStatus />
@@ -290,6 +295,47 @@ function CallStatus({ call, tapping }: { call: CallNow; tapping: boolean }) {
         {call.last ? `Last answer: ${call.last.hit} of ${call.last.of}` : '\u00a0'}
       </p>
     </div>
+  );
+}
+
+/** After a solo run: its notes bar by bar, how much of it the player played, and a replay. */
+function SoloReplay() {
+  const take = useSession((s) => s.soloTake);
+  const playing = useSession((s) => s.playing);
+  const replay = useSession((s) => s.replay);
+  const bpm = useSession((s) => s.liveFollow?.bpm ?? s.bpm);
+  const locked = useSession((s) => s.liveSource.status === 'on' && s.liveTracker.locked);
+  if (!take || playing) return null;
+  const share = Math.round(ownShare(take) * 100);
+  return (
+    <section className="panel solo-replay" data-testid="solo-replay">
+      <div className="along-play-head">
+        <p className="eyebrow">Your solo</p>
+        <p className="setting-note" data-testid="solo-replay-share">
+          You played {share}% of {take.notes.length} notes over {take.bars} {take.bars === 1 ? 'bar' : 'bars'}.
+        </p>
+      </div>
+      <p className="along-legend solo-replay-legend">
+        {/* The player's notes in magenta, midzer's in cyan, as in the roll. */}
+        <span className="hand left">You</span>
+        <span className="hand right">midzer</span>
+      </p>
+      <SoloRoll take={take} playingBpm={replay === 'playing' ? bpm : null} />
+      <div className="solo-replay-actions">
+        {replay === 'off' ? (
+          <button className="btn btn-secondary" onClick={playReplay}>
+            Play it back
+          </button>
+        ) : (
+          <button className="btn btn-secondary" onClick={stopReplay}>
+            Stop
+          </button>
+        )}
+        <p className="setting-note" data-testid="solo-replay-status">
+          {replay === 'waiting' ? 'Starting on the next bar…' : replay === 'playing' ? 'Playing back' : locked ? 'Plays over the music from the next bar.' : 'Plays at the tempo you played, with a click.'}
+        </p>
+      </div>
+    </section>
   );
 }
 
