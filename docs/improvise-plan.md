@@ -126,7 +126,7 @@ At level 1 the space bar also plays the lit key, and the lit key shows its QWERT
 
 ## Handoff notes (read before starting the next slice)
 
-### Slice 1: done, committed as c1850b0 "chore: impro slice 1"
+### Slice 1: done, committed as c8f0fbc "chore: impro slice 1"
 **Engine (`crates/midzer-core/src/solo.rs`, `Solo`)**
 - `Grid { at, index, period, one }`: the frame where the player hears beat `index`, frames per beat, and a beat index that is a 1. It comes from `Live::grid()` (`live.rs`, next to `show_beats`), which adds the offset and returns `None` until the tracker locks. Sixteenths are counted as `q` (four per beat). Helpers: `frame(q)`, `sixteenth_at(frame)`, `beat_in_bar(q)`.
 - API:
@@ -455,3 +455,7 @@ At level 1 the space bar also plays the lit key, and the lit key shows its QWERT
 ### Notes for slice 6 (docs)
 - Update the Status section of `docs/PLAN.md` with improvise slices 1–5, and the architecture memory.
 - Candidates for the "Open from …" backlog: an ear pass on keys levels 1–3 and drums level 1; 2-bar calls; the blue note; and the open items above.
+
+### Slice 6: done (2026-10-25)
+- Slices 2–5 were committed by the user as 932c760, ecca7e2, b3c2072 and 06d0b95. On main, slice 1 is c8f0fbc; an earlier copy, c1850b0, is not on main.
+- `docs/PLAN.md` Status now covers slices 1–5, with an "Open from improvise" backlog that gathers the open items above. Improvise is done; the next work is the fine-tuning backlog there, starting with an ear pass.
