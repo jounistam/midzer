@@ -82,7 +82,8 @@ export function PlayAlong() {
           <InstrumentPicker />
           <SoundPicker />
           <ModePicker />
-          {solo ? <SoloLevelPicker /> : !drums && <LevelPicker />}
+          {solo && <SoloLevelPicker />}
+          {!drums && <LevelPicker label={solo ? 'Chord guide' : 'Level'} />}
           {solo && <CallToggle />}
           <BeatFixes />
           <SyncControl />
@@ -193,17 +194,11 @@ function AlongTiming() {
 
 /** The keys of each chord at the player's level falling onto the keyboard, as in Learn. */
 function AlongChords({ split }: { split: number }) {
-  const level = useSession((s) => s.alongLevel);
-  const twoHands = level >= 4;
   return (
     <section className="panel along-play">
       <div className="along-play-head">
         <p className="eyebrow">Chords</p>
-        <p className="along-legend">
-          {twoHands && <span className="hand left">Left hand</span>}
-          <span className="hand right">Right hand</span>
-          <span className="hand next">Next chord</span>
-        </p>
+        <HandLegend />
       </div>
       <ChordLanes />
       <Keyboard split={split} height={150} />
@@ -211,11 +206,24 @@ function AlongChords({ split }: { split: number }) {
   );
 }
 
+/** The colours of the falling chords. */
+function HandLegend() {
+  const twoHands = useSession((s) => s.alongLevel >= 4);
+  return (
+    <p className="along-legend">
+      {twoHands && <span className="hand left">Left hand</span>}
+      <span className="hand right">Right hand</span>
+      <span className="hand next">Next chord</span>
+    </p>
+  );
+}
+
 /**
  * Soloing: midzer plays the solo, driven by the player's taps on the lit
  * keys, or fills around the player's own notes. How hard it is driven shows
  * big, so the player sees it follow them; how the player's own notes fit
- * shows under it.
+ * shows next to it. On keys the chords keep falling at the chord level, as a
+ * guide, so the player can still play them.
  */
 function SoloPlay({ split }: { split: number }) {
   const drums = useSession((s) => s.instrument === 'drums');
@@ -238,10 +246,16 @@ function KeysSoloPlay({ split }: { split: number }) {
           {prompt}
         </p>
       </div>
-      <div className="solo-feel">
+      {/* Smaller than on drums: the chords keep falling under it, as a guide. */}
+      <div className="solo-feel compact">
         <SoloFeel call={calling ? call : null} tapping={level <= 2} />
         {level >= 3 && <SoloFit fit={fit} snapped={level < 5} />}
       </div>
+      <div className="along-play-head solo-guide">
+        <p className="eyebrow">Chords</p>
+        <HandLegend />
+      </div>
+      <ChordLanes />
       <Keyboard split={split} height={150} />
     </section>
   );
@@ -482,14 +496,17 @@ function CallToggle() {
   );
 }
 
-/** How much to play along with the chords: one key up to full chords with both hands. */
-function LevelPicker() {
+/**
+ * How much to play along with the chords: one key up to full chords with both
+ * hands. While soloing, the chords falling show at this level as a guide.
+ */
+function LevelPicker({ label }: { label: string }) {
   const level = useSession((s) => s.alongLevel);
   const current = ALONG_LEVELS.find((l) => l.level === level)!;
   return (
     <div className="control-group">
       <p className="label" id="along-level-label">
-        Level
+        {label}
       </p>
       <div className="segmented" role="group" aria-labelledby="along-level-label">
         {ALONG_LEVELS.map((l) => (

@@ -2323,6 +2323,28 @@ code {
   padding: var(--space-4) var(--space-6);
 }
 
+/* On keys the chords fall below it: one row, the word smaller. */
+.solo-feel.compact {
+  flex: none;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: var(--space-2) var(--space-6);
+}
+
+.solo-feel.compact .solo-feel-word {
+  font-size: clamp(1.25rem, 3vw, 1.75rem);
+}
+
+.solo-feel.compact .solo-feel-track {
+  flex: 1;
+  min-width: 120px;
+}
+
+.along-play-head.solo-guide {
+  padding-top: 0;
+}
+
 .solo-feel-word {
   margin: 0;
   text-align: center;

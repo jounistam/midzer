@@ -218,7 +218,10 @@ test('play along: a solo driven by tapping one key', async ({ page }) => {
   await page.getByRole('button', { name: 'Keys', exact: true }).click();
   await page.getByRole('button', { name: 'Solo', exact: true }).click();
   await expect(page.getByTestId('solo-level')).toContainText('One key');
-  await expect(page.getByTestId('chord-lanes')).toHaveCount(0);
+  // The chords keep falling, at the chord level picked, as a guide.
+  await expect(page.getByTestId('chord-lanes')).toBeVisible();
+  await page.getByRole('group', { name: 'Chord guide' }).getByRole('button', { name: '2', exact: true }).click();
+  await expect(page.getByTestId('along-level')).toContainText('Three keys');
 
   await page.getByRole('button', { name: 'Listen' }).click();
   // C then G: the home note is one of them, and it is the key to tap.
