@@ -257,7 +257,7 @@ impl Engine {
                 self.solo.silence(0, &mut self.events);
                 self.live.reset(self.now, &mut self.events);
             }
-            Command::SetSolo { level, call: _, lead_ms } => self.solo.set_level(level, lead_ms, &mut self.events),
+            Command::SetSolo { level, call, lead_ms } => self.solo.set_level(level, call, lead_ms, &mut self.events),
             Command::SoloHarmony { tonic, scale, chord } => self.solo.set_harmony(tonic, scale, chord),
             Command::LiveBar { frame, beats } => self.live.bar_ahead(frame, beats, self.now),
             Command::LiveGuide { frame, period, one, confidence, known } => self.live.guide(frame, period, one, confidence, known, self.now),
@@ -543,6 +543,7 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::chord::{Chord, Quality};
+    use crate::event::CallPhase;
 
     fn chord_events(events: &[Timed]) -> Vec<Option<Chord>> {
         events
@@ -1050,10 +1051,15 @@ mod tests {
     /// second 8, for three seconds, `keys` struck twice a beat. Returns the
     /// engine and its events.
     fn solo_over_clicks(level: u8, keys: &[u8]) -> (Engine, Vec<(u64, EngineEvent)>) {
+        solo_over_clicks_calling(level, false, keys, 12)
+    }
+
+    /// Like `solo_over_clicks`, with call and response on or off, for `seconds`.
+    fn solo_over_clicks_calling(level: u8, call: bool, keys: &[u8], seconds: u64) -> (Engine, Vec<(u64, EngineEvent)>) {
         let mut engine = Engine::new(48_000.0);
         engine.handle(Command::SetLiveOffset { ms: 0.0 });
         engine.handle(Command::SetLive { on: true });
-        engine.handle(Command::SetSolo { level, call: false, lead_ms: 20.0 });
+        engine.handle(Command::SetSolo { level, call, lead_ms: 20.0 });
         engine.handle(Command::SoloHarmony { tonic: 0, scale: 0b0010_1001_0101, chord: 0b0000_1001_0001 });
         let click = |f: u64| {
             let into = (f as f64 / 48_000.0 - 0.25).rem_euclid(0.5);
@@ -1062,7 +1068,7 @@ mod tests {
         let first_tap = 48_000 * 8;
         let mut events = Vec::new();
         let mut input = [0.0f32; 128];
-        for block in 0..(48_000 * 12 / 128) as u64 {
+        for block in 0..48_000 * seconds / 128 {
             let at = block * 128;
             for (i, x) in input.iter_mut().enumerate() {
                 *x = click(at + i as u64);
@@ -1103,6 +1109,20 @@ mod tests {
         engine.handle(Command::SetSolo { level: 0, call: false, lead_ms: 20.0 });
         engine.handle(Command::NoteOn { note: 61, velocity: 100 });
         assert!(engine.process(128).iter().any(|t| t.event == EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key: 61, velocity: 100 }));
+    }
+
+    #[test]
+    fn a_solo_calls_and_the_taps_answer() {
+        let (mut engine, events) = solo_over_clicks_calling(1, true, &[60], 16);
+        let phases: Vec<_> = events.iter().filter_map(|(_, e)| if let EngineEvent::SoloCall { phase, .. } = e { Some(*phase) } else { None }).collect();
+        for phase in [CallPhase::Listen, CallPhase::Answer, CallPhase::Scored] {
+            assert!(phases.contains(&phase), "{phase:?} in {phases:?}");
+        }
+        assert!(!player_notes(&events).is_empty(), "the call sounds");
+        assert!(!events.iter().any(|(_, e)| matches!(e, EngineEvent::KeysJudged { .. })), "taps aren't judged");
+        // Turning it off waits for a tap again.
+        engine.handle(Command::SetSolo { level: 1, call: false, lead_ms: 20.0 });
+        assert!(engine.process(128).iter().any(|t| matches!(t.event, EngineEvent::SoloCall { phase: CallPhase::Idle, .. })));
     }
 
     #[test]

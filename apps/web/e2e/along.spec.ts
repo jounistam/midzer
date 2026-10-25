@@ -256,9 +256,21 @@ test('play along: a solo driven by tapping one key', async ({ page }) => {
   await expect(page.getByTestId('solo-fit')).toContainText(/Chord tone|In the scale|Snapped/);
   await expect(page.getByTestId('solo-fit')).toContainText(/\b1 (chord|scale|snapped)/);
 
+  // Call and response: a note asks for a call, then the player answers it.
+  await page.getByRole('group', { name: 'Call and response' }).getByRole('button', { name: 'On', exact: true }).click();
+  await expect(page.getByTestId('solo-call')).toContainText('Play to start');
+  await expect(page.getByTestId('solo-prompt')).toContainText('play it back');
+  await page.keyboard.press('a');
+  await expect(page.getByTestId('solo-call')).toContainText('Listen', { timeout: 10_000 });
+  await expect(page.getByTestId('solo-call')).toContainText('Your turn', { timeout: 10_000 });
+  for (let i = 0; i < 3; i++) await page.keyboard.press('a');
+  await expect(page.getByTestId('solo-call-last')).toContainText(/Last answer: \d of \d/, { timeout: 10_000 });
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/18-play-along-call.png` });
+
   const prefs = await page.evaluate(() => JSON.parse(localStorage.getItem('midzer.prefs') ?? '{}'));
   expect(prefs.alongMode).toBe('solo');
   expect(prefs.soloLevel).toBe(3);
+  expect(prefs.soloCall).toBe(true);
   expect(errors).toEqual([]);
 });
 

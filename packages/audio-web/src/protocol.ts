@@ -479,7 +479,16 @@ export type EngineEvent =
   /** How much the player's taps drive the solo, 0..1. */
   | { type: 'soloFeel'; energy: number }
   /** A MIDI controller change, such as the solo's vibrato (CC1) on a long note. */
-  | { type: 'control'; channel: number; controller: number; value: number };
+  | { type: 'control'; channel: number; controller: number; value: number }
+  /**
+   * Call and response while soloing: the phase, the call's notes played or answered so far (`hit`, of `of`), and the
+   * key sounding in the call or to play next in the answer. A `scored` answer's `hit` is its score.
+   */
+  | { type: 'soloCall'; phase: CallPhase; hit: number; of: number; key: number | null };
+
+/** Where call and response is: waiting for a tap, midzer calling, the player answering, the answer just scored. */
+export type CallPhase = 'idle' | 'listen' | 'answer' | 'scored';
+const CALL_PHASES: readonly CallPhase[] = ['idle', 'listen', 'answer', 'scored'];
 
 /** An event plus the AudioContext frame at which it sounds. */
 export type TimedEvent = EngineEvent & { frame: number };
@@ -559,6 +568,10 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
       return { type: 'soloFeel', energy: (a & 0xff) / 255, frame };
     case 19:
       return { type: 'control', channel: (a >> 8) & 0xff, controller: a & 0xff, value: b & 0xff, frame };
+    case 20: {
+      const phase = CALL_PHASES[a & 0xff];
+      return phase ? { type: 'soloCall', phase, hit: (a >> 8) & 0xff, of: (a >> 16) & 0xff, key: b === NO_KEY ? null : b & 0xff, frame } : null;
+    }
     default:
       return null;
   }

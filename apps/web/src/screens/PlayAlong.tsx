@@ -12,7 +12,7 @@ import type { ChordNow } from '../playalong/chords';
 import { MISS_SOUND_OPTIONS } from '../playalong/feedback';
 import { ALONG_LEVELS } from '../playalong/levels';
 import { keyName } from '../playalong/scale';
-import { feelWord, homeKey, SOLO_LEVELS, type FitCount, type SoloLevel } from '../playalong/solo';
+import { feelWord, homeKey, SOLO_LEVELS, type CallNow, type FitCount, type SoloLevel } from '../playalong/solo';
 import { noteToQwerty } from '../qwerty';
 import { NOTE_NAMES } from '@midzer/audio-web';
 import { SYNC_TAPS } from '../playalong/sync';
@@ -36,6 +36,7 @@ import {
   setAlongMode,
   setInstrument,
   setMissSound,
+  setSoloCall,
   setSoloLevel,
   startLiveSource,
   startLiveSync,
@@ -76,6 +77,7 @@ export function PlayAlong() {
           <SoundPicker />
           {!drums && <ModePicker />}
           {!drums && (solo ? <SoloLevelPicker /> : <LevelPicker />)}
+          {solo && <CallToggle />}
           <BeatFixes />
           <SyncControl />
           <MissSoundControl />
@@ -214,8 +216,10 @@ function SoloPlay({ split }: { split: number }) {
   const feel = useSession((s) => s.soloFeel);
   const level = useSession((s) => s.soloLevel);
   const fit = useSession((s) => s.soloFit);
+  const calling = useSession((s) => s.soloCall);
+  const call = useSession((s) => s.soloCallNow);
   const locked = useSession((s) => s.liveSource.status === 'on' && s.liveTracker.locked);
-  const prompt = !locked ? 'The solo starts once the beat is found.' : key === null ? 'Listening for the song’s key…' : soloPrompt(level, homeKey(key));
+  const prompt = !locked ? 'The solo starts once the beat is found.' : key === null ? 'Listening for the song’s key…' : calling ? callPrompt(level, homeKey(key)) : soloPrompt(level, homeKey(key));
   return (
     <section className="panel along-play solo-play">
       <div className="along-play-head">
@@ -225,9 +229,13 @@ function SoloPlay({ split }: { split: number }) {
         </p>
       </div>
       <div className="solo-feel">
-        <p className="solo-feel-word" data-testid="solo-feel">
-          {feelWord(feel)}
-        </p>
+        {calling ? (
+          <CallStatus call={call} tapping={level <= 2} />
+        ) : (
+          <p className="solo-feel-word" data-testid="solo-feel">
+            {feelWord(feel)}
+          </p>
+        )}
         <div className="solo-feel-track" role="meter" aria-label="Feel" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(feel * 100)}>
           <div className="solo-feel-fill" style={{ width: `${Math.round(feel * 100)}%` }} />
         </div>
@@ -255,6 +263,34 @@ function soloPrompt(level: SoloLevel, home: number): string {
     case 5:
       return 'Play freely.';
   }
+}
+
+/** What to do with call and response on at `level`, with the home key `home`. */
+function callPrompt(level: SoloLevel, home: number): string {
+  const name = NOTE_NAMES[home % 12]!;
+  if (level === 1) return `Tap ${name} to hear a call, then tap its rhythm back on ${name}: each tap plays its next note.`;
+  if (level === 2) return 'Tap a lit key to hear a call, then tap its rhythm back on any of them: each tap plays its next note.';
+  return 'Play a note to hear a call, then play it back; the next note to play is lit.';
+}
+
+/** Call and response: listen to midzer's call, then answer it; the call's notes as dots, filled as they sound or are got. */
+function CallStatus({ call, tapping }: { call: CallNow; tapping: boolean }) {
+  const word = { idle: tapping ? 'Tap to start' : 'Play to start', listen: 'Listen', answer: 'Your turn' }[call.phase];
+  return (
+    <div className="solo-call" data-testid="solo-call">
+      <p className={`solo-feel-word solo-call-word ${call.phase}`}>{word}</p>
+      {call.phase !== 'idle' && (
+        <p className="solo-call-notes" aria-label={`${call.hit} of ${call.of}`}>
+          {Array.from({ length: call.of }, (_, i) => (
+            <span key={i} className={`solo-call-note ${i < call.hit ? 'on' : ''}`} />
+          ))}
+        </p>
+      )}
+      <p className="solo-call-last" data-testid="solo-call-last">
+        {call.last ? `Last answer: ${call.last.hit} of ${call.last.of}` : '\u00a0'}
+      </p>
+    </div>
+  );
 }
 
 /** How the player's own notes fit: chord tones, the scale, or off it. */
@@ -314,6 +350,26 @@ function SoloLevelPicker() {
       <p className="setting-note" data-testid="solo-level">
         <strong>{current.name}.</strong> {current.detail}
       </p>
+    </div>
+  );
+}
+
+/** Call and response while soloing: midzer plays a bar, the player answers it. */
+function CallToggle() {
+  const on = useSession((s) => s.soloCall);
+  return (
+    <div className="control-group">
+      <p className="label" id="solo-call-label">
+        Call and response
+      </p>
+      <div className="segmented" role="group" aria-labelledby="solo-call-label">
+        {[false, true].map((v) => (
+          <button key={String(v)} className={`seg ${on === v ? 'on' : ''}`} aria-pressed={on === v} onClick={() => setSoloCall(v)}>
+            {v ? 'On' : 'Off'}
+          </button>
+        ))}
+      </div>
+      <p className="setting-note">midzer plays a bar, you answer it in the next. The calls grow longer as you get them right.</p>
     </div>
   );
 }

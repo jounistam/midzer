@@ -61,6 +61,27 @@ pub enum EngineEvent {
     SoloFeel { energy: u8 },
     /// A MIDI controller change, such as the solo's vibrato (CC1) on a long note.
     Control { channel: u8, controller: u8, value: u8 },
+    /// Call and response while soloing: the phase, the call's notes played
+    /// or answered so far (`hit`, of `of`), and the key sounding in the call
+    /// or to play next in the answer. A `Scored` answer's `hit` is its score.
+    SoloCall { phase: CallPhase, hit: u8, of: u8, key: Option<u8> },
+}
+
+/// Where call and response is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallPhase {
+    /// Waiting for the player to tap before the next call.
+    Idle,
+    /// midzer plays the call.
+    Listen,
+    /// The player answers it.
+    Answer,
+    /// The answer was scored; the next phase follows at once.
+    Scored,
+}
+
+impl CallPhase {
+    const ALL: [CallPhase; 4] = [CallPhase::Idle, CallPhase::Listen, CallPhase::Answer, CallPhase::Scored];
 }
 
 /// What the band is doing, for the UI.
@@ -105,6 +126,7 @@ mod op {
     pub const LIVE_FORGOT: u32 = 17;
     pub const SOLO_FEEL: u32 = 18;
     pub const CONTROL: u32 = 19;
+    pub const SOLO_CALL: u32 = 20;
 }
 
 const NO_CHORD: u32 = 0xff;
@@ -147,6 +169,10 @@ impl EngineEvent {
             EngineEvent::SoloFeel { energy } => [op::SOLO_FEEL, energy as u32, 0, frame],
             EngineEvent::Control { channel, controller, value } => {
                 [op::CONTROL, (channel as u32) << 8 | controller as u32, value as u32, frame]
+            }
+            EngineEvent::SoloCall { phase, hit, of, key } => {
+                let phase = CallPhase::ALL.iter().position(|p| *p == phase).unwrap_or(0) as u32;
+                [op::SOLO_CALL, phase | (hit as u32) << 8 | (of as u32) << 16, key.map_or(NO_KEY, u32::from), frame]
             }
             EngineEvent::KeysJudged { ms, sixteenth, bar, chord } => {
                 let chord = match chord {
@@ -206,6 +232,12 @@ impl EngineEvent {
             op::LIVE_FORGOT => EngineEvent::LiveForgot,
             op::SOLO_FEEL => EngineEvent::SoloFeel { energy: byte(a) },
             op::CONTROL => EngineEvent::Control { channel: byte(a >> 8), controller: byte(a), value: byte(b) },
+            op::SOLO_CALL => EngineEvent::SoloCall {
+                phase: *CallPhase::ALL.get(byte(a) as usize)?,
+                hit: byte(a >> 8),
+                of: byte(a >> 16),
+                key: (b != NO_KEY).then_some(byte(b)),
+            },
             op::KEYS_JUDGED => EngineEvent::KeysJudged {
                 ms: f32::from_bits(a),
                 sixteenth: byte(b),
@@ -408,6 +440,8 @@ mod tests {
             EngineEvent::LiveForgot,
             EngineEvent::SoloFeel { energy: 201 },
             EngineEvent::Control { channel: 0, controller: 1, value: 64 },
+            EngineEvent::SoloCall { phase: CallPhase::Answer, hit: 3, of: 5, key: Some(67) },
+            EngineEvent::SoloCall { phase: CallPhase::Idle, hit: 0, of: 0, key: None },
         ] {
             assert_eq!(EngineEvent::decode(event.encode(42)), Some((event, 42)));
         }

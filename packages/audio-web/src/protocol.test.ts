@@ -170,6 +170,9 @@ describe('decodeEvent', () => {
     expect(decodeEvent(18, 255, 0, 4)).toEqual({ type: 'soloFeel', energy: 1, frame: 4 });
     expect(decodeEvent(19, (0 << 8) | 1, 64, 4)).toEqual({ type: 'control', channel: 0, controller: 1, value: 64, frame: 4 });
     expect(decodeEvent(17, 0, 0, 4)).toEqual({ type: 'liveForgot', frame: 4 });
+    expect(decodeEvent(20, 2 | (3 << 8) | (5 << 16), 67, 4)).toEqual({ type: 'soloCall', phase: 'answer', hit: 3, of: 5, key: 67, frame: 4 });
+    expect(decodeEvent(20, 0, 0xff, 4)).toEqual({ type: 'soloCall', phase: 'idle', hit: 0, of: 0, key: null, frame: 4 });
+    expect(decodeEvent(20, 9, 0xff, 4)).toBeNull();
   });
 
   it('decodes song positions', () => {

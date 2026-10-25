@@ -268,3 +268,64 @@ At level 1 the space bar also plays the lit key, and the lit key shows its QWERT
 - Calls can reuse `new_beat`/`pick` at a fixed moderate energy (around 0.45). Record the call's onsets (sixteenth `q`) and keys in a fixed array, then compare the answer's taps or own notes with the call within ±1/16.
 - Levels 1–2 answer by tapping: each tap plays the call's next note. Levels 3 and up play the notes themselves: light the next key to play with a new hint, or reuse `TAP_HINT`.
 - New event `SoloCall { phase, hit, of }`: next op 20 for the event and the TS mirror. Show "Listen" / "Your turn" / "4 of 5" in `SoloPlay`.
+
+### Slice 3: done (built 2026-10-25, to be committed by the user)
+**Engine (`solo.rs`)**
+- `set_level(level, call, lead_ms, out)` now takes `call`. Changing the level or `call` silences the solo. `engine.rs` passes `SetSolo.call` through.
+- Call-and-response state lives in `Solo`:
+  - `call`, `phase: CallPhase`, and `armed`;
+  - `call_notes: [(sixteenth into bar, key); MAX_CALL = 8]`, `call_len`, and `call_size` (the next call's length);
+  - `call_from` (the sixteenth `q` where the call's bar starts; the answer bar is `call_from + 16`);
+  - `answers: [(f32 sixteenths from the answer bar, key); MAX_ANSWER = 32]`, `answer_len`, and `unanswered`.
+- **Flow:**
+  - With `call` on, `process` calls `call_sixteenth` instead of `sixteenth` (at every level, including 4–5), so the free generator is off.
+  - At the start of each bar (`q % 4 == 0 && beat_in_bar == 0`), `call_bar` moves through the phases:
+    - from `Idle`, if `armed`, it goes to `next_call` (Listen);
+    - from Listen, once `q >= call_from + 16`, it goes to Answer;
+    - once `q >= call_from + 32`, it scores the answer (sends `Scored`), adjusts `call_size`, and starts `next_call` at the same `q`. After `UNANSWERED_REST` = 2 empty answers it calls `rest_calls` (back to Idle) instead.
+  - `rest_calls` also runs from `silence` and when the grid is lost. `silence` resets `call_size` to `FIRST_CALL` = 3.
+  - Bars are fixed at 4 beats (`BAR` = 16 sixteenths), as `Grid::beat_in_bar` is. The phase checks use `>=`, so a 1 that moves can't get the state machine stuck.
+- **`make_call(q)`:**
+  - The first note is on slot 0 (70 %) or slot 2. The other `call_size − 1` slots are drawn by weight from 1..=12 (`CALL_LAST`), with the weight `density(CALL_ENERGY = 0.45, pos, beat) + 0.05`, so beats and "and"s come first.
+  - Keys come from `pick()`. The energy is temporarily `CALL_ENERGY`, the steer is 0, and `pitch` starts at `home()`. The notes are strong (chord tones) on slots 0 and 8 and on the last note.
+  - In Listen, the call notes play through `note_on`, each lasting up to the next note (one beat at most) × 0.9. Each one also sends `SoloCall { Listen, hit: i+1, of, key }`.
+- **Answering:** `answered(key, now, grid, out)` is called from `press`.
+  - If Idle, it only arms.
+  - Otherwise it records the onset if `into` (sixteenths from the answer bar) is in `[-ANSWER_SLACK, 16 − ANSWER_SLACK)`, where `ANSWER_SLACK` = 0.75. Taps a little before the bar's 1, still in Listen, count.
+  - Levels 1–2: a driving key's tap plays `call_notes[i]` at once with the tap's velocity, held until the key is let go. `sounding` gets an infinite off-frame, and `release` ends it while `call` is on. Taps outside the window are silent. The hold → long-note logic is off while `call` is on (`update_energy` guard).
+  - Levels 3+: the own note plays as usual (snapped below 5), and the sounding key is recorded.
+- **`score()`:** for each call note, the nearest unused answer within the slack counts, and from level 3 it must also have the same pitch class. Answers beyond the call's length are subtracted. A full score makes the next call one note longer (up to 8). Under half (with at least one note answered) makes it one shorter (down to `MIN_CALL` = 2).
+- **Event:** `EngineEvent::SoloCall { phase: CallPhase, hit, of, key: Option<u8> }`, op 20: a = phase | hit<<8 | of<<16, b = key or 0xff.
+  - `CallPhase` (Idle, Listen, Answer, Scored) is in `event.rs` and exported from the crate root. `midzer-synth` ignores the event.
+  - Sent: Listen with `hit` 0 at the call's start; Listen per call note with its key; Answer at the answer bar and on each answer note, with `hit` = the running score and `key` = the next call key to play (levels 3+ only); Scored at the end; Idle from `rest_calls`.
+- **Tests:**
+  - `solo.rs` has the harness `call_and_response(solo, beats, start_key, answer_fn) -> Calls { calls, scores, notes, phases }`. It taps once at beat 0.5, then schedules `answer_fn(call)` when the call's last note arrives. Helpers: `calling(level)` and `echo(call, key)` (the call shifted a bar later).
+  - `solo.rs` tests: a call waits for a tap; calls are in the scale and on the grid, ending on a chord tone; tapping the rhythm scores fully, sounds the call's keys and grows the calls; late or extra taps score less; unanswered calls go Idle; from level 3 the notes count; the next key goes out at level 3.
+  - `engine.rs`: `solo_over_clicks_calling(level, call, keys, seconds)` and `a_solo_calls_and_the_taps_answer`.
+
+**UI**
+- `protocol.ts`: `soloCall` event and the `CallPhase` type (exported from `@midzer/audio-web`), decode case 20 and a test.
+- `playalong/solo.ts`:
+  - `CallNow`, `NO_CALL`, and `nextCall(now, event)`: `scored` only sets `last`, and `idle` clears everything;
+  - `soloHints(level, key, chord, callKey)` lights `callKey` with `TAP_HINT` from level 3, after the scale, so it wins.
+- `session.ts`:
+  - state `soloCallNow`, which the `soloCall` event updates (delayed to when it is heard);
+  - `sendSolo()` resets it to `NO_CALL`;
+  - `followLiveChords` passes `soloCallNow.key` to `soloHints` while `soloCall` is on.
+- `PlayAlong.tsx`:
+  - `CallToggle` (group "Call and response", Off/On) in the panel while soloing;
+  - in `SoloPlay`, `CallStatus` (testid `solo-call`) replaces the Feel word: "Tap/Play to start", "Listen" or "Your turn", the call's notes as dots (filled = played or got), and `solo-call-last` "Last answer: N of M";
+  - `callPrompt(level, home)` gives the prompt text. CSS is under `.solo-call*` in `index.css`.
+- e2e: the solo test in `along.spec.ts` now turns call on at level 3, presses `a` to arm, waits for Listen and then Your turn, presses `a` 3 times, and expects "Last answer". The prefs include `soloCall`.
+
+**Open after slice 3:**
+- Not tried by ear.
+- Calls are always 1 bar; 2-bar calls are not done.
+- The Feel meter still moves in call mode, but its word is hidden.
+- Taps during Listen (outside the slack) are silent on levels 1–2.
+- At levels 4–5 call mode still judges the strikes (as in slice 2).
+
+### Notes for slice 4 (replay my solo)
+- The plan's `SoloNote { key, velocity, bar, tick, own }` event isn't built yet. Emit it from `note_on`/`end_note` (midzer's notes, `own: false`) and from `own_note`/`end_own` plus the levels 1–2 answer taps (`own: true`). The bar and tick can come from the grid, using `beat_in_bar` and `g.sixteenth_at(t)`. Event op 21 is next.
+- The next command op after `SoloHarmony` (54) is 55; check `command.rs` `op` for the highest in use first.
+- Record in `session.ts` the way `judged` is kept per run (reset on `transport` playing).

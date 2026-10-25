@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHORD_TONE_HINT, feelWord, homeKey, noteFit, parseAlongMode, parseSoloLevel, SCALE_HINT, soloHints, TAP_HINT } from './solo';
+import { CHORD_TONE_HINT, feelWord, homeKey, NO_CALL, nextCall, noteFit, parseAlongMode, parseSoloLevel, SCALE_HINT, soloHints, TAP_HINT } from './solo';
 
 describe('solo levels', () => {
   it('lights the home note from middle C up at level 1', () => {
@@ -24,6 +24,27 @@ describe('solo levels', () => {
     // A minor pentatonic: A C D E G.
     expect([...soloHints(4, { tonic: 9, minor: true }).keys()].slice(0, 5)).toEqual([69, 72, 74, 76, 79]);
     expect(soloHints(5, { tonic: 0, minor: false }, cMajor).size).toBe(0);
+  });
+
+  it('lights the call’s note to play from level 3', () => {
+    const c = { tonic: 0, minor: false };
+    expect(soloHints(3, c, 0, 67).get(67)).toBe(TAP_HINT);
+    expect(soloHints(5, c, 0, 50)).toEqual(new Map([[50, TAP_HINT]]));
+    expect(soloHints(1, c, 0, 67).has(67)).toBe(false);
+  });
+
+  it('follows call and response, keeping the last score', () => {
+    const call = (phase: 'idle' | 'listen' | 'answer' | 'scored', hit: number, of: number, key: number | null = null) => ({ type: 'soloCall', phase, hit, of, key, frame: 0 }) as const;
+    let now = nextCall(NO_CALL, call('listen', 0, 3));
+    now = nextCall(now, call('listen', 1, 3, 64));
+    expect(now).toEqual({ phase: 'listen', hit: 1, of: 3, key: 64, last: null });
+    now = nextCall(now, call('answer', 0, 3, 60));
+    now = nextCall(now, call('scored', 2, 3));
+    expect(now.last).toEqual({ hit: 2, of: 3 });
+    expect(now.phase).toBe('answer');
+    now = nextCall(now, call('listen', 0, 3));
+    expect(now).toEqual({ phase: 'listen', hit: 0, of: 3, key: null, last: { hit: 2, of: 3 } });
+    expect(nextCall(now, call('idle', 0, 0))).toEqual(NO_CALL);
   });
 
   it('tells how a note fits', () => {

@@ -39,6 +39,7 @@ export {
   VARIATION_NAMES,
   type BandDrums,
   type BandState,
+  type CallPhase,
   type ChartSlot,
   type ChordInfo,
   type ChordSpec,

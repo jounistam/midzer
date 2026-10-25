@@ -53,7 +53,7 @@ import {
 import { pickProgression, progressionCommands } from './drums/progressions';
 import { ChordTimeline, keyHints, snapToBeats, type ChordNow, type HeardChord } from './playalong/chords';
 import { chordBits, KeyFollower, keyOf, pentatonic, type SongKey, type WeightedChord } from './playalong/scale';
-import { homeKey, NO_FIT, noteFit, parseAlongMode, parseSoloLevel, soloHints, SPACE_TAPS_TO, type AlongMode, type FitCount, type SoloLevel } from './playalong/solo';
+import { homeKey, NO_CALL, NO_FIT, nextCall, noteFit, parseAlongMode, parseSoloLevel, soloHints, SPACE_TAPS_TO, type AlongMode, type CallNow, type FitCount, type SoloLevel } from './playalong/solo';
 import { parseLevel, type AlongLevel } from './playalong/levels';
 import { MISS_SOUND_OPTIONS, missOf, playMiss, type MissSound } from './playalong/feedback';
 import type { JudgedHit } from './drums/judging';
@@ -249,6 +249,8 @@ interface SessionState {
   soloKey: SongKey | null;
   /** How the player's own notes (solo levels 3–5) fit the harmony, this run. */
   soloFit: FitCount;
+  /** Call and response now, while it is on. */
+  soloCallNow: CallNow;
   /** Inputs to play along with; names may be missing until audio input is allowed. */
   liveDevices: LiveDevice[];
   /** How much later the player hears each source than midzer does, in ms, by `liveSourceKey`. */
@@ -468,6 +470,7 @@ export const useSession = create<SessionState>(() => ({
   soloFeel: 0,
   soloKey: null,
   soloFit: NO_FIT,
+  soloCallNow: NO_CALL,
   liveDevices: [],
   liveOffsets: prefs.liveOffsets,
   missSound: prefs.missSound,
@@ -649,6 +652,9 @@ function onEngineEvent(event: TimedEvent, timeMs: number): void {
       break;
     case 'soloFeel':
       setTimeout(() => set({ soloFeel: event.energy }), delay);
+      break;
+    case 'soloCall':
+      setTimeout(() => set({ soloCallNow: nextCall(get().soloCallNow, event) }), delay);
       break;
     case 'songPosition': {
       live.songClock.ms = heardMs;
@@ -892,6 +898,8 @@ function soloing(): boolean {
 function sendSolo(): void {
   const { soloLevel, soloCall, outputLatencyMs } = get();
   send({ type: 'setSolo', level: soloing() ? soloLevel : 0, call: soloCall, leadMs: outputLatencyMs });
+  // A change starts call and response over.
+  set({ soloCallNow: NO_CALL });
   if (!soloing()) set({ soloFeel: 0 });
 }
 
@@ -1576,14 +1584,14 @@ function followLiveChords(on: boolean): void {
   if (!on) return;
   liveChordTimer = setInterval(() => {
     const ms = performance.now();
-    const { instrument, alongLevel, bpm, liveTracker, soloLevel } = get();
+    const { instrument, alongLevel, bpm, liveTracker, soloLevel, soloCall, soloCallNow } = get();
     // The next chord's keys show from a beat before it.
     const leadMs = liveTracker.locked && bpm > 0 ? 60_000 / bpm : 600;
     const spans = liveChords.window(ms - KEY_WINDOW_MS, ms + leadMs + 1, ms);
     // On the beats the player sees, like the falling chords.
     const snapped = liveTracker.locked && bpm > 0 ? snapToBeats(spans, live.beatClock.ms, 60_000 / bpm) : spans;
     const key = sendSoloHarmony(snapped, ms);
-    if (soloing()) setAlongHints(soloHints(soloLevel, key, soloHarmony.chord));
+    if (soloing()) setAlongHints(soloHints(soloLevel, key, soloHarmony.chord, soloCall ? soloCallNow.key : null));
     else setAlongHints(instrument === 'keys' ? keyHints(snapped, ms, alongLevel, leadMs) : new Map());
     const now = liveChords.at(ms);
     const shown = get().liveChord;

@@ -2,6 +2,7 @@
 // midzer solos up to playing every note yourself, and the keys each lights.
 // The solo itself is played by the engine (crates/midzer-core/src/solo.rs).
 
+import type { CallPhase, TimedEvent } from '@midzer/audio-web';
 import { pentatonic, type SongKey } from './scale';
 
 /** Play the chords heard, or solo over them. */
@@ -40,8 +41,11 @@ export const CHORD_TONE_HINT = 6;
 /** The levels where the space bar taps the home note. */
 export const SPACE_TAPS_TO = 2;
 
-/** The keys lit at `level` once the song's key is known; `chord` is the chord heard as pitch-class bits. */
-export function soloHints(level: SoloLevel, key: SongKey | null, chord = 0): Map<number, number> {
+/**
+ * The keys lit at `level` once the song's key is known; `chord` is the chord heard as pitch-class bits, `callKey`
+ * the call and response key sounding in the call or to play next (lit to tap).
+ */
+export function soloHints(level: SoloLevel, key: SongKey | null, chord = 0, callKey: number | null = null): Map<number, number> {
   const hints = new Map<number, number>();
   if (!key) return hints;
   const home = homeKey(key);
@@ -54,6 +58,8 @@ export function soloHints(level: SoloLevel, key: SongKey | null, chord = 0): Map
       if (scale & (1 << k % 12)) hints.set(k, chord & (1 << k % 12) ? CHORD_TONE_HINT : SCALE_HINT);
     }
   }
+  // Playing a call back, its next note is the key to play.
+  if (callKey !== null && level >= 3) hints.set(callKey, TAP_HINT);
   return hints;
 }
 
@@ -75,6 +81,24 @@ export interface FitCount {
 }
 
 export const NO_FIT: FitCount = { chord: 0, scale: 0, outside: 0, last: null };
+
+/** Call and response now: the phase, the call's notes played or answered so far, the key lit, and the last score. */
+export interface CallNow {
+  phase: Exclude<CallPhase, 'scored'>;
+  hit: number;
+  of: number;
+  key: number | null;
+  last: { hit: number; of: number } | null;
+}
+
+export const NO_CALL: CallNow = { phase: 'idle', hit: 0, of: 0, key: null, last: null };
+
+/** Call and response after a `soloCall` event: a score is kept as the last one, anything else is the phase now. */
+export function nextCall(now: CallNow, event: Extract<TimedEvent, { type: 'soloCall' }>): CallNow {
+  if (event.phase === 'scored') return { ...now, last: { hit: event.hit, of: event.of } };
+  // A tap asks for a call: what is shown waits for it, the last score with it.
+  return { phase: event.phase, hit: event.hit, of: event.of, key: event.key, last: event.phase === 'idle' ? null : now.last };
+}
 
 /** The feel meter's words, calm to fire. */
 export function feelWord(energy: number): string {

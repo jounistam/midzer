@@ -11,12 +11,18 @@
 //! scale, and midzer fills the gaps on the grid; on level 4 it only snaps;
 //! on level 5 the notes pass unchanged.
 //!
+//! With call and response on, midzer plays a one-bar call and the player
+//! answers it in the next bar: on levels 1–2 each tap plays the call's next
+//! note, so tapping its rhythm brings the lick back; from level 3 the player
+//! plays the notes. The answer is scored on rhythm, and from level 3 on the
+//! notes too, and the calls grow longer as the answers get them right.
+//!
 //! Notes come from the song's scale (a pentatonic the UI sends with the chord
 //! heard, see [`crate::Command::SoloHarmony`]), chord tones on the strong
 //! beats. Everything is fixed state: nothing allocates.
 
 use crate::engine::PLAYER_CHANNEL;
-use crate::event::{EngineEvent, EventBuffer};
+use crate::event::{CallPhase, EngineEvent, EventBuffer};
 
 /// The highest level the UI may ask for.
 pub const MAX_SOLO_LEVEL: u8 = 5;
@@ -57,6 +63,23 @@ const VIBRATO_BEATS: f64 = 1.0;
 const VIBRATO_DEPTH: f64 = 64.0;
 /// No key held, in the own-note map.
 const NONE: u8 = 0xff;
+/// A call's notes: the first call's, the fewest and the most.
+const FIRST_CALL: u8 = 3;
+const MIN_CALL: u8 = 2;
+const MAX_CALL: usize = 8;
+/// Calls are played at this energy, whatever the taps.
+const CALL_ENERGY: f32 = 0.45;
+/// A call's last note starts at this sixteenth of its bar at the latest, so
+/// the answer's last note is in before the next call.
+const CALL_LAST: u8 = 12;
+/// An answer's note counts for the call's within this many sixteenths.
+const ANSWER_SLACK: f64 = 0.75;
+/// The most notes of an answer counted.
+const MAX_ANSWER: usize = 32;
+/// After this many answers in a row with no notes the calls wait for a tap.
+const UNANSWERED_REST: u8 = 2;
+/// Sixteenths in a bar.
+const BAR: i64 = 16;
 
 /// What a key press did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +174,23 @@ pub struct Solo {
     feel_in: u32,
     feel_every: u32,
     feel: Option<u8>,
+    /// Call and response is on, and where it is.
+    call: bool,
+    phase: CallPhase,
+    /// A tap asked for a call.
+    armed: bool,
+    /// The call: each note's sixteenth into its bar, and its key.
+    call_notes: [(u8, u8); MAX_CALL],
+    call_len: u8,
+    /// How many notes the next call has; grows as the answers get them.
+    call_size: u8,
+    /// The sixteenth the call's bar starts on; the answer's bar follows it.
+    call_from: i64,
+    /// The answer's notes: sixteenths from the answer's bar, and keys.
+    answers: [(f32, u8); MAX_ANSWER],
+    answer_len: u8,
+    /// Answers in a row with no notes.
+    unanswered: u8,
 }
 
 impl Solo {
@@ -190,6 +230,16 @@ impl Solo {
             feel_in: 0,
             feel_every: (FEEL_EVERY_S * sample_rate) as u32,
             feel: None,
+            call: false,
+            phase: CallPhase::Idle,
+            armed: false,
+            call_notes: [(0, 0); MAX_CALL],
+            call_len: 0,
+            call_size: FIRST_CALL,
+            call_from: 0,
+            answers: [(0.0, 0); MAX_ANSWER],
+            answer_len: 0,
+            unanswered: 0,
         }
     }
 
@@ -197,12 +247,14 @@ impl Solo {
         self.level
     }
 
-    /// Turns the solo on at `level` (0 turns it off). `lead_ms` is how long
-    /// the output takes to be heard, so the notes are sent that much early.
-    pub fn set_level(&mut self, level: u8, lead_ms: f32, out: &mut EventBuffer) {
-        if level != self.level {
+    /// Turns the solo on at `level` (0 turns it off), with call and response
+    /// or not. `lead_ms` is how long the output takes to be heard, so the
+    /// notes are sent that much early.
+    pub fn set_level(&mut self, level: u8, call: bool, lead_ms: f32, out: &mut EventBuffer) {
+        if level != self.level || call != self.call {
             self.silence(0, out);
             self.level = level.min(MAX_SOLO_LEVEL);
+            self.call = call;
         }
         self.lead = lead_ms.clamp(0.0, MAX_LEAD_MS) as f64 / 1000.0 * self.sample_rate as f64;
     }
@@ -235,7 +287,11 @@ impl Solo {
             return Pressed::Free;
         }
         if self.level >= OWN_NOTES_FROM {
-            return self.own_note(key, velocity, now, grid, out);
+            let pressed = self.own_note(key, velocity, now, grid, out);
+            if let (true, Pressed::Played(sound), Some(grid)) = (self.call, pressed, grid) {
+                self.answered(sound, now, grid, out);
+            }
+            return pressed;
         }
         let Some(steer) = self.steer_of(key) else {
             // Only the lit keys drive the solo.
@@ -243,6 +299,21 @@ impl Solo {
         };
         self.held = Some((key, now));
         let Some(grid) = grid else { return Pressed::Drove };
+        if self.call {
+            self.tap(velocity, now, grid);
+            if let Some(i) = self.answered(key, now, grid, out)
+                && i < self.call_len as usize
+            {
+                // The call's next note, for as long as the key is held.
+                let key = self.call_notes[i].1;
+                self.end_note(now as f64, now, out);
+                out.push(0, EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key, velocity });
+                self.sounding = Some((key, f64::INFINITY));
+                self.last_note = now as f64;
+                self.pitch = key;
+            }
+            return Pressed::Drove;
+        }
         self.steer = steer;
         self.tap(velocity, now, grid);
         if (now as f64 - self.last_note) / grid.period > PICKUP_AFTER_BEATS {
@@ -346,6 +417,10 @@ impl Solo {
         self.end_own(key, now, out);
         if self.held.is_some_and(|(held, _)| held == key) {
             self.held = None;
+            if self.call && self.sounding.is_some_and(|(_, off)| off == f64::INFINITY) {
+                // An answer's note ends with its tap.
+                self.end_note(now as f64, now, out);
+            }
             if self.long == Long::Sounding {
                 self.end_note(now as f64, now, out);
             }
@@ -382,6 +457,18 @@ impl Solo {
         self.rest_left = 0;
         self.mask = 0;
         self.ending = false;
+        self.rest_calls(at, out);
+        self.call_size = FIRST_CALL;
+    }
+
+    /// Call and response waits for a tap again.
+    fn rest_calls(&mut self, at: u32, out: &mut EventBuffer) {
+        self.armed = false;
+        self.answer_len = 0;
+        self.unanswered = 0;
+        if std::mem::replace(&mut self.phase, CallPhase::Idle) != CallPhase::Idle {
+            out.push(at, EngineEvent::SoloCall { phase: CallPhase::Idle, hit: 0, of: 0, key: None });
+        }
     }
 
     /// Plays this block's notes on `grid`, the beats the player hears (none
@@ -402,8 +489,12 @@ impl Solo {
             };
             while g.frame(q) - lead < end {
                 let t = g.frame(q) - lead;
-                if t >= now as f64 && self.level < JUDGED_FROM {
-                    self.sixteenth(q, t, now, &g, out);
+                if t >= now as f64 {
+                    if self.call {
+                        self.call_sixteenth(q, t, now, &g, out);
+                    } else if self.level < JUDGED_FROM {
+                        self.sixteenth(q, t, now, &g, out);
+                    }
                 }
                 q += 1;
             }
@@ -413,6 +504,7 @@ impl Solo {
         } else {
             self.next = None;
             self.energy = 0.0;
+            self.rest_calls(0, out);
         }
         self.feel_in = self.feel_in.saturating_sub(frames);
         if self.feel_in == 0 {
@@ -457,7 +549,7 @@ impl Solo {
     }
 
     fn update_energy(&mut self, frames: u32, now: u64, g: Grid) {
-        if self.held.is_some_and(|(_, since)| (now - since) as f64 / g.period >= HOLD_BEATS) && self.long == Long::None {
+        if !self.call && self.held.is_some_and(|(_, since)| (now - since) as f64 / g.period >= HOLD_BEATS) && self.long == Long::None {
             self.long = Long::Waiting;
         }
         if self.long != Long::None {
@@ -512,6 +604,148 @@ impl Solo {
         if ending {
             self.ending = false;
         }
+    }
+
+    /// Sixteenth `q` with call and response on: a new phase on each bar's 1,
+    /// and the call's notes while it plays.
+    fn call_sixteenth(&mut self, q: i64, t: f64, now: u64, g: &Grid, out: &mut EventBuffer) {
+        let at = (t - now as f64).max(0.0) as u32;
+        if q.rem_euclid(4) == 0 && g.beat_in_bar(q) == 0 {
+            self.call_bar(q, at, out);
+        }
+        if self.phase != CallPhase::Listen {
+            return;
+        }
+        let into = q - self.call_from;
+        let len = self.call_len as usize;
+        let Some(i) = self.call_notes[..len].iter().position(|n| n.0 as i64 == into) else { return };
+        let key = self.call_notes[i].1;
+        // Up to the next note, a beat at most.
+        let gap = self.call_notes.get(i + 1).filter(|_| i + 1 < len).map_or(4, |n| (n.0 as i64 - into).min(4));
+        self.note_on(key, (into % 4) as u8, t, now, gap as f64 * 0.9 * g.period / 4.0, out);
+        out.push(at, EngineEvent::SoloCall { phase: CallPhase::Listen, hit: i as u8 + 1, of: self.call_len, key: Some(key) });
+    }
+
+    /// A bar starts on sixteenth `q`: the call, the answer, or the answer's score and the next call.
+    fn call_bar(&mut self, q: i64, at: u32, out: &mut EventBuffer) {
+        match self.phase {
+            CallPhase::Idle if self.armed => {
+                self.armed = false;
+                self.next_call(q, at, out);
+            }
+            CallPhase::Listen if q >= self.call_from + BAR => {
+                self.phase = CallPhase::Answer;
+                out.push(at, self.answer_event());
+            }
+            CallPhase::Answer | CallPhase::Scored if q >= self.call_from + 2 * BAR => {
+                let hit = self.score();
+                let of = self.call_len;
+                out.push(at, EngineEvent::SoloCall { phase: CallPhase::Scored, hit, of, key: None });
+                self.unanswered = if self.answer_len == 0 { self.unanswered + 1 } else { 0 };
+                if hit == of {
+                    self.call_size = (self.call_size + 1).min(MAX_CALL as u8);
+                } else if hit * 2 < of && self.answer_len > 0 {
+                    self.call_size = (self.call_size - 1).max(MIN_CALL);
+                }
+                if self.unanswered >= UNANSWERED_REST {
+                    self.rest_calls(at, out);
+                } else {
+                    self.next_call(q, at, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn next_call(&mut self, q: i64, at: u32, out: &mut EventBuffer) {
+        self.make_call(q);
+        self.answer_len = 0;
+        self.phase = CallPhase::Listen;
+        out.push(at, EngineEvent::SoloCall { phase: CallPhase::Listen, hit: 0, of: self.call_len, key: None });
+    }
+
+    /// Makes up a call of `call_size` notes for the bar from sixteenth `q`:
+    /// on the 1 or its "and", then mostly on the beats and their "and"s,
+    /// from the home note along the scale, ending on a chord tone.
+    fn make_call(&mut self, q: i64) {
+        self.call_from = q;
+        let size = self.call_size as usize;
+        let mut slots = [false; CALL_LAST as usize + 1];
+        slots[if self.chance(0.7) { 0 } else { 2 }] = true;
+        for _ in 1..size {
+            let weight = |slot: usize| density(CALL_ENERGY, (slot % 4) as u8, (slot / 4) as i64) + 0.05;
+            let total: f32 = (1..slots.len()).filter(|&s| !slots[s]).map(weight).sum();
+            let mut r = self.unit() * total;
+            for (slot, on) in slots.iter_mut().enumerate().skip(1) {
+                if *on {
+                    continue;
+                }
+                r -= weight(slot);
+                if r <= 0.0 {
+                    *on = true;
+                    break;
+                }
+            }
+        }
+        let energy = std::mem::replace(&mut self.energy, CALL_ENERGY);
+        let steer = std::mem::take(&mut self.steer);
+        self.pitch = self.home();
+        let mut len = 0;
+        for (slot, _) in slots.iter().enumerate().filter(|(_, on)| **on) {
+            let last = len + 1 == slots.iter().filter(|on| **on).count();
+            let key = self.pick(slot % 8 == 0 || last);
+            self.call_notes[len] = (slot as u8, key);
+            len += 1;
+        }
+        self.call_len = len as u8;
+        self.energy = energy;
+        self.steer = steer;
+    }
+
+    /// The player played `key` at frame `now`: part of the answer if it is
+    /// due, or a call asked for. Returns which note of the answer it is.
+    fn answered(&mut self, key: u8, now: u64, g: Grid, out: &mut EventBuffer) -> Option<usize> {
+        if self.phase == CallPhase::Idle {
+            self.armed = true;
+            return None;
+        }
+        let into = g.sixteenth_at(now as f64) - (self.call_from + BAR) as f64;
+        let i = self.answer_len as usize;
+        if !(-ANSWER_SLACK..BAR as f64 - ANSWER_SLACK).contains(&into) || i >= MAX_ANSWER {
+            return None;
+        }
+        // Tapping, the note is the call's; playing, the player's own.
+        let key = if self.level >= OWN_NOTES_FROM { key } else { self.call_notes.get(i).filter(|_| i < self.call_len as usize).map_or(NONE, |n| n.1) };
+        self.answers[i] = (into as f32, key);
+        self.answer_len += 1;
+        out.push(0, self.answer_event());
+        Some(i)
+    }
+
+    /// The answer so far, with the key to play next from level 3.
+    fn answer_event(&self) -> EngineEvent {
+        let i = self.answer_len as usize;
+        let key = (self.level >= OWN_NOTES_FROM && i < self.call_len as usize).then(|| self.call_notes[i].1);
+        EngineEvent::SoloCall { phase: CallPhase::Answer, hit: self.score(), of: self.call_len, key }
+    }
+
+    /// The call's notes the answer got: each answered within the slack, on
+    /// the same note from level 3; notes beyond the call's count against it.
+    fn score(&self) -> u8 {
+        let answers = &self.answers[..self.answer_len as usize];
+        let mut used = [false; MAX_ANSWER];
+        let mut hit = 0u8;
+        for &(slot, key) in &self.call_notes[..self.call_len as usize] {
+            let best = (0..answers.len())
+                .filter(|&j| !used[j] && (answers[j].0 - slot as f32).abs() as f64 <= ANSWER_SLACK)
+                .filter(|&j| self.level < OWN_NOTES_FROM || answers[j].1 % 12 == key % 12)
+                .min_by(|&a, &b| (answers[a].0 - slot as f32).abs().total_cmp(&(answers[b].0 - slot as f32).abs()));
+            if let Some(j) = best {
+                used[j] = true;
+                hit += 1;
+            }
+        }
+        hit.saturating_sub(self.answer_len.saturating_sub(self.call_len))
     }
 
     /// Decides what this beat plays: part of a phrase, a rest between
@@ -692,7 +926,12 @@ impl Solo {
     }
 
     fn chance(&mut self, p: f32) -> bool {
-        ((self.next_random() >> 8) as f32 / (1u32 << 24) as f32) < p
+        self.unit() < p
+    }
+
+    /// A random number in 0..1.
+    fn unit(&mut self) -> f32 {
+        (self.next_random() >> 8) as f32 / (1u32 << 24) as f32
     }
 
     fn below(&mut self, n: u32) -> u32 {
@@ -749,7 +988,7 @@ mod tests {
     fn solo() -> Solo {
         let mut solo = Solo::new(SR);
         solo.seed(7);
-        solo.set_level(1, 0.0, &mut EventBuffer::default());
+        solo.set_level(1, false, 0.0, &mut EventBuffer::default());
         // C major pentatonic over C.
         solo.set_harmony(0, 0b0010_1001_0101, 0b0000_1001_0001);
         solo
@@ -899,7 +1138,7 @@ mod tests {
 
     fn at_level(level: u8) -> Solo {
         let mut s = solo();
-        s.set_level(level, 0.0, &mut EventBuffer::default());
+        s.set_level(level, false, 0.0, &mut EventBuffer::default());
         s
     }
 
@@ -1047,6 +1286,187 @@ mod tests {
         assert!((energy_of(1.0) - 0.5).abs() < 1e-6);
         assert!((energy_of(2.0) - 0.75).abs() < 1e-6);
         assert_eq!(energy_of(8.0), 1.0);
+    }
+
+    /// What call and response did: each call's notes (frame, key), each
+    /// score (hit, of), every note played, and the phases in order.
+    #[derive(Default)]
+    struct Calls {
+        calls: Vec<Vec<(u64, u8)>>,
+        scores: Vec<(u8, u8)>,
+        notes: Vec<Played>,
+        phases: Vec<CallPhase>,
+    }
+
+    /// Runs call and response for `beats`: one tap on `start` at beat 0.5
+    /// asks for a call, then the player answers each call with the notes
+    /// `answer` makes of it (frame, key), each held a tenth of a beat.
+    fn call_and_response(solo: &mut Solo, beats: f64, start: u8, answer: impl Fn(&[(u64, u8)]) -> Vec<(u64, u8)>) -> Calls {
+        let mut got = Calls::default();
+        let mut presses: Vec<(u64, u8)> = vec![((0.5 * PERIOD) as u64, start)];
+        let mut releases: Vec<(u64, u8)> = Vec::new();
+        let mut open: Vec<(u8, u64, u8)> = Vec::new();
+        let mut now = 0u64;
+        while now < (beats * PERIOD) as u64 {
+            let mut out = EventBuffer::default();
+            releases.retain(|&(r, key)| r >= now + BLOCK as u64 || !solo.release(key, now, &mut out));
+            presses.retain(|&(at, key)| {
+                if at >= now + BLOCK as u64 {
+                    return true;
+                }
+                solo.press(key, 100, now, Some(GRID), &mut out);
+                releases.push((at + (0.1 * PERIOD) as u64, key));
+                false
+            });
+            solo.process(BLOCK, now, Some(GRID), &mut out);
+            out.sort();
+            for t in out.as_slice() {
+                let at = now + t.frame as u64;
+                match t.event {
+                    EngineEvent::NoteOn { key, velocity, .. } => open.push((key, at, velocity)),
+                    EngineEvent::NoteOff { key, .. } => {
+                        if let Some(i) = open.iter().position(|o| o.0 == key) {
+                            let (key, from, velocity) = open.remove(i);
+                            got.notes.push((from, at, key, velocity));
+                        }
+                    }
+                    EngineEvent::SoloCall { phase, hit, of, key } => {
+                        if got.phases.last() != Some(&phase) {
+                            got.phases.push(phase);
+                        }
+                        match (phase, key) {
+                            (CallPhase::Listen, None) => got.calls.push(Vec::new()),
+                            (CallPhase::Listen, Some(key)) => {
+                                let call = got.calls.last_mut().unwrap();
+                                call.push((at, key));
+                                if hit == of {
+                                    presses.extend(answer(call));
+                                }
+                            }
+                            (CallPhase::Scored, _) => got.scores.push((hit, of)),
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            now += BLOCK as u64;
+        }
+        got.notes.sort();
+        got
+    }
+
+    fn calling(level: u8) -> Solo {
+        let mut s = solo();
+        s.set_level(level, true, 0.0, &mut EventBuffer::default());
+        s
+    }
+
+    /// The call's notes a bar later, on `key` (or the call's own keys).
+    fn echo(call: &[(u64, u8)], key: Option<u8>) -> Vec<(u64, u8)> {
+        call.iter().map(|&(at, k)| (at + (4.0 * PERIOD) as u64, key.unwrap_or(k))).collect()
+    }
+
+    #[test]
+    fn a_call_waits_for_a_tap() {
+        let mut s = calling(1);
+        assert!(run(&mut s, 12.0, &[], 0).is_empty());
+        let got = call_and_response(&mut calling(1), 12.0, 60, |_| Vec::new());
+        assert_eq!(got.phases.first(), Some(&CallPhase::Listen), "one tap asks for a call");
+        assert_eq!(got.calls[0].first().map(|c| c.0), Some((4.0 * PERIOD) as u64), "on the next bar's 1, or its \"and\"");
+    }
+
+    #[test]
+    fn calls_are_one_bar_of_the_scale_on_the_grid() {
+        for seed in 1..=8 {
+            let mut s = calling(1);
+            s.seed(seed);
+            let got = call_and_response(&mut s, 40.0, 60, |call| echo(call, Some(60)));
+            assert!(got.calls.len() >= 4);
+            for call in &got.calls {
+                let bar = call[0].0 / (4 * PERIOD as u64) * (4 * PERIOD as u64);
+                assert!(call.len() >= MIN_CALL as usize && call.len() <= MAX_CALL);
+                for &(at, key) in call {
+                    let q = (at - bar) as f64 / (PERIOD / 4.0);
+                    assert!((q - q.round()).abs() < 0.01 && q <= CALL_LAST as f64, "call note at sixteenth {q}");
+                    assert!([0, 2, 4, 7, 9].contains(&(key % 12)), "key {key} off the scale");
+                }
+                assert!([0, 4, 7].contains(&(call.last().unwrap().1 % 12)), "ends on a chord tone: {call:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn tapping_the_calls_rhythm_plays_it_back_and_the_calls_grow() {
+        let got = call_and_response(&mut calling(1), 44.0, 60, |call| echo(call, Some(60)));
+        assert!(got.scores.len() >= 4, "{:?}", got.phases);
+        assert!(got.scores.iter().all(|&(hit, of)| hit == of), "every note answered: {:?}", got.scores);
+        assert!(got.scores.windows(2).all(|w| w[1].1 == w[0].1 + 1), "each call a note longer: {:?}", got.scores);
+        // The taps sound the call's notes.
+        for (call, _) in got.calls.iter().zip(&got.scores) {
+            for &(at, key) in &echo(call, None) {
+                assert!(got.notes.iter().any(|n| n.2 == key && n.0 <= at && at < n.0 + BLOCK as u64), "the call's {key} at {at}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_answer_off_the_rhythm_scores_less() {
+        let late = |call: &[(u64, u8)]| echo(call, Some(60)).into_iter().map(|(at, k)| (at + (PERIOD / 2.0) as u64, k)).collect();
+        let got = call_and_response(&mut calling(1), 44.0, 60, late);
+        let (hit, of) = got.scores.iter().fold((0, 0), |s, &(h, o)| (s.0 + h as u32, s.1 + o as u32));
+        assert!(hit * 2 < of, "an eighth late: {hit} of {of}");
+        assert!(got.scores.last().unwrap().1 <= FIRST_CALL, "the calls stay short: {:?}", got.scores);
+        let doubled = |call: &[(u64, u8)]| echo(call, Some(60)).into_iter().flat_map(|(at, k)| [(at, k), (at + (PERIOD / 4.0) as u64 * 3 / 2, k)]).collect();
+        let got = call_and_response(&mut calling(1), 20.0, 60, doubled);
+        assert!(got.scores.iter().all(|&(hit, of)| hit < of), "extra notes count against: {:?}", got.scores);
+    }
+
+    #[test]
+    fn unanswered_calls_wait_for_a_tap_again() {
+        let got = call_and_response(&mut calling(2), 40.0, 67, |_| Vec::new());
+        assert_eq!(got.scores, [(0, FIRST_CALL), (0, FIRST_CALL)]);
+        assert_eq!(got.phases.last(), Some(&CallPhase::Idle));
+        let last = got.notes.last().unwrap().0 as f64 / PERIOD;
+        assert!(last < 16.0, "silent after: last note at beat {last}");
+    }
+
+    #[test]
+    fn from_level_three_the_answer_is_the_notes() {
+        let got = call_and_response(&mut calling(3), 44.0, 60, |call| echo(call, None));
+        assert!(got.scores.len() >= 4 && got.scores.iter().all(|&(hit, of)| hit == of), "the call's notes: {:?}", got.scores);
+        let (mut hit, mut of) = (0, 0);
+        for seed in 1..=4 {
+            let mut s = calling(3);
+            s.seed(seed);
+            // The call's rhythm, a scale step up.
+            let up = |call: &[(u64, u8)]| echo(call, None).into_iter().map(|(at, k)| (at, k + if [4, 9].contains(&(k % 12)) { 3 } else { 2 })).collect();
+            for (h, o) in call_and_response(&mut s, 30.0, 60, up).scores {
+                hit += h as u32;
+                of += o as u32;
+            }
+        }
+        assert!(hit * 4 < of, "the wrong notes: {hit} of {of}");
+    }
+
+    #[test]
+    fn the_key_to_play_next_goes_out_from_level_three() {
+        let mut s = calling(3);
+        let mut out = EventBuffer::default();
+        s.press(60, 90, 0, Some(GRID), &mut out);
+        s.process(BLOCK, 0, Some(GRID), &mut out);
+        let mut now = BLOCK as u64;
+        let mut answer_keys = Vec::new();
+        while now < (8.5 * PERIOD) as u64 {
+            let mut out = EventBuffer::default();
+            s.process(BLOCK, now, Some(GRID), &mut out);
+            answer_keys.extend(out.as_slice().iter().filter_map(|t| match t.event {
+                EngineEvent::SoloCall { phase: CallPhase::Answer, key, .. } => Some(key),
+                _ => None,
+            }));
+            now += BLOCK as u64;
+        }
+        assert_eq!(answer_keys, [Some(s.call_notes[0].1)]);
     }
 
     #[test]

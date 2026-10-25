@@ -32,6 +32,6 @@ pub use drummer::COUNT_IN_HITS;
 pub use drums::{Instrument, Kit, KitAction, Piece, Trigger};
 pub use song::{MAX_SONG_BARS, Slot};
 pub use engine::{Engine, PLAYER_CHANNEL};
-pub use event::{BandState, DRUM_CHANNEL, MIC_CHANNEL, PLAYER_DRUM_CHANNEL, EngineEvent, EventBuffer, MAX_EVENTS_PER_BLOCK, Timed, WORDS_PER_EVENT};
+pub use event::{BandState, CallPhase, DRUM_CHANNEL, MIC_CHANNEL, PLAYER_DRUM_CHANNEL, EngineEvent, EventBuffer, MAX_EVENTS_PER_BLOCK, Timed, WORDS_PER_EVENT};
 pub use listen::{Heard, HeardList, ListenMode, Listener};
 pub use tracker::{BeatList, BeatTracker, TrackedBeat};

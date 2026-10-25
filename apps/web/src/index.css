@@ -2348,6 +2348,48 @@ code {
   transition: width var(--motion-duration-fast);
 }
 
+/* Call and response: the phase big, the call's notes as dots, the last score. */
+.solo-call {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.solo-call p {
+  margin: 0;
+}
+
+.solo-call-word.listen {
+  color: var(--color-accent-default);
+}
+
+.solo-call-word.answer {
+  color: var(--color-primary-default);
+}
+
+.solo-call-notes {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.solo-call-note {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--color-text-muted);
+}
+
+.solo-call-note.on {
+  border-color: var(--color-note-melody);
+  background: var(--color-note-melody);
+}
+
+.solo-call-last {
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
 /* The player's own notes while soloing: chord tones, the scale, outside. */
 .solo-fit {
   text-align: center;
