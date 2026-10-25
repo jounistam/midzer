@@ -9,7 +9,7 @@ use crate::event::{EngineEvent, EventBuffer, MIC_CHANNEL, PLAYER_DRUM_CHANNEL, T
 use crate::listen::{Heard, HeardList, ListenMode, Listener};
 use crate::live::Live;
 use crate::melody::MelodyNote;
-use crate::solo::Solo;
+use crate::solo::{Pressed, Solo};
 
 /// MIDI channel for the player's own notes.
 pub const PLAYER_CHANNEL: u8 = 0;
@@ -100,9 +100,12 @@ impl Engine {
             Command::NoteOff { .. } if drums => {}
             Command::NoteOn { note, velocity } if solo && velocity > 0 => {
                 let grid = self.live.grid();
-                if self.solo.press(note, velocity, self.now, grid, &mut self.events) && grid.is_some() {
+                match self.solo.press(note, velocity, self.now, grid, &mut self.events) {
+                    // Playing every note: judged like playing along.
+                    Pressed::Played(key) if self.solo.judged() => self.strike_note(key),
                     // The solo's run, timed like the player's own.
-                    self.live.play(self.now, &mut self.events);
+                    Pressed::Drove | Pressed::Played(_) if grid.is_some() => self.live.play(self.now, &mut self.events),
+                    _ => {}
                 }
             }
             Command::NoteOn { note, .. } | Command::NoteOff { note } if solo => {
@@ -1043,12 +1046,14 @@ mod tests {
         assert!(!engine.is_playing());
     }
 
-    #[test]
-    fn a_solo_takes_the_keys_over_live_audio() {
+    /// Twelve seconds of clicks at 120 BPM with the solo on at `level`; from
+    /// second 8, for three seconds, `keys` struck twice a beat. Returns the
+    /// engine and its events.
+    fn solo_over_clicks(level: u8, keys: &[u8]) -> (Engine, Vec<(u64, EngineEvent)>) {
         let mut engine = Engine::new(48_000.0);
         engine.handle(Command::SetLiveOffset { ms: 0.0 });
         engine.handle(Command::SetLive { on: true });
-        engine.handle(Command::SetSolo { level: 1, call: false, lead_ms: 20.0 });
+        engine.handle(Command::SetSolo { level, call: false, lead_ms: 20.0 });
         engine.handle(Command::SoloHarmony { tonic: 0, scale: 0b0010_1001_0101, chord: 0b0000_1001_0001 });
         let click = |f: u64| {
             let into = (f as f64 / 48_000.0 - 0.25).rem_euclid(0.5);
@@ -1062,21 +1067,33 @@ mod tests {
             for (i, x) in input.iter_mut().enumerate() {
                 *x = click(at + i as u64);
             }
-            // The home note twice a beat for three seconds, and a key that isn't it.
             if at >= first_tap && at < first_tap + 48_000 * 3 && at % 12_000 < 128 {
-                engine.handle(Command::NoteOn { note: 60, velocity: 100 });
-                engine.handle(Command::NoteOn { note: 61, velocity: 100 });
+                for &note in keys {
+                    engine.handle(Command::NoteOn { note, velocity: 100 });
+                }
             }
             if at % 12_000 >= 2_000 && at % 12_000 < 2_128 {
-                engine.handle(Command::NoteOff { note: 60 });
-                engine.handle(Command::NoteOff { note: 61 });
+                for &note in keys {
+                    engine.handle(Command::NoteOff { note });
+                }
             }
             engine.listen_live(&input);
             events.extend(engine.process(128).iter().map(|t| (at + t.frame as u64, t.event)));
             engine.end_block();
         }
-        let notes: Vec<_> = events.iter().filter_map(|(f, e)| if let EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key, .. } = e { Some((*f, *key)) } else { None }).collect();
-        assert!(notes.first().is_some_and(|n| n.0 >= first_tap), "nothing before the taps");
+        (engine, events)
+    }
+
+    fn player_notes(events: &[(u64, EngineEvent)]) -> Vec<(u64, u8)> {
+        events.iter().filter_map(|(f, e)| if let EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key, .. } = e { Some((*f, *key)) } else { None }).collect()
+    }
+
+    #[test]
+    fn a_solo_takes_the_keys_over_live_audio() {
+        // The home note, and a key that isn't it.
+        let (mut engine, events) = solo_over_clicks(1, &[60, 61]);
+        let notes = player_notes(&events);
+        assert!(notes.first().is_some_and(|n| n.0 >= 48_000 * 8), "nothing before the taps");
         assert!(notes.len() > 12, "the taps play a solo: {notes:?}");
         assert!(notes.iter().all(|n| n.1 != 61), "the key that isn't the home note stays silent");
         assert!(events.iter().any(|(_, e)| *e == EngineEvent::Transport { playing: true }), "the solo is a run");
@@ -1086,6 +1103,19 @@ mod tests {
         engine.handle(Command::SetSolo { level: 0, call: false, lead_ms: 20.0 });
         engine.handle(Command::NoteOn { note: 61, velocity: 100 });
         assert!(engine.process(128).iter().any(|t| t.event == EngineEvent::NoteOn { channel: PLAYER_CHANNEL, key: 61, velocity: 100 }));
+    }
+
+    #[test]
+    fn a_solo_judges_the_players_notes_from_level_four() {
+        let (_, events) = solo_over_clicks(4, &[61]);
+        let notes = player_notes(&events);
+        assert_eq!(notes.len(), 12, "the player's notes only: {notes:?}");
+        assert!(notes.iter().all(|n| n.1 == 60), "C sharp snaps to C");
+        assert!(events.iter().any(|(_, e)| matches!(e, EngineEvent::KeysJudged { .. })), "and is judged");
+        let (_, events) = solo_over_clicks(3, &[61]);
+        assert!(player_notes(&events).len() > 12, "level 3 adds fills");
+        assert!(events.iter().any(|(_, e)| *e == EngineEvent::Transport { playing: true }), "a run");
+        assert!(!events.iter().any(|(_, e)| matches!(e, EngineEvent::KeysJudged { .. })), "not judged below level 4");
     }
 
     #[test]

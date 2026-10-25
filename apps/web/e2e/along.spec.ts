@@ -248,8 +248,17 @@ test('play along: a solo driven by tapping one key', async ({ page }) => {
   // Taps aren't timed; the space bar didn't start or stop anything else.
   await expect(page.getByTestId('timing-report')).toHaveCount(0);
 
+  // Level 3: the player's own notes, and how each fits.
+  await page.getByRole('group', { name: 'Solo level' }).getByRole('button', { name: '3', exact: true }).click();
+  await expect(page.getByTestId('solo-level')).toContainText('Your notes, our groove');
+  await expect(page.getByTestId('solo-fit')).toContainText('Your notes show here');
+  await page.keyboard.press('a');
+  await expect(page.getByTestId('solo-fit')).toContainText(/Chord tone|In the scale|Snapped/);
+  await expect(page.getByTestId('solo-fit')).toContainText(/\b1 (chord|scale|snapped)/);
+
   const prefs = await page.evaluate(() => JSON.parse(localStorage.getItem('midzer.prefs') ?? '{}'));
   expect(prefs.alongMode).toBe('solo');
+  expect(prefs.soloLevel).toBe(3);
   expect(errors).toEqual([]);
 });
 

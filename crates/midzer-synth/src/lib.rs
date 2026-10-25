@@ -104,6 +104,9 @@ fn apply(synth: &mut Synthesizer, event: &EngineEvent, kit_sound: bool) {
         EngineEvent::ProgramChange { channel, program } => {
             synth.process_midi_message(channel as i32, 0xC0, program as i32, 0);
         }
+        EngineEvent::Control { channel, controller, value } => {
+            synth.process_midi_message(channel as i32, 0xB0, controller as i32, value as i32);
+        }
         EngineEvent::Transport { playing: false } => synth.note_off_all(false),
         EngineEvent::ChordChanged(_)
         | EngineEvent::Beat { .. }

@@ -2348,6 +2348,38 @@ code {
   transition: width var(--motion-duration-fast);
 }
 
+/* The player's own notes while soloing: chord tones, the scale, outside. */
+.solo-fit {
+  text-align: center;
+}
+
+.solo-fit p {
+  margin: 0;
+}
+
+.solo-fit-last {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.solo-fit .chord {
+  color: var(--color-status-success);
+}
+
+.solo-fit .scale {
+  color: var(--color-accent-default);
+}
+
+.solo-fit .outside {
+  color: var(--color-status-warning);
+}
+
+.solo-fit-counts {
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
 .along-play-head {
   display: flex;
   align-items: baseline;

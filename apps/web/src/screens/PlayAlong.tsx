@@ -12,7 +12,7 @@ import type { ChordNow } from '../playalong/chords';
 import { MISS_SOUND_OPTIONS } from '../playalong/feedback';
 import { ALONG_LEVELS } from '../playalong/levels';
 import { keyName } from '../playalong/scale';
-import { feelWord, homeKey, SOLO_LEVELS } from '../playalong/solo';
+import { feelWord, homeKey, SOLO_LEVELS, type FitCount, type SoloLevel } from '../playalong/solo';
 import { noteToQwerty } from '../qwerty';
 import { NOTE_NAMES } from '@midzer/audio-web';
 import { SYNC_TAPS } from '../playalong/sync';
@@ -205,19 +205,17 @@ function AlongChords({ split }: { split: number }) {
 
 /**
  * Soloing: midzer plays the solo, driven by the player's taps on the lit
- * key. How hard it is driven shows big, so the player sees it follow them.
+ * keys, or fills around the player's own notes. How hard it is driven shows
+ * big, so the player sees it follow them; how the player's own notes fit
+ * shows under it.
  */
 function SoloPlay({ split }: { split: number }) {
   const key = useSession((s) => s.soloKey);
   const feel = useSession((s) => s.soloFeel);
+  const level = useSession((s) => s.soloLevel);
+  const fit = useSession((s) => s.soloFit);
   const locked = useSession((s) => s.liveSource.status === 'on' && s.liveTracker.locked);
-  const home = key ? homeKey(key) : null;
-  const letter = home !== null ? noteToQwerty(home) : undefined;
-  const prompt = !locked
-    ? 'The solo starts once the beat is found.'
-    : home === null
-      ? 'Listening for the song’s key…'
-      : `Tap ${NOTE_NAMES[home % 12]} (the lit key${letter ? `, ${letter.toUpperCase()}` : ''} or the space bar). Faster for more, harder for louder, hold for a long note.`;
+  const prompt = !locked ? 'The solo starts once the beat is found.' : key === null ? 'Listening for the song’s key…' : soloPrompt(level, homeKey(key));
   return (
     <section className="panel along-play solo-play">
       <div className="along-play-head">
@@ -233,9 +231,48 @@ function SoloPlay({ split }: { split: number }) {
         <div className="solo-feel-track" role="meter" aria-label="Feel" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(feel * 100)}>
           <div className="solo-feel-fill" style={{ width: `${Math.round(feel * 100)}%` }} />
         </div>
+        {level >= 3 && <SoloFit fit={fit} snapped={level < 5} />}
       </div>
       <Keyboard split={split} height={150} />
     </section>
+  );
+}
+
+/** What to do at `level`, with the home key `home`. */
+function soloPrompt(level: SoloLevel, home: number): string {
+  const name = (k: number) => NOTE_NAMES[k % 12]!;
+  const letter = (k: number) => noteToQwerty(k)?.toUpperCase();
+  const labelled = (k: number, where: string) => `${name(k)} ${where}${letter(k) ? ` (${letter(k)})` : ''}`;
+  switch (level) {
+    case 1:
+      return `Tap ${name(home)} (the lit key${letter(home) ? `, ${letter(home)}` : ''} or the space bar). Faster for more, harder for louder, hold for a long note.`;
+    case 2:
+      return `Tap ${labelled(home, 'low')}, ${labelled(home + 7, 'middle')} or ${labelled(home + 12, 'high')}. Faster for more, hold for a long note.`;
+    case 3:
+      return 'Play the lit keys; the bright ones fit the chord now. midzer fills the gaps when you leave them.';
+    case 4:
+      return 'Play every note; ones off the scale snap onto it.';
+    case 5:
+      return 'Play freely.';
+  }
+}
+
+/** How the player's own notes fit: chord tones, the scale, or off it. */
+function SoloFit({ fit, snapped }: { fit: FitCount; snapped: boolean }) {
+  const total = fit.chord + fit.scale + fit.outside;
+  const word = { chord: 'Chord tone', scale: 'In the scale', outside: snapped ? 'Snapped' : 'Outside' } as const;
+  return (
+    <div className="solo-fit" data-testid="solo-fit">
+      <p className={`solo-fit-last ${fit.last ?? ''}`}>{fit.last ? word[fit.last] : 'Your notes show here'}</p>
+      {total > 0 && (
+        <p className="solo-fit-counts">
+          <span className="chord">{fit.chord} chord</span> · <span className="scale">{fit.scale} scale</span> ·{' '}
+          <span className="outside">
+            {fit.outside} {snapped ? 'snapped' : 'outside'}
+          </span>
+        </p>
+      )}
+    </div>
   );
 }
 

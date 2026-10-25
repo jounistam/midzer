@@ -59,6 +59,8 @@ pub enum EngineEvent {
     LiveForgot,
     /// How much the solo is driven by the player's taps, 0..=255 (see [`crate::Command::SetSolo`]).
     SoloFeel { energy: u8 },
+    /// A MIDI controller change, such as the solo's vibrato (CC1) on a long note.
+    Control { channel: u8, controller: u8, value: u8 },
 }
 
 /// What the band is doing, for the UI.
@@ -102,6 +104,7 @@ mod op {
     pub const KEYS_JUDGED: u32 = 16;
     pub const LIVE_FORGOT: u32 = 17;
     pub const SOLO_FEEL: u32 = 18;
+    pub const CONTROL: u32 = 19;
 }
 
 const NO_CHORD: u32 = 0xff;
@@ -142,6 +145,9 @@ impl EngineEvent {
             }
             EngineEvent::LiveForgot => [op::LIVE_FORGOT, 0, 0, frame],
             EngineEvent::SoloFeel { energy } => [op::SOLO_FEEL, energy as u32, 0, frame],
+            EngineEvent::Control { channel, controller, value } => {
+                [op::CONTROL, (channel as u32) << 8 | controller as u32, value as u32, frame]
+            }
             EngineEvent::KeysJudged { ms, sixteenth, bar, chord } => {
                 let chord = match chord {
                     None => 0,
@@ -199,6 +205,7 @@ impl EngineEvent {
             op::LIVE => EngineEvent::Live { locked: a & 1 != 0, confidence: byte(a >> 8), level: byte(a >> 16) },
             op::LIVE_FORGOT => EngineEvent::LiveForgot,
             op::SOLO_FEEL => EngineEvent::SoloFeel { energy: byte(a) },
+            op::CONTROL => EngineEvent::Control { channel: byte(a >> 8), controller: byte(a), value: byte(b) },
             op::KEYS_JUDGED => EngineEvent::KeysJudged {
                 ms: f32::from_bits(a),
                 sixteenth: byte(b),
@@ -253,7 +260,7 @@ impl EngineEvent {
     fn order(&self) -> u8 {
         match self {
             EngineEvent::NoteOff { .. } => 0,
-            EngineEvent::ProgramChange { .. } | EngineEvent::Transport { .. } => 1,
+            EngineEvent::ProgramChange { .. } | EngineEvent::Transport { .. } | EngineEvent::Control { .. } => 1,
             _ => 2,
         }
     }
@@ -400,6 +407,7 @@ mod tests {
             EngineEvent::KeysJudged { ms: 3.0, sixteenth: 0, bar: 0, chord: None },
             EngineEvent::LiveForgot,
             EngineEvent::SoloFeel { energy: 201 },
+            EngineEvent::Control { channel: 0, controller: 1, value: 64 },
         ] {
             assert_eq!(EngineEvent::decode(event.encode(42)), Some((event, 42)));
         }

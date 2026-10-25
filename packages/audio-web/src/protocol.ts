@@ -477,7 +477,9 @@ export type EngineEvent =
   /** Live audio went quiet (or `liveReset`) and everything heard was forgotten: the beat, the 1 and the harmony. */
   | { type: 'liveForgot' }
   /** How much the player's taps drive the solo, 0..1. */
-  | { type: 'soloFeel'; energy: number };
+  | { type: 'soloFeel'; energy: number }
+  /** A MIDI controller change, such as the solo's vibrato (CC1) on a long note. */
+  | { type: 'control'; channel: number; controller: number; value: number };
 
 /** An event plus the AudioContext frame at which it sounds. */
 export type TimedEvent = EngineEvent & { frame: number };
@@ -555,6 +557,8 @@ export function decodeEvent(op: number, a: number, b: number, frame: number): Ti
       return { type: 'liveForgot', frame };
     case 18:
       return { type: 'soloFeel', energy: (a & 0xff) / 255, frame };
+    case 19:
+      return { type: 'control', channel: (a >> 8) & 0xff, controller: a & 0xff, value: b & 0xff, frame };
     default:
       return null;
   }

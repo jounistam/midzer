@@ -72,6 +72,13 @@ export function Keyboard({ low = 36, high = 96, split, height = 200 }: KeyboardP
         if (hint === 3 && !held) {
           // Playing along: a key of the chord coming next, to move towards.
           layer.roundRect(k.x + 3, k.y + k.h - 10, k.w - 6, 6, 3).stroke({ color: hex(color.note.chord), width: 1.5, alpha: NOTE_ALPHA });
+        } else if ((hint === 5 || hint === 6) && !held) {
+          // Soloing: the scale's keys marked, the chord's tones lit brighter.
+          const tint = hex(color.note.melody);
+          if (hint === 6) layer.roundRect(k.x, k.y - (k.black ? 4 : 0), k.w, k.h + (k.black ? 4 : 0), k.black ? 3 : 0).fill({ color: tint, alpha: 0.18 });
+          const bar = layer.roundRect(k.x + 3, k.y + k.h - 10, k.w - 6, 6, 3);
+          if (hint === 6) bar.fill({ color: tint, alpha: NOTE_ALPHA });
+          else bar.stroke({ color: tint, width: 1.5, alpha: NOTE_ALPHA });
         } else if (hint && !held) {
           // Learn: the key to play next, in its part's colour.
           const tint = hex(hint === 2 ? color.note.chord : color.note.melody);

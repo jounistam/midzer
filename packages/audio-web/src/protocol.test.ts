@@ -168,6 +168,7 @@ describe('decodeEvent', () => {
     expect(decodeEvent(16, new Uint32Array(new Float32Array([-6.5]).buffer)[0]!, 3 | (2 << 8) | (7 << 16), 4)).toEqual({ type: 'keysJudged', ms: -6.5, sixteenth: 3, bar: 7, chord: false, frame: 4 });
     expect(decodeEvent(16, new Uint32Array(new Float32Array([1]).buffer)[0]!, 0, 4)).toEqual({ type: 'keysJudged', ms: 1, sixteenth: 0, bar: 0, chord: null, frame: 4 });
     expect(decodeEvent(18, 255, 0, 4)).toEqual({ type: 'soloFeel', energy: 1, frame: 4 });
+    expect(decodeEvent(19, (0 << 8) | 1, 64, 4)).toEqual({ type: 'control', channel: 0, controller: 1, value: 64, frame: 4 });
     expect(decodeEvent(17, 0, 0, 4)).toEqual({ type: 'liveForgot', frame: 4 });
   });
 

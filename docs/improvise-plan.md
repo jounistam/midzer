@@ -202,3 +202,69 @@ At level 1 the space bar also plays the lit key, and the lit key shows its QWERT
 - From level 4 on, strikes should be judged again: call `strike_note` and `live.strike` as the normal keys path does. `AlongTiming` already shows the timing at levels ≥ 4.
 - Vibrato needs a new `EngineEvent` (a CC on a channel), handled in `midzer-synth` `render`. Check whether its synth (`midzer-synth/src/lib.rs`, SoundFont-based) has a CC call.
 - New hint values for the scale and chord tones, with drawing in `Keyboard.tsx`, and more `SOLO_LEVELS` entries.
+
+### Slice 2: done (built 2026-10-25, to be committed by the user)
+**Engine (`solo.rs`)**
+- `press` now returns `Pressed`:
+  - `Free` (level 0, so the key plays as usual);
+  - `Drove` (it drives the solo, or a silent key on levels 1–2);
+  - `Played(key)` (the player's own note on levels 3–5, sounding as `key`).
+- New `Solo::judged()` is true from level 4 (`JUDGED_FROM`).
+- Engine routing (`engine.rs` NoteOn while `solo`):
+  - `Played(key)` with `judged()` → `strike_note(key)`. The snapped key is judged, and `live.strike` starts the run itself.
+  - Otherwise, with a grid, `live.play` starts the run as before.
+  - NoteOff still goes to `solo.release`.
+- Level constants: `OWN_NOTES_FROM` = 3, `JUDGED_FROM` = 4, `AS_PLAYED` = 5.
+- **Level 2:** `steer_of(key)` treats a key on the fifth's pitch class as middle (0). A key on the tonic's pitch class is high (+1) from `home()+12` up, otherwise low (−1). Other keys are swallowed.
+  - `steer` moves the ladder's centre by `STEER_LOW` = −5 or `STEER_HIGH` = +7 semitones.
+  - In `pick`, steer sets the direction with 30 % chance.
+  - Level 1 always has steer 0, and `silence` resets it.
+- **Levels 3–5 (`own_note`):**
+  - The note is snapped below level 5. `snap` goes to the nearest scale note; on a tie it takes the up note only if that is a chord tone and the down note isn't, otherwise the down note.
+  - The note sounds at once with the player's velocity.
+  - Before it sounds, midzer's own note ends (`end_note`), so a fill's NoteOff can't cut the player's note.
+  - Maps: `own[key]` is the sounding key (`NONE` = 0xff), `own_count[sounding]` counts how many held keys sound it (NoteOff only when it reaches 0), and `own_held` counts the keys held.
+  - Every own note counts as a tap (`tap()`, shared with levels 1–2), except notes within `CHORD_BEATS` = 0.1 beat, which count as one chord. So the Feel meter works on every level.
+- **Level 3 fills:** the generator runs as on level 1, but `sixteenth` skips while an own note is held and for `FILL_AFTER_BEATS` = 0.5 beat after the last one (`last_own`). `pick` carries on from the player's pitch.
+- **Levels 4–5:** `process` never calls `sixteenth`, so nothing is generated. The energy is still computed and the Feel is still sent.
+- **Vibrato:**
+  - New `EngineEvent::Control { channel, controller, value }` is op 19 (a = channel<<8 | controller, b = value). It sorts with `ProgramChange` (order 1), and `to_midi` ignores it.
+  - `midzer-synth` applies it as `process_midi_message(ch, 0xB0, cc, v)`. rustysynth maps CC1 to vibrato of up to 50 cents.
+  - `vibrato()` runs at the end of `process` while `Long::Sounding`. From `VIBRATO_AFTER_BEATS` = 0.5 beat after `long_from`, it ramps CC1 to `VIBRATO_DEPTH` = 64 over `VIBRATO_BEATS` = 1, in steps of 4 or more.
+  - `unbend()` sends CC1 = 0 from `end_note` and `silence`.
+  - TS mirror: `{ type: 'control', channel, controller, value }` in `protocol.ts`.
+- **Tests:**
+  - New `solo.rs` helpers: `run_keys(solo, beats, &[(frame, hold, key)], &mut controls)` (the old `run_holds` wraps it), `at_level(n)` and `notes_on(key, every, until, hold)`.
+  - New `solo.rs` tests: vibrato, level 2 steering (mean pitch low < middle < high), level 3 snapping and fills in the gaps, level 4 snap only and level 5 as played, and two keys snapped to one note.
+  - `engine.rs` now has the helper `solo_over_clicks(level, keys)` and the test `a_solo_judges_the_players_notes_from_level_four`.
+
+**UI**
+- `playalong/solo.ts`:
+  - all 5 `SOLO_LEVELS`;
+  - hints `TAP_HINT` = 4, `SCALE_HINT` = 5, `CHORD_TONE_HINT` = 6;
+  - `soloHints(level, key, chordBits)`: level 1 lights the home key; level 2 home, +7 and +12; levels 3–4 the pentatonic from home to home+24, chord tones as 6; level 5 nothing;
+  - `noteFit`, `FitCount`, `NO_FIT`, and `SPACE_TAPS_TO` = 2 (the space bar taps home on levels 1–2).
+- `Keyboard.tsx` draws hint 5 as an outlined bar and hint 6 as a filled bar with a light key tint, both in the melody colour.
+- `session.ts`:
+  - module `soloHarmony { scale, chord }` holds the bits last worked out by `sendSoloHarmony` and is reset in `forgetLiveSong`;
+  - `followLiveChords` passes the chord to `soloHints`;
+  - `notifyPlayer` → `countFit(note)` builds the state `soloFit` on levels 3–5 on the along screen with live on. It classifies the note as played, before snapping. It is reset when a run starts and when the level changes.
+- `PlayAlong.tsx`:
+  - `soloPrompt(level, home)` gives the text per level;
+  - `SoloFit` (testid `solo-fit`) shows the last note's fit and the counts, with "snapped" on levels 3–4 and "outside" on 5. CSS is under `.solo-fit*` in `index.css`.
+- e2e: the solo test now also picks level 3, presses `a` and expects the fit readout.
+
+**Checks run:** `cargo test -p midzer-core --lib` (155 tests), `midzer-synth` tests, clippy clean, `pnpm typecheck`, and the web (169) and audio-web unit tests. In e2e the solo test passes. `along.spec.ts:97` fails at line 113 (the tempo shows 119 or 121, not 120), and it fails the same way at HEAD c1850b0, so it is not from this slice.
+
+**Open after slice 2:**
+- Not tried by ear.
+- On level 3 a fill can land on the same sixteenth as the player's next note; the player's note then ends it at once.
+- Level 3–4 hints have no fallback triad when no chord is heard, so only the scale is lit.
+- The fit readout on level 3 counts notes before they are snapped.
+- The blue note is still unused.
+
+### Notes for slice 3 (call and response, keys)
+- `SetSolo.call` already reaches `Solo::set_level`'s caller, but it is ignored: `engine.rs` matches `call: _`. Store it in `Solo`.
+- Calls can reuse `new_beat`/`pick` at a fixed moderate energy (around 0.45). Record the call's onsets (sixteenth `q`) and keys in a fixed array, then compare the answer's taps or own notes with the call within ±1/16.
+- Levels 1–2 answer by tapping: each tap plays the call's next note. Levels 3 and up play the notes themselves: light the next key to play with a new hint, or reuse `TAP_HINT`.
+- New event `SoloCall { phase, hit, of }`: next op 20 for the event and the TS mirror. Show "Listen" / "Your turn" / "4 of 5" in `SoloPlay`.
