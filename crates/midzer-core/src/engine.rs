@@ -38,6 +38,8 @@ pub struct Engine {
     /// Keys the microphone reports as sounding, on [`MIC_CHANNEL`].
     mic_held: [bool; 128],
     instrument: Instrument,
+    /// The General MIDI program on [`PLAYER_CHANNEL`].
+    sound: u8,
     kit: Kit,
     /// Frames until each piece's last hit is released; 0 once it is.
     drum_gate: [u32; Piece::COUNT],
@@ -69,6 +71,7 @@ impl Engine {
             listener: Listener::new(sample_rate),
             mic_held: [false; 128],
             instrument: Instrument::Keys,
+            sound: 0,
             kit: Kit::default(),
             drum_gate: [0; Piece::COUNT],
             gate_frames: (sample_rate * DRUM_GATE_S) as u32,
@@ -119,6 +122,8 @@ impl Engine {
             Command::Play => {
                 self.start_in = None;
                 self.band.play(&mut self.events);
+                // Again after the transport, so a take records the player's sound.
+                self.events.push(0, EngineEvent::ProgramChange { channel: PLAYER_CHANNEL, program: self.sound });
             }
             Command::Stop => {
                 self.start_in = None;
@@ -158,6 +163,10 @@ impl Engine {
             Command::MelodyClear => self.band.clear_melody(),
             Command::MelodyNote { tick, len, key } => self.band.add_melody_note(MelodyNote { tick, len, key }),
             Command::SetMelody { volume } => self.band.set_melody_volume(volume, &mut self.events),
+            Command::SetSound { program } => {
+                self.sound = program;
+                self.events.push(0, EngineEvent::ProgramChange { channel: PLAYER_CHANNEL, program });
+            }
             Command::SetListen { mode, gate_db } => {
                 let mut heard = HeardList::default();
                 self.listener.set_gate(gate_db);
@@ -582,6 +591,19 @@ mod tests {
         let events = run_drums(&mut engine, 9_600);
         assert_eq!(events, vec![(0, true, 38), (4_800, false, 38)]);
         assert!(chord_events(engine.process(128)).is_empty());
+    }
+
+    #[test]
+    fn the_players_sound_changes_now_and_starts_each_take() {
+        let mut engine = Engine::new(48_000.0);
+        engine.handle(Command::SetSound { program: 89 });
+        let sound = EngineEvent::ProgramChange { channel: PLAYER_CHANNEL, program: 89 };
+        assert!(engine.process(128).iter().any(|t| t.event == sound));
+        engine.end_block();
+        engine.handle(Command::Play);
+        let events: Vec<_> = engine.process(128).iter().map(|t| t.event).collect();
+        let transport = events.iter().position(|e| *e == EngineEvent::Transport { playing: true }).unwrap();
+        assert!(events[transport..].contains(&sound), "after the transport, where a take starts");
     }
 
     #[test]

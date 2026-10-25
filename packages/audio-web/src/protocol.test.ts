@@ -87,6 +87,7 @@ describe('encodeCommand', () => {
     expect(encodeCommand({ type: 'melodyClear' })).toEqual([49, 0, 0, 0]);
     expect(encodeCommand({ type: 'melodyNote', tick: 960.2, len: 240, key: 72 })).toEqual([50, 960, 240, 72]);
     expect(new Float32Array(new Uint32Array([encodeCommand({ type: 'setMelody', volume: 2 })[1]!]).buffer)[0]).toBe(1);
+    expect(encodeCommand({ type: 'setSound', program: 89 })).toEqual([52, 89, 0, 0]);
   });
 
   it('knows each piece by its General MIDI key', () => {

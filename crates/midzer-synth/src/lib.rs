@@ -17,12 +17,14 @@ pub struct Synth {
     gain: f32,
     /// Whether the player's drum hits sound; an e-kit's module usually plays them.
     kit_sound: bool,
+    /// Each channel's last program, kept across a SoundFont load.
+    programs: [u8; 16],
     inner: Option<Synthesizer>,
 }
 
 impl Synth {
     pub fn new(sample_rate: f32) -> Self {
-        Self { sample_rate: sample_rate as i32, gain: DEFAULT_GAIN, kit_sound: false, inner: None }
+        Self { sample_rate: sample_rate as i32, gain: DEFAULT_GAIN, kit_sound: false, programs: [0; 16], inner: None }
     }
 
     pub fn is_loaded(&self) -> bool {
@@ -38,6 +40,11 @@ impl Synth {
         settings.maximum_polyphony = POLYPHONY;
         let mut synth = Synthesizer::new(&Arc::new(font), &settings).map_err(|e| format!("{e:?}"))?;
         synth.set_master_volume(self.gain);
+        for (channel, &program) in self.programs.iter().enumerate() {
+            if program != 0 {
+                synth.process_midi_message(channel as i32, 0xC0, program as i32, 0);
+            }
+        }
         self.inner = Some(synth);
         Ok(())
     }
@@ -56,6 +63,11 @@ impl Synth {
     /// Renders one block, applying each event at its frame. Silent until a
     /// SoundFont is loaded.
     pub fn render(&mut self, events: &[Timed], left: &mut [f32], right: &mut [f32]) {
+        for timed in events {
+            if let EngineEvent::ProgramChange { channel, program } = timed.event {
+                self.programs[channel as usize & 15] = program;
+            }
+        }
         let Some(synth) = &mut self.inner else {
             left.fill(0.0);
             right.fill(0.0);
@@ -162,6 +174,27 @@ mod tests {
             assert!(loudest <= 1.0, "channel {channel} clipping: {loudest}");
             synth.render(&[Timed { frame: 0, event: EngineEvent::NoteOff { channel, key } }], &mut l, &mut r);
         }
+    }
+
+    #[test]
+    fn programs_chosen_before_loading_still_apply() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(SOUNDFONT);
+        let Ok(bytes) = std::fs::read(&path) else { return };
+        // A slow pad swells; the piano is loudest right away.
+        let early = |program: Option<u8>| {
+            let mut synth = Synth::new(SR);
+            let (mut l, mut r) = (vec![0.0; 128], vec![0.0; 128]);
+            if let Some(program) = program {
+                synth.render(&[Timed { frame: 0, event: EngineEvent::ProgramChange { channel: 0, program } }], &mut l, &mut r);
+            }
+            synth.load_soundfont(&bytes).unwrap();
+            synth.render(&[Timed { frame: 0, event: EngineEvent::NoteOn { channel: 0, key: 60, velocity: 110 } }], &mut l, &mut r);
+            (0..8).fold(0.0f32, |m, _| {
+                synth.render(&[], &mut l, &mut r);
+                m.max(peak(&l))
+            })
+        };
+        assert!(early(Some(89)) < early(None) / 2.0);
     }
 
     #[test]

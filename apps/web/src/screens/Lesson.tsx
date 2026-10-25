@@ -1,6 +1,6 @@
 import { chordTones } from '@midzer/audio-web';
 import { useEffect, useState } from 'react';
-import { BandMutes, PlayButton } from '../components/ControlPanel';
+import { BandMutes, PlayButton, SoundPicker } from '../components/ControlPanel';
 import { Keyboard } from '../components/Keyboard';
 import { NoteLanes } from '../components/NoteLanes';
 import { Stars } from '../components/Stars';
@@ -62,6 +62,7 @@ export function Lesson() {
         <aside className="panel control-panel">
           <PlayButton className="full" />
           <PracticeOptions />
+          <SoundPicker />
           {song.melody && song.melody.length > 0 && <MelodyVolume />}
           <LoopPicker bars={song.bars.length} />
           <BandMutes />

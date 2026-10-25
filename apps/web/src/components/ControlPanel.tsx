@@ -3,12 +3,14 @@ import type { CSSProperties } from 'react';
 import { padState } from './bandStatus';
 import { BpmInput } from './BpmInput';
 import { pickProgression, progressionsFor } from '../drums/progressions';
+import { SOUND_GROUPS } from '../sounds';
 import {
   BAND_DRUMS_OPTIONS,
   requestSection,
   saveTake,
   setBandDrums,
   setProgression,
+  setSound,
   setEnergy,
   setFollow,
   setTempo,
@@ -201,6 +203,29 @@ export function ProgressionPicker() {
   );
 }
 
+/** The sound the player's keys play; drummers play the kit instead. */
+export function SoundPicker() {
+  const sound = useSession((s) => s.sound);
+  const drums = useSession((s) => s.instrument === 'drums');
+  if (drums) return null;
+  return (
+    <label className="control-group">
+      <span className="label">Your sound</span>
+      <select value={sound} onChange={(e) => setSound(Number(e.target.value))} aria-label="Your sound">
+        {SOUND_GROUPS.map((g) => (
+          <optgroup key={g.name} label={g.name}>
+            {g.sounds.map((s) => (
+              <option key={s.program} value={s.program}>
+                {s.name}
+              </option>
+            ))}
+          </optgroup>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 /** What the band's own drums play while the player drums. */
 export function BandDrumsControl() {
   const mode = useSession((s) => s.bandDrums);
@@ -224,7 +249,7 @@ export function ControlPanel({ drummer = false }: { drummer?: boolean }) {
   return (
     <aside className="panel control-panel">
       <PlayButton className="full" />
-      {drummer && <ProgressionPicker />}
+      {drummer ? <ProgressionPicker /> : <SoundPicker />}
       <SectionPads />
       {drummer && <BandDrumsControl />}
       <EnergyControl />

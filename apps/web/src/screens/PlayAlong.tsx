@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { LiveDevice } from '@midzer/audio-web';
 import { ChordLanes } from '../components/ChordLanes';
 import { ChordSheet } from '../components/ChordSheet';
-import { PlayButton } from '../components/ControlPanel';
+import { PlayButton, SoundPicker } from '../components/ControlPanel';
 import { HitFeedback } from '../components/HitFeedback';
 import { Keyboard } from '../components/Keyboard';
 import { KitView } from '../components/KitView';
@@ -66,6 +66,7 @@ export function PlayAlong() {
           <SourcePicker />
           <PlayButton className="full" />
           <InstrumentPicker />
+          <SoundPicker />
           {!drums && <LevelPicker />}
           <BeatFixes />
           <SyncControl />

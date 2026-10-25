@@ -187,6 +187,8 @@
   - Tempo is typed: the BPM in the tempo control and the song editor's Tempo field are inputs (`components/BpmInput.tsx`); a tempo in range applies as typed, leaving the field clamps.
   - Learn plays the song's tune under the band (`melody.rs`: `MelodyClear`/`MelodyNote`/`SetMelody`, channel 4, GM flute), in song ticks, so it waits and loops with the band. "Hear the melody" sets how loud (0 is off, default 40 %), kept in prefs; only on the Learn screen.
   - Open: the melody's sound and default level not tried by ear; a follow lost and found again moves the tempo shown back to the tracker's for a moment.
+- **More sounds** (2026-10-25): the player's keys can play 33 sounds besides the grand piano (`apps/web/src/sounds.ts`: keys, organ, strings and choir, pads, synths, more), all General MIDI programs from GeneralUser GS. A "Your sound" picker on Jam, Play along, song screens and Learn for keys players; kept in prefs. `SetSound { program }` makes a program change on the player's channel, sent again after Play so a take records it; the synth keeps each channel's program across a SoundFont load.
+  - Open: not tried by ear; a MIDI keyboard's own program buttons don't pick the sound yet; the sustain pedal still doesn't reach the synth.
 - **Next: fine-tuning the existing features** (decided 2026-10-22), starting with a hands-on pass of M7–M8 (a real e-kit, real songs from a tab and the system's output, the desktop app). M9 mobile waits until then. The "Open from …" lists below are the backlog.
 - Open from M8b:
   - Tuned on 25 real songs in the fine-tuning round (see above), not with an e-kit. Octave errors are expected on some songs; the half/twice buttons are the fix.

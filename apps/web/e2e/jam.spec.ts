@@ -61,6 +61,12 @@ test('first run: onboarding to a band that follows a chord', async ({ page }) =>
   await expect(sectionLine).toHaveText(/^Funk · /, { timeout: 6_000 });
   for (const key of ['s', 'f', 'h']) await page.keyboard.up(key);
 
+  // Your keys can play other sounds; the choice is remembered.
+  await page.getByLabel('Your sound').selectOption({ label: 'Warm pad' });
+  for (const key of ['a', 'd', 'g']) await page.keyboard.down(key);
+  await page.waitForTimeout(300);
+  for (const key of ['a', 'd', 'g']) await page.keyboard.up(key);
+
   // The ending plays one bar, then the band stops by itself.
   await page.getByRole('button', { name: 'Ending' }).click();
   await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible({ timeout: 10_000 });
@@ -79,6 +85,10 @@ test('first run: onboarding to a band that follows a chord', async ({ page }) =>
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByText(/Calibrated: /)).toBeVisible();
   }
+
+  await page.reload();
+  await page.getByRole('button', { name: 'Jam' }).click();
+  await expect(page.getByLabel('Your sound')).toHaveValue('89');
 
   expect(errors).toEqual([]);
 });

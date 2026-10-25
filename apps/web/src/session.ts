@@ -58,6 +58,7 @@ import type { JudgedHit } from './drums/judging';
 import { COUNT_IN_OPTIONS, countInPieces, type CountInChoice } from './drums/stage';
 import { offsetToBeat, SYNC_TAPS, syncedOffset } from './playalong/sync';
 import { qwertyToNote } from './qwerty';
+import { parseSound } from './sounds';
 import { isBuiltin, loadUserSongs, saveUserSong } from './songs/library';
 import { captureFate, LiveIds, liveLibrarySong } from './songs/liveLibrary';
 import { analyzeAudio, analyzeCapture, decodeRecording } from './songs/analyzeAudio';
@@ -245,6 +246,8 @@ interface SessionState {
   missSound: MissSound;
   /** How loud the song's tune plays under the band in Learn, 0 (not at all) to 1. */
   melodyVolume: number;
+  /** The General MIDI program the player's keys sound with. */
+  sound: number;
 }
 
 export const BAND_DRUMS_OPTIONS: { mode: BandDrums; label: string }[] = [
@@ -297,6 +300,8 @@ interface Prefs {
   missSound: MissSound;
   alongLevel: AlongLevel;
   melodyVolume: number;
+  /** The General MIDI program the player's keys sound with. */
+  sound: number;
 }
 
 function readPrefs(): Prefs {
@@ -320,6 +325,7 @@ function readPrefs(): Prefs {
     missSound: 'soft',
     alongLevel: parseLevel(undefined),
     melodyVolume: 0.4,
+    sound: 0,
   };
   try {
     const saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Partial<Prefs>;
@@ -344,17 +350,18 @@ function readPrefs(): Prefs {
     const missSound = MISS_SOUND_OPTIONS.some((o) => o.value === saved.missSound) ? saved.missSound! : defaults.missSound;
     const alongLevel = parseLevel(saved.alongLevel);
     const melodyVolume = typeof saved.melodyVolume === 'number' ? Math.min(1, Math.max(0, saved.melodyVolume)) : defaults.melodyVolume;
-    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, melodyVolume };
+    const sound = parseSound(saved.sound);
+    return { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, melodyVolume, sound };
   } catch {
     return defaults;
   }
 }
 
 function savePrefs(): void {
-  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, melodyVolume } = get();
+  const { idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, melodyVolume, sound } = get();
   // With a song open the style belongs to the song; keep the Jam one.
   const style = get().song ? readPrefs().style : get().style;
-  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, melodyVolume };
+  const prefs: Prefs = { style, idleMode, tapOffsetMs, micGateDb, headphones, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, progression, playRecording, recordingDrums, liveOffsets, missSound, alongLevel, melodyVolume, sound };
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch {
@@ -435,6 +442,7 @@ export const useSession = create<SessionState>(() => ({
   liveOffsets: prefs.liveOffsets,
   missSound: prefs.missSound,
   melodyVolume: prefs.melodyVolume,
+  sound: prefs.sound,
   liveSyncTaps: null,
   liveSyncError: null,
 }));
@@ -496,10 +504,11 @@ export async function startAudio(): Promise<void> {
     engine.onLiveChords(onLiveChords);
     engine.onLiveSong(onLiveSong);
     engine.onLiveFollow(onLiveFollow);
-    const { bpm, volume, split, muted, style, idleMode, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers } = get();
+    const { bpm, volume, split, muted, style, idleMode, tempoFollow, instrument, kit, kitSound, countIn, bandDrums, kitTriggers, sound } = get();
     set({ outputLatencyMs: engine.outputLatencyMs });
     engine.send({ type: 'setBandDrums', mode: bandDrums });
     engine.send({ type: 'setInstrument', instrument });
+    engine.send({ type: 'setSound', program: sound });
     for (const cmd of kitCommands(kitMap(kit))) engine.send(cmd);
     for (const cmd of triggerCommands(kitTriggers)) engine.send(cmd);
     engine.send({ type: 'setKitSound', on: kitSound });
@@ -925,6 +934,13 @@ export function setKit(kit: KitSetup): void {
   set({ kit });
   savePrefs();
   for (const cmd of kitCommands(kitMap(kit))) send(cmd);
+}
+
+/** The sound the player's keys play. */
+export function setSound(program: number): void {
+  set({ sound: program });
+  savePrefs();
+  send({ type: 'setSound', program });
 }
 
 export function setKitSound(on: boolean): void {

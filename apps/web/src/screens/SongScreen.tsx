@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { BpmInput } from '../components/BpmInput';
 import { ChartView, type Selection } from '../components/ChartView';
 import { ChordSheet } from '../components/ChordSheet';
-import { BandMutes, EnergyControl, PlayButton, TakeButton, TempoControl } from '../components/ControlPanel';
+import { BandMutes, EnergyControl, PlayButton, SoundPicker, TakeButton, TempoControl } from '../components/ControlPanel';
 import { Keyboard } from '../components/Keyboard';
 import { KitView } from '../components/KitView';
 import { TimingBar } from '../components/DrummerStage';
@@ -95,6 +95,7 @@ export function SongScreen() {
         </div>
         <aside className="panel control-panel">
           <PlayButton className="full" />
+          <SoundPicker />
           {song.backing && <RecordingControl />}
           {song.backing && !isBuiltin(song) && <AnalyseAgain fixed={!!song.fixes} />}
           {recording && <MissSoundControl />}

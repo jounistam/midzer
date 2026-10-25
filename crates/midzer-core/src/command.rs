@@ -116,6 +116,8 @@ pub enum Command {
     MelodyNote { tick: u32, len: u32, key: u8 },
     /// How loud the tune plays under the band, 0 (not at all) to 1.
     SetMelody { volume: f32 },
+    /// The General MIDI program the player's keys sound with.
+    SetSound { program: u8 },
 }
 
 mod op {
@@ -170,6 +172,7 @@ mod op {
     pub const MELODY_CLEAR: u32 = 49;
     pub const MELODY_NOTE: u32 = 50;
     pub const SET_MELODY: u32 = 51;
+    pub const SET_SOUND: u32 = 52;
 }
 
 /// MIDI channel 10, where e-kits and drum pads send.
@@ -306,6 +309,7 @@ impl Command {
             Command::MelodyClear => [op::MELODY_CLEAR, 0, 0, 0],
             Command::MelodyNote { tick, len, key } => [op::MELODY_NOTE, tick, len, key as u32],
             Command::SetMelody { volume } => [op::SET_MELODY, volume.to_bits(), 0, 0],
+            Command::SetSound { program } => [op::SET_SOUND, program as u32, 0, 0],
             Command::LiveGuide { frame, period, one, confidence, known } => [op::LIVE_GUIDE, frame, period.to_bits(), one.map_or(0, |o| o as u32 + 1) | (confidence as u32) << 8 | (known as u32) << 16],
         }
     }
@@ -401,6 +405,7 @@ impl Command {
             op::MELODY_CLEAR => Some(Command::MelodyClear),
             op::MELODY_NOTE => Some(Command::MelodyNote { tick: a, len: b, key: midi(c)? }),
             op::SET_MELODY => Some(Command::SetMelody { volume: float(a).filter(|v| (0.0..=1.0).contains(v))? }),
+            op::SET_SOUND => Some(Command::SetSound { program: midi(a)? }),
             op::LIVE_GUIDE => Some(Command::LiveGuide {
                 frame: a,
                 period: float(b).filter(|p| *p > 0.0)?,
@@ -493,6 +498,7 @@ mod tests {
             Command::MelodyClear,
             Command::MelodyNote { tick: 1_000_000, len: 240, key: 72 },
             Command::SetMelody { volume: 0.4 },
+            Command::SetSound { program: 89 },
         ] {
             assert_eq!(Command::decode(cmd.encode()), Some(cmd));
         }
